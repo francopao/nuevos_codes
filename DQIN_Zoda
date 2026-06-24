@@ -1,0 +1,106 @@
+Entendido. La lógica simplificada: siempre concatenar **todo** lo que viene del QEST (sin preocuparse de cortes por fecha), y deduplicar por `Fecha` + `Dato` al final para no repetir filas ya existentes en la BD.
+
+Reemplazo quirúrgico solo de `actualizar_DQ_IN` y `_parsear_qest_robusto` (que ahora se integra dentro), sin tocar nada más:
+
+```python
+# ==============================================================================
+# SECCIÓN 4: ACTUALIZACIÓN DE DQ_IN
+# ==============================================================================
+
+def actualizar_DQ_IN(df_qest: pd.DataFrame,
+                     dq_in_bd: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replica exactamente la función DQ_IN del notebook original,
+    pero siempre trae TODO el contenido del QEST hasta la fecha más reciente
+    disponible, sin depender de una fecha de corte externa.
+
+    Mejoras frente a la versión anterior:
+    - No busca la "última fecha registrada" para calcular un índice de corte.
+    - Parsea el QEST de forma robusta frente a filas de longitud irregular:
+      openpyxl rellena con NaN las celdas faltantes al transponer, lo que
+      es correcto — cada fila solo tiene dato hasta donde existía contenido.
+    - Deduplica por (Fecha, Dato) al final para no duplicar filas que ya
+      existen en dq_in_bd.
+    - La estructura de extracción (drop primeras 10 filas, transponer,
+      filtrar LISTA_IN, re-transponer) es idéntica al notebook original.
+    """
+    LISTA_IN = [
+        "Fondo", "Dato", "Fecha", "SBS",
+        "302012200001", "300013200002", "300013200001", "300011100001",
+        "300009100001", "302002100001", "302051100001", "312051100001",
+        "3220512Q1094", "302029100001", "3220082A1040", "302008100002",
+        "302072200001", "302845100002", "395833228291", "312039100001",
+        "302043100001", "302043100002", "302032100002", "302030100001",
+        "302061100001", "302011100001", "312011100001", "302107100001",
+        "3021012171A1", "345874294721", "312025100001", "312034100001",
+        "312026100001", "3020836W5029", "3220292P2083",
+    ]
+
+    # ── Parseo robusto del QEST (idéntico al notebook, tolerante a filas irregulares) ──
+    # Eliminar las primeras 10 filas de metadatos y transponer
+    df = df_qest.drop(df_qest.index[list(range(0, 10))])
+    df = df.transpose()
+    df = df.rename(columns={df.columns[0]: "Isins"})
+
+    # Filtrar solo las filas de interés y re-transponer
+    filtrada = df[df["Isins"].isin(LISTA_IN)].transpose()
+    filtrada.columns = filtrada.iloc[0].tolist()
+    filtrada = filtrada[1:]
+
+    # Filtrar por Dato (igual que el notebook original)
+    filtrada = filtrada[
+        filtrada["Dato"].astype(str).str.contains(r"Q|PxQ", na=False)
+    ].reset_index(drop=True)
+
+    # Normalizar Fecha para deduplicación
+    filtrada["Fecha"] = pd.to_datetime(filtrada["Fecha"], dayfirst=True, errors="coerce")
+
+    fecha_min = filtrada["Fecha"].dropna().min()
+    fecha_max = filtrada["Fecha"].dropna().max()
+    print(f"  → QEST contiene {len(filtrada)} filas "
+          f"({fecha_min.date() if pd.notna(fecha_min) else '?'} "
+          f"→ {fecha_max.date() if pd.notna(fecha_max) else '?'})")
+
+    # ── Concatenar con la BD histórica y deduplicar ────────────────────────
+    # Se une todo y se eliminan filas duplicadas exactas por (Fecha, Dato).
+    # Las filas del QEST más recientes que la BD simplemente se agregan;
+    # las que ya existían se descartan sin error.
+    combinado = pd.concat([dq_in_bd, filtrada], ignore_index=True)
+
+    if "Fecha" in combinado.columns and "Dato" in combinado.columns:
+        antes = len(combinado)
+        combinado = combinado.drop_duplicates(
+            subset=["Fecha", "Dato"], keep="first"
+        ).reset_index(drop=True)
+        nuevas = antes - len(combinado)
+        print(f"  → {nuevas} fila(s) duplicadas removidas. "
+              f"Total final: {len(combinado)} filas.")
+    else:
+        print("  ⚠ No se pudo deduplicar: columnas 'Fecha' o 'Dato' no encontradas.")
+
+    return combinado
+```
+
+Y en `main()`, el **PASO 2** queda igual que siempre — sin ningún cambio:
+
+```python
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 2: Actualizar DQ_IN
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[2/9] Actualizando base DQ_IN...")
+    dq_in_bd = leer_hoja_excel(RUTA_ZODA, "DQ_IN", con_encabezado=True)
+    df_qest  = leer_hoja_excel(RUTA_QEST, "DQ_IN")
+    base_dq_in = actualizar_DQ_IN(df_qest, dq_in_bd)
+    base_dq_in = base_dq_in.reset_index(drop=True)
+    base_dq_in.loc[3:, "Fecha"] = pd.to_datetime(
+        base_dq_in.loc[3:, "Fecha"], dayfirst=True, errors="coerce"
+    )
+```
+
+---
+
+**Lo que cambió y por qué:**
+
+La búsqueda del índice de corte (`indice_inicio = fechas_norm.index(ultima_norm) + 9`) desaparece por completo. Era frágil porque dependía de que la longitud de cada fila fuera constante (el `+9` hardcodeado asumía exactamente 9 columnas de metadatos antes de los datos reales), lo que rompe con filas irregulares.
+
+En su lugar, el QEST se extrae completo siguiendo exactamente la misma estructura del notebook (drop 10 filas → transpose → filtrar `LISTA_IN` → re-transponer → filtrar por `Dato`), y al final `drop_duplicates(subset=["Fecha", "Dato"], keep="first")` se encarga de que las filas que ya estaban en `dq_in_bd` no se dupliquen. Filas nuevas pasan directo; filas repetidas se descartan silenciosamente.
