@@ -1,0 +1,555 @@
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from datetime import datetime
+import os
+import re
+import time
+import urllib.parse
+
+import win32com.client as win32
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS REUTILIZABLES
+# ─────────────────────────────────────────────────────────────────────────────
+RUTA_LOGO = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\logo_correo_integra.png"
+
+FIRMA_HTML = """
+<br>
+<p style="font-family: Calibri, Arial, sans-serif;">
+<span style="color:#1F4E79; font-weight:bold;">Franco Olivares</span><br>
+<span style="color:#595959;">
+Practicante de Inversiones<br>
+AFP Integra<br>
+Av. Canaval y Moreyra 522 Piso 6 | Lima, Perú
+</span><br>
+<span style="color:#0563C1;">franco.olivares@sura.pe</span>
+<br><br>
+<span style="color:#0563C1;">www.afpintegra.pe</span>
+</p>
+<img src="cid:logo_integra">
+"""
+
+
+def enviar_outlook(asunto, cuerpo_interno_html,
+                   to="franco.olivares@sura.pe",
+                   cc="franco.olivares@sura.pe",
+                   ruta_logo=RUTA_LOGO):
+    """Envía correo HTML por Outlook (sin SMTP / sin contraseñas)."""
+    cuerpo = f"""
+    <html>
+    <body style="font-family: Calibri, Arial, sans-serif; color:#333;">
+    {cuerpo_interno_html}
+    {FIRMA_HTML}
+    </body>
+    </html>
+    """
+    outlook = win32.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)
+    mail.To = to
+    mail.CC = cc
+    mail.Subject = asunto
+    mail.HTMLBody = cuerpo
+
+    if ruta_logo and os.path.exists(ruta_logo):
+        attachment = mail.Attachments.Add(ruta_logo)
+        attachment.PropertyAccessor.SetProperty(
+            "http://schemas.microsoft.com/mapi/proptag/0x3712001F",
+            "logo_integra"
+        )
+
+    mail.Send()
+    print("✅ Correo enviado correctamente")
+
+
+def detectar_cambios(df_nuevo, df_viejo, nombre_fuente):
+    """
+    Comparador blindado de cambios.
+    Devuelve un DataFrame con SOLO las filas nuevas (no presentes en histórico).
+    Maneja: histórico None/vacío, columnas 'Unnamed', y cero columnas comunes.
+    """
+    if df_nuevo is None or df_nuevo.empty:
+        return pd.DataFrame()
+
+    if df_viejo is None or df_viejo.empty:
+        df_nuevas = df_nuevo.copy()
+    else:
+        # Ignorar columnas basura tipo "Unnamed: 0" del histórico
+        df_viejo = df_viejo.loc[:, ~df_viejo.columns.str.startswith("Unnamed")]
+
+        columnas_comunes = list(set(df_nuevo.columns).intersection(set(df_viejo.columns)))
+
+        if not columnas_comunes:
+            print(f"⚠️ {nombre_fuente}: histórico sin columnas compatibles → se trata todo como nuevo")
+            df_nuevas = df_nuevo.copy()
+        else:
+            df_nuevo_sub = df_nuevo[columnas_comunes].astype(str)
+            df_viejo_sub = df_viejo[columnas_comunes].astype(str)
+            df_nuevas = df_nuevo_sub.merge(
+                df_viejo_sub,
+                how="outer",
+                on=columnas_comunes,   # cruce explícito
+                indicator=True
+            )
+            df_nuevas = df_nuevas[df_nuevas["_merge"] == "left_only"].drop(columns="_merge")
+
+    if not df_nuevas.empty:
+        df_nuevas = df_nuevas.copy()
+        df_nuevas["fuente"] = nombre_fuente
+        print(f"\n🚨 ALERTA {nombre_fuente}: {len(df_nuevas)} nuevo(s)")
+        print(df_nuevas)
+    else:
+        print(f"\n✅ {nombre_fuente}: sin cambios")
+
+    return df_nuevas
+
+
+headers = {"User-Agent": "Mozilla/5.0"}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1) MINING
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ----- BOLETÍN ESTADÍSTICO MINERO -----
+url = "https://www.gob.pe/institucion/minem/colecciones/6-boletin-estadistico-minero"
+response = requests.get(url, headers=headers)
+response.raise_for_status()
+soup = BeautifulSoup(response.text, "html.parser")
+
+container = soup.find("div", class_="w-full js-official-documents-search-results")
+items = container.find_all("div", class_="col-md-6 py-2")
+
+datos = []
+for item in items:
+    card = item.find("div", class_="p-4 shadow-campaign-card border-b-5 border-black h-full flex flex-col justify-between")
+
+    fecha = card.find("div", class_="border-b border-gray-700 pb-2 font-medium mb-3")
+    fecha_text = fecha.get_text(strip=True) if fecha else None
+
+    a_tag = card.find("a", class_="leading-6 font-bold underline")
+    titulo = a_tag.get_text(strip=True) if a_tag else None
+    link = "https://www.gob.pe" + a_tag["href"] if a_tag else None
+
+    descripcion = None
+    textos = card.find_all(text=True, recursive=False)
+    if textos:
+        descripcion = " ".join(t.strip() for t in textos if t.strip())
+
+    formatos = card.find("div", class_="mt-3 leading-5 text-sm")
+    formatos_text = formatos.get_text(strip=True) if formatos else None
+
+    datos.append({
+        "fecha": fecha_text,
+        "titulo": titulo,
+        "link": link,
+        "descripcion": descripcion,
+        "formatos": formatos_text
+    })
+
+df2 = pd.DataFrame(datos)
+df2 = df2[["fecha", "descripcion"]].dropna().reset_index(drop=True)
+print(df2)
+
+# ----- PRODUCCIÓN MINERA -----
+url = "https://www.gob.pe/institucion/minem/informes-publicaciones/5472883-produccion-minera"
+resp = requests.get(url, headers=headers)
+resp.raise_for_status()
+soup = BeautifulSoup(resp.text, "html.parser")
+
+container = soup.find("div", class_="js-search-results")
+cards = container.find_all("div", class_="shadow-campaign-card flex-col border-1 border-blue-300")
+
+data22 = []
+for card in cards:
+    h3 = card.find("h3", class_="text-base font-bold mb-4")
+    link_tag = card.find("a", class_="track-ga-click")
+    periodo = h3.get_text(strip=True) if h3 else None
+    link = link_tag["href"] if link_tag else None
+    data22.append({"fecha": periodo, "link": link})
+
+df1 = pd.DataFrame(data22)
+print(df1)
+
+# ----- INVERSIÓN MINERA -----
+url = "https://www.gob.pe/institucion/minem/informes-publicaciones/3614950-inversion-minera"
+resp = requests.get(url, headers=headers)
+resp.raise_for_status()
+soup = BeautifulSoup(resp.text, "html.parser")
+
+container = soup.find("div", class_="js-search-results")
+cards = container.find_all("div", class_="shadow-campaign-card flex-col border-1 border-blue-300")
+
+data = []
+for card in cards:
+    h3 = card.find("h3", class_="text-base font-bold mb-4")
+    titulo = h3.get_text(strip=True) if h3 else None
+
+    download_btn = card.find("a", class_="btn btn--secondary download underline")
+    link_fallback = card.find("a", class_="track-ga-click underline")
+
+    link = None
+    if download_btn and download_btn.has_attr("href"):
+        link = download_btn["href"]
+    elif link_fallback and link_fallback.has_attr("href"):
+        link = link_fallback["href"]
+
+    data.append({"fecha": titulo, "link": link})
+
+df = pd.DataFrame(data).dropna(subset=["fecha"]).reset_index(drop=True)
+print(df)
+
+Mining = {"Inversion": df, "produccion": df1, "boletin": df2}
+
+for nombre, df_temp in Mining.items():
+    print(f"\n--- {nombre} ---")
+    print(df_temp["fecha"] if "fecha" in df_temp.columns else "Sin columna 'fecha'")
+
+ruta_f = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Alerta BD\Mining Alert.xlsx"
+
+excel_anterior = pd.read_excel(ruta_f, sheet_name=None)
+
+lista_alertas = []
+for key, df_nuevo in Mining.items():
+    df_nuevas = detectar_cambios(df_nuevo, excel_anterior.get(key), key)
+    if not df_nuevas.empty:
+        lista_alertas.append(df_nuevas)
+
+if lista_alertas:
+    df_consolidado = pd.concat(lista_alertas, ignore_index=True)
+    df_consolidado.to_excel(
+        r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Alerta BD\Nuevos Registros.xlsx",
+        index=False
+    )
+
+map_nombres = {
+    "Inversion": "Inversión Minera",
+    "produccion": "Producción Minera",
+    "boletin": "Boletín Estadístico Minero"
+}
+
+if lista_alertas:
+    fuentes_alerta = set()
+    for df_alerta in lista_alertas:
+        fuentes_alerta.update(df_alerta["fuente"].unique())
+    fuentes_legibles = [map_nombres.get(f, f) for f in fuentes_alerta]
+
+    cuerpo = "<p>Se detectaron actualizaciones en las siguientes fuentes utilizadas en el <b>Reporte BU de Mining</b>:</p>"
+    for f in fuentes_legibles:
+        cuerpo += f"• {f}<br>"
+    cuerpo += "<p>Por favor revisar e incorporar en los insumos del modelo.</p>"
+
+    enviar_outlook(
+        "🚨 ACTUALIZAR BASE DE DATOS - MINING",
+        cuerpo,
+        to="franco.olivares@sura.pe; rodrigo.murrieta@sura.pe"
+    )
+else:
+    print("✅ No hubo cambios, no se envió correo")
+
+with pd.ExcelWriter(ruta_f, engine="openpyxl") as writer:
+    for key, df_temp in Mining.items():
+        df_temp.to_excel(writer, sheet_name=key, index=False)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2) FINANCIALS (SBS)
+# ═════════════════════════════════════════════════════════════════════════════
+
+ruta_f2 = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Alerta BD\Financial Alert.xlsx"
+
+indicadores = {"B-2201": "EGP", "B-2401": "Indicadores", "B-2309": "Creditos"}
+
+meses = [
+    ("di", "Diciembre"), ("no", "Noviembre"), ("oc", "Octubre"),
+    ("se", "Setiembre"), ("ag", "Agosto"), ("jl", "Julio"),
+    ("jn", "Junio"), ("my", "Mayo"), ("abr", "Abril"),
+    ("ma", "Marzo"), ("fe", "Febrero"), ("en", "Enero"),
+]
+
+
+def existe_url(url):
+    try:
+        r = requests.head(url, headers=headers, timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
+
+def encontrar_ultimo(indicador):
+    current_year = datetime.now().year
+    for anio in range(current_year, current_year - 5, -1):
+        for cod_mes, nombre_mes in meses:
+            archivo = f"{indicador}-{cod_mes}{anio}.XLS"
+            url = f"https://intranet2.sbs.gob.pe/estadistica/financiera/{anio}/{nombre_mes}/{archivo}"
+            if existe_url(url):
+                return {
+                    "fecha": f"{nombre_mes} {anio}",
+                    "Link": url,
+                    "descripcion": f"{indicador} - {nombre_mes} {anio}",
+                    "link": url
+                }
+    return None
+
+
+data_por_hoja = {}
+for indicador, nombre_hoja in indicadores.items():
+    resultado = encontrar_ultimo(indicador)
+    if resultado:
+        df_fin = pd.DataFrame([resultado])
+    else:
+        df_fin = pd.DataFrame(columns=["fecha", "Link", "descripcion", "link"])
+    data_por_hoja[nombre_hoja] = df_fin
+
+excel_anterior = {}
+if os.path.exists(ruta_f2):
+    try:
+        excel_anterior = pd.read_excel(ruta_f2, sheet_name=None, engine="openpyxl")
+        print("📂 Histórico cargado")
+    except Exception as e:
+        print("⚠️ Error leyendo histórico:", e)
+else:
+    print("📁 Primera ejecución (no hay histórico)")
+
+lista_alertas = []
+for hoja, df_nuevo in data_por_hoja.items():
+    df_nuevas = detectar_cambios(df_nuevo, excel_anterior.get(hoja), hoja)
+    if not df_nuevas.empty:
+        lista_alertas.append(df_nuevas)
+
+if lista_alertas:
+    print("\n💾 Se detectaron cambios → sobrescribiendo Excel...")
+    with pd.ExcelWriter(ruta_f2, engine="openpyxl") as writer:
+        for hoja, df_h in data_por_hoja.items():
+            df_h.to_excel(writer, sheet_name=hoja, index=False)
+    print("✅ Archivo actualizado")
+else:
+    print("\n⏸ No hubo cambios → no se modifica el archivo")
+
+map_nombres = {
+    "EGP": "Balance y EGP",
+    "Indicadores": "Indicadores Financieros",
+    "Creditos": "Estructura de Créditos"
+}
+
+if lista_alertas:
+    detalle_alertas = []
+    for df_alerta in lista_alertas:
+        for _, row in df_alerta.iterrows():
+            fuente = row["fuente"]
+            fecha = row.get("fecha", "Sin fecha")
+            nombre_legible = map_nombres.get(fuente, fuente)
+            detalle_alertas.append(f"• {nombre_legible} → {fecha}<br>")
+
+    cuerpo = "<p>Se detectaron nuevas publicaciones en la <b>SBS</b> para actualizar la BD de Financials:</p>"
+    cuerpo += "".join(detalle_alertas)
+    cuerpo += "<p>Por favor actualizar insumos del modelo.</p>"
+
+    enviar_outlook("🚨 ACTUALIZAR FINANCIALS - NUEVA PUBLICACIÓN SBS", cuerpo)
+else:
+    print("✅ No hubo cambios, no se envió correo")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 3) CONSUMO (BBVA Research)
+# ═════════════════════════════════════════════════════════════════════════════
+
+options = webdriver.ChromeOptions()
+options.add_argument("--start-maximized")
+driver = webdriver.Chrome(options=options)   # Selenium Manager resuelve chromedriver
+
+url = "https://www.bbvaresearch.com/buscador/?dc:coverage@@@skos:prefLabel=Per%C3%BA@es"
+driver.get(url)
+time.sleep(5)
+
+last_height = driver.execute_script("return document.body.scrollHeight")
+while True:
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(3)
+    new_height = driver.execute_script("return document.body.scrollHeight")
+    if new_height == last_height:
+        break
+    last_height = new_height
+print("✅ Scroll completo realizado")
+
+cards = driver.find_elements(By.CSS_SELECTOR, "article.shortcode_card")
+print("✅ Cards encontrados:", len(cards))
+
+data = []
+for card in cards:
+    try:
+        titulo = card.find_element(By.CSS_SELECTOR, "h3.cardTitulo").text
+        fecha = card.find_element(By.CSS_SELECTOR, "p.cardFecha").text
+        link = card.find_element(By.CSS_SELECTOR, "a.shortcode_card_container").get_attribute("href")
+        data.append({"fecha": fecha, "titulo": titulo, "link": link})
+    except Exception as e:
+        print("Error:", e)
+
+driver.quit()
+
+df_bbva = pd.DataFrame(data)
+print("\n✅ DATA FINAL:")
+print(df_bbva)
+
+df_filtrado = df_bbva[df_bbva['titulo'].str.startswith(
+    "Perú | Seguimiento al consumo con datos en tiempo real", na=False
+)]
+
+ruta_consumo = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Alerta BD\Consumo Alert.xlsx"
+
+df_nuevo = df_filtrado.copy()
+
+if os.path.exists(ruta_consumo):
+    try:
+        df_viejo = pd.read_excel(ruta_consumo, engine="openpyxl")
+        print("📂 Histórico consumo cargado")
+    except Exception as e:
+        print("⚠️ Error leyendo histórico:", e)
+        df_viejo = None
+else:
+    print("📁 No existe histórico (primera ejecución)")
+    df_viejo = None
+
+df_nuevas_consumo = detectar_cambios(df_nuevo, df_viejo, "Consumo BBVA")
+
+if not df_nuevas_consumo.empty:
+    print("\n💾 Se detectaron cambios → sobrescribiendo archivo consumo...")
+    df_nuevo.to_excel(ruta_consumo, index=False)
+    print("✅ Archivo actualizado")
+
+    detalle_alertas = []
+    for _, row in df_nuevas_consumo.iterrows():
+        fecha = row.get("fecha", "Sin fecha")
+        link = row.get("link", "")
+        titulo = row.get("titulo", "")
+        detalle_alertas.append(f"• {fecha}<br>&nbsp;&nbsp;{titulo}<br>&nbsp;&nbsp;<a href='{link}'>{link}</a><br><br>")
+
+    cuerpo = "<p>Se detectaron nuevas publicaciones de <b>BBVA Research</b> para la actualización de la BD Consumo:</p>"
+    cuerpo += "".join(detalle_alertas)
+    cuerpo += "<p>Por favor revisar e incorporar en los insumos del modelo.</p>"
+
+    enviar_outlook("🚨 NUEVA PUBLICACIÓN BIG DATA CONSUMO BBVA", cuerpo)
+else:
+    print("\n⏸ No hubo cambios → no se modifica el archivo ni se envía correo")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4) CONSTRUCCIÓN (IPI Chile + OSITRAN Perú)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ----- IPI CHILE (INE) -----
+driver = webdriver.Chrome(options=options)
+wait = WebDriverWait(driver, 15)
+
+url = "https://www.ine.gob.cl/estadisticas-por-tema/industria-energia-y-construccion/indice-de-produccion-industrial"
+driver.get(url)
+
+boletines = wait.until(EC.element_to_be_clickable((
+    By.CSS_SELECTOR, 'div.navPrincipalDescargas[data-folder="fc62c4c1-8e79-4a42-bfc6-b37238816f98"]'
+)))
+boletines.click()
+
+year_actual = str(datetime.now().year)
+anio_elemento = wait.until(EC.element_to_be_clickable((
+    By.XPATH, f'//div[contains(@class,"categoriaDescarga") and text()="{year_actual}"]'
+)))
+anio_elemento.click()
+time.sleep(2)
+
+links = driver.find_elements(By.CSS_SELECTOR, 'a.widArchNavArchivoDescarga')
+hrefs = [link.get_attribute("href") for link in links]
+driver.quit()
+
+data = []
+titulo_fijo = "Indice de Produccion Industrial"
+for u in hrefs:
+    url_decoded = urllib.parse.unquote(u.lower())
+    match = re.search(r'(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)-(\d{4})', url_decoded)
+    fecha = f"{match.group(1)} {match.group(2)}" if match else None
+    data.append({"titulo": titulo_fijo, "fecha": fecha})
+
+df_ipi = pd.DataFrame(data)
+print(df_ipi)
+
+# ----- OSITRAN PERÚ -----
+driver = webdriver.Chrome(options=options)
+wait = WebDriverWait(driver, 15)
+
+url = "https://www.ositran.gob.pe/anterior/publicaciones/boletin-estadistico/"
+driver.get(url)
+
+year_actual = str(datetime.now().year)
+tab_anio = wait.until(EC.element_to_be_clickable((
+    By.XPATH, f'//ul[contains(@class,"nav-tabs")]//a[text()="{year_actual}"]'
+)))
+tab_anio.click()
+wait.until(EC.presence_of_element_located((By.ID, f"tab-{year_actual}")))
+time.sleep(1)
+
+elementos = driver.find_elements(By.CSS_SELECTOR, f'#tab-{year_actual} div.bole-item h2 a')
+
+data = []
+for el in elementos:
+    titulo_raw = el.text
+    match = re.search(r'(\w+)\s(\d{4})', titulo_raw.lower())
+    fecha = f"{match.group(1)} {match.group(2)}" if match else None
+    data.append({"titulo": "Boletín Estadístico OSITRAN", "fecha": fecha})
+
+driver.quit()
+
+df_ositran = pd.DataFrame(data)
+print(df_ositran)
+
+ruta_construction = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Alerta BD\Construction Alert.xlsx"
+
+if os.path.exists(ruta_construction):
+    try:
+        df_ipi_viejo = pd.read_excel(ruta_construction, sheet_name="IPI-Chile", engine="openpyxl")
+        df_ositran_viejo = pd.read_excel(ruta_construction, sheet_name="OSITRAN-Peru", engine="openpyxl")
+        print("📂 Histórico construction cargado")
+    except Exception as e:
+        print("⚠️ Error leyendo histórico:", e)
+        df_ipi_viejo, df_ositran_viejo = None, None
+else:
+    print("📁 No existe histórico (primera ejecución)")
+    df_ipi_viejo, df_ositran_viejo = None, None
+
+alertas_construccion = []
+for df_n, df_v, nombre in [
+    (df_ipi, df_ipi_viejo, "IPI Chile"),
+    (df_ositran, df_ositran_viejo, "OSITRAN Peru"),
+]:
+    df_nuevas = detectar_cambios(df_n, df_v, nombre)
+    if not df_nuevas.empty:
+        alertas_construccion.append(df_nuevas)
+
+if alertas_construccion:
+    print("\n💾 Se detectaron cambios → sobrescribiendo archivo construction...")
+    with pd.ExcelWriter(ruta_construction, engine='openpyxl') as writer:
+        df_ipi.to_excel(writer, sheet_name="IPI-Chile", index=False)
+        df_ositran.to_excel(writer, sheet_name="OSITRAN-Peru", index=False)
+    print("✅ Archivo actualizado")
+
+    df_alertas_final = pd.concat(alertas_construccion, ignore_index=True)
+    print("\n📊 DataFrame final de alertas:")
+    print(df_alertas_final)
+
+    detalle_alertas = []
+    for _, row in df_alertas_final.iterrows():
+        fecha = row.get("fecha", "Sin fecha")
+        titulo = row.get("titulo", "")
+        fuente = row.get("fuente", "")
+        detalle_alertas.append(f"• {fecha}<br>&nbsp;&nbsp;{titulo}<br>&nbsp;&nbsp;Fuente: {fuente}<br><br>")
+
+    cuerpo = "<p>Se detectaron nuevas publicaciones para la actualización de la <b>BD Construcción</b>:</p>"
+    cuerpo += "".join(detalle_alertas)
+    cuerpo += "<p>Por favor revisar e incorporar en los insumos del modelo.</p>"
+
+    enviar_outlook("🚨 ACTUALIZAR BD CONSTRUCCIÓN", cuerpo)
+else:
+    print("\n⏸ No hubo cambios → no se modifica el archivo ni se envía correo")
