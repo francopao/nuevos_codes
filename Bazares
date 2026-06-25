@@ -1,0 +1,41 @@
+Con todo el contexto acumulado, la respuesta es directa. Solo lo que tienes que abrir, descargar o registrarte:
+
+---
+
+## Hazard
+
+**Inundación fluvial y costera**
+- WRI Aqueduct Floods — `aqueduct.wri.org` — profundidad por coordenada, escenarios SSP, acceso libre
+- Fathom Global — `fathom.global` — inundación pluvial 1-en-500 años, requiere registro (tier gratuito disponible)
+- ANA Peru — `ana.gob.pe` — registros históricos de caudales por cuenca, descarga directa
+
+**Calor extremo y precipitación**
+- SENAMHI — `senamhi.gob.pe` — series históricas diarias y proyecciones regionalizadas bajo RCP/SSP, acceso libre
+
+**Movimientos en masa**
+- SIGRID/CENEPRED — `sigrid.cenepred.gob.pe` — inventario georreferenciado de eventos, descarga por distrito
+- INGEMMET — `geocatmin.ingemmet.gob.pe` — mapa de susceptibilidad litológica, WMS descargable
+
+**Estrés hídrico (minería y energía)**
+- WRI Aqueduct Water Risk — `aqueduct.wri.org/water-risk-atlas` — ratio extracción/reservas renovables, 2030 y 2050 bajo SSP, acceso libre
+
+---
+
+## Vulnerabilidad
+
+- Huizinga et al. 2017 — publicación EUR 28552 EN — `publications.jrc.ec.europa.eu` — curvas depth-damage por tipo de activo, descarga directa
+- MSCI Parte 4 (ya lo tienes) — thresholds y factores de productividad por sector NACE
+
+---
+
+## Exposición
+
+- Estados financieros de cada empresa (SMV `smv.gob.pe` o BVL `bvl.com.pe`) — activos fijos como base del valor expuesto
+- Libélula propuesta (ya la tienes) — lista de 9 empresas priorizadas con departamentos, úsala como punto de partida geográfico
+
+---
+
+**Orden de ataque:** WRI Aqueduct primero — cubre inundación y estrés hídrico en una sola plataforma, tiene los escenarios SSP que necesitas, y es la fuente que tanto MSCI como ERM validan. Con eso y Huizinga ya tienes el modelo funcionando para el hazard más importante.
+
+
+
