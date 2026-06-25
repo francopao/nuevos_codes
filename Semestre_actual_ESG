@@ -1,0 +1,24 @@
+def _meses_semestre_anterior(ref=None):
+    """Devuelve la lista de (año, mes) de la ventana de pesos.
+    METODOLOGÍA ACTUAL: semestre EN CURSO, desde su inicio hasta el mes de 'ref'
+    (o hoy / SEMESTRE_REF). 1er semestre -> Ene..mes_actual; 2º -> Jul..mes_actual."""
+    import datetime
+    if ref is None:
+        if SEMESTRE_REF:
+            ref = datetime.datetime.strptime(SEMESTRE_REF, "%Y-%m-%d")
+        else:
+            ref = datetime.datetime.now()
+
+    # --- METODOLOGÍA ANTERIOR (semestre completo PREVIO) — comentada, reactivable ---
+    # if ref.month <= 6:
+    #     y, ini = ref.year - 1, 7
+    # else:
+    #     y, ini = ref.year, 1
+    # return [(y, m) for m in range(ini, ini + 6)]
+
+    # --- METODOLOGÍA NUEVA: semestre ACTUAL, meses disponibles hasta hoy ---
+    if ref.month <= 6:
+        y, ini = ref.year, 1        # 1er semestre en curso: Ene..mes actual
+    else:
+        y, ini = ref.year, 7        # 2º semestre en curso: Jul..mes actual
+    return [(y, m) for m in range(ini, ref.month + 1)]
