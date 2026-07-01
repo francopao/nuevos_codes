@@ -1,0 +1,78 @@
+Entiendo perfecto y tienes toda la razón. El "AUM Total" debe ser el AUM ponderado completo del emisor —constante en las tres hojas—, no la porción con score. Es la opción 2, y estás en lo correcto conceptualmente: el AUM ponderado de un emisor es uno solo, no cambia según el desastre que mires.
+
+El ajuste es puntual. Hoy `aum_emp_tot` se calcula **dentro** del bucle de desastres y filtrando por score, por eso varía. Hay que separarlo en dos cosas:
+
+- **`aum_emp_tot` (AUM ponderado completo):** se calcula **una sola vez, fuera del bucle de desastres**, sumando todos los aportes sin filtrar por score. Es el que va en la columna "AUM Total" y en el denominador de los %.
+- **`aum_emp_niv` (AUM por nivel):** se sigue calculando **dentro** del bucle, con el score de ese desastre, porque sí depende del desastre.
+
+Con eso, los % por nivel se leen sobre el AUM completo. Ojo con una consecuencia que quiero que confirmes al final: los % de los 5 niveles **ya no sumarán 100%** por fila, porque la parte del emisor que cae en distritos sin score no aparece en ningún nivel. Eso es correcto y coherente con tu pedido (el faltante es "sin score"), pero cambia la lectura respecto a lo que tenías.
+
+**El cambio.** En `generar_excel_tabla_resumen`, localiza esto (está justo antes del bucle `for nombre_desastre, score_key in HZ_HOJAS:`):
+
+```python
+    niveles = [1, 2, 3, 4, 5]
+    holding_info = holding_info or {}
+    scores = _calc_scores_py(districts)
+```
+
+Y agrega debajo el cálculo del AUM ponderado completo, **una sola vez**:
+
+```python
+    # NUEVO: AUM ponderado COMPLETO por emisor (todos los aportes, sin filtrar por score).
+    # Es constante entre las tres hojas y es el verdadero "AUM Total" del emisor.
+    aum_emp_tot = {}
+    for d in districts:
+        for a in d.get("aportes", []):
+            m = a.get("monto", 0) or 0
+            if m > 0:
+                aum_emp_tot[a["emisor"]] = aum_emp_tot.get(a["emisor"], 0) + m
+    emisores_all = sorted(aum_emp_tot.keys())
+```
+
+Ahora, **dentro** del bucle `for nombre_desastre, score_key in HZ_HOJAS:`, localiza el bloque que hoy calcula ambos diccionarios juntos:
+
+```python
+        # AUM por (emisor, nivel) usando el score de ESTE desastre
+        aum_emp_niv, aum_emp_tot = {}, {}
+        for d in districts:
+            L = d.get(score_key)
+            if L not in niveles:
+                continue
+            for a in d.get("aportes", []):
+                m = a.get("monto", 0) or 0
+                if m <= 0:
+                    continue
+                e = a["emisor"]
+                aum_emp_niv.setdefault(e, {})
+                aum_emp_niv[e][L] = aum_emp_niv[e].get(L, 0) + m
+                aum_emp_tot[e] = aum_emp_tot.get(e, 0) + m
+        emisores = sorted(aum_emp_tot.keys())
+```
+
+Reemplázalo por (ya no recalcula `aum_emp_tot`, solo `aum_emp_niv`):
+
+```python
+        # AUM por (emisor, nivel) usando el score de ESTE desastre.
+        # aum_emp_tot ya viene calculado (completo) fuera del bucle.
+        aum_emp_niv = {}
+        for d in districts:
+            L = d.get(score_key)
+            if L not in niveles:
+                continue
+            for a in d.get("aportes", []):
+                m = a.get("monto", 0) or 0
+                if m <= 0:
+                    continue
+                e = a["emisor"]
+                aum_emp_niv.setdefault(e, {})
+                aum_emp_niv[e][L] = aum_emp_niv[e].get(L, 0) + m
+        emisores = emisores_all          # universo completo, mismo en las 3 hojas
+```
+
+Con esto:
+
+- La columna "AUM Total (S/)" sale del `aum_emp_tot` completo → **idéntica en las tres hojas** y nunca menor que el AUM ponderado real.
+- Los `% Nivel L` usan `m / tot` donde `tot` es ese AUM completo → el faltante hasta 100% es la plata del emisor en distritos sin score de ese desastre.
+- Aparecen en las tres hojas **todos** los emisores con aportes, aunque en un desastre concreto no tengan ningún distrito con score (mostrarán 0% en todos los niveles, pero su AUM Total correcto).
+
+El punto que te pedía confirmar: ¿te parece bien que los % de los 5 niveles **no sumen 100%** cuando el emisor tiene activos en distritos sin score de ese desastre (el resto queda implícito como "sin score")? Si prefieres, puedo añadir una columna "% sin score" que cierre la fila a 100% y lo haga explícito. ¿La quieres o lo dejamos implícito?
