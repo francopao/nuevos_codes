@@ -1,0 +1,101 @@
+Confirmado. Tres columnas al final de cada hoja: **Cobertura CENEPRED (%)** = con score / total, **Activos totales**, **Activos sin cobertura**. Todo por apariciones activo-distrito, con activo s/d contando como 1.
+
+Un aviso importante primero: **este cambio asume que ya aplicaste el código del AUM completo** que te mandé (el que insertó "AUM ponderado completo" como columna 4). Los índices de abajo cuentan con esa columna presente. Si aún no lo aplicaste, aplícalo antes o los números de columna no cuadrarán.
+
+Con ese código aplicado, tu tabla termina hoy en la columna 23 (Clasificación ERR). Las 3 nuevas van en 24, 25, 26.
+
+**Paso 1 — calcular los conteos por emisor y desastre.** Dentro del bucle `for nombre_desastre, score_key in HZ_HOJAS:`, junto a donde ya calculas `aum_emp_niv`, agrega el conteo de activos. Localiza el bloque:
+
+```python
+        aum_emp_niv = {}
+        for d in districts:
+            L = d.get(score_key)
+            if L not in niveles:
+                continue
+            for a in d.get("aportes", []):
+                m = a.get("monto", 0) or 0
+                if m <= 0:
+                    continue
+                e = a["emisor"]
+                aum_emp_niv.setdefault(e, {})
+                aum_emp_niv[e][L] = aum_emp_niv[e].get(L, 0) + m
+        emisores = sorted(aum_emp_tot.keys())
+```
+
+(Si dejaste la versión original con `aum_emp_tot` recalculado dentro, el bloque se ve algo distinto pero da igual: lo que importa es agregar el conteo). Justo **después** de ese bloque, agrega:
+
+```python
+        # NUEVO: conteo de activos (apariciones activo-distrito) con y sin score de ESTE desastre.
+        # activo s/d cuenta como 1 (mismo criterio del resto del script).
+        act_total, act_sincob = {}, {}
+        for d in districts:
+            tiene_score = d.get(score_key) in niveles
+            for a in d.get("aportes", []):
+                if (a.get("monto", 0) or 0) <= 0:
+                    continue
+                e = a["emisor"]
+                acts = a.get("activos") or a.get("ac") or []
+                n = len(acts) if acts else 1        # s/d -> 1
+                act_total[e] = act_total.get(e, 0) + n
+                if not tiene_score:
+                    act_sincob[e] = act_sincob.get(e, 0) + n
+```
+
+Nota que uso `a.get("activos") or a.get("ac")` para cubrir ambos nombres de clave según cómo venga tu `districts` (los aportes originales usan `activos`; la versión recortada usa `ac`).
+
+**Paso 2 — encabezados.** Localiza la línea que cierra `cols` con Clasificación ERR:
+
+```python
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR"]
+```
+
+Cámbiala a:
+
+```python
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura CENEPRED", "Activos totales", "Activos sin cobertura"]
+```
+
+**Paso 3 — valores en cada fila.** Localiza la línea que cierra `fila` con `mit, err`:
+
+```python
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit, err]
+```
+
+Cámbiala a:
+
+```python
+            n_tot = act_total.get(e, 0)
+            n_sin = act_sincob.get(e, 0)
+            cob = (n_tot - n_sin) / n_tot if n_tot else 0        # % de cobertura
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit, err,
+                     cob, n_tot, n_sin]
+```
+
+**Paso 4 — formato de las 3 columnas nuevas (24, 25, 26).** En tu bloque `for j, v in enumerate(fila...)`, la última condición es `elif j == 22 and fill_mit(v):`. Agrega debajo, antes de que cierre el `for`:
+
+```python
+                elif j == 24:                                # Cobertura CENEPRED (%)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j in (25, 26):                          # Activos totales / sin cobertura
+                    c.number_format = '#,##0'; c.alignment = A_C
+```
+
+(La columna 23, Clasificación ERR, ya la maneja tu `if j == 23:` con `A_LW` — no la toques.)
+
+**Paso 5 — anchos.** Localiza tu `widths` (el que ya incluye el AUM completo) y agrégale 3 anchos al final:
+
+```python
+        widths = [26, 16, 18, 22, 18, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                 16, 13, 18]
+```
+
+**Paso 6 — auto_filter.** Como ya usas `get_column_letter(len(cols))` para el rango del filtro, **no hay que tocarlo**: se ajusta solo a las nuevas columnas.
+
+Con esto, las 3 columnas quedan **visibles** (no las oculté, porque en esta última definición no pediste ocultarlas — a diferencia de los 5 niveles de la idea que descartaste). Si prefieres ocultar "Activos totales" y "sin cobertura" y dejar solo la de %, agrega al bloque de ocultado `9, 11, 13, 15, 17, 18, 19, 20, 21` los números `25, 26`.
+
+Verificación al abrir: `Activos totales − Activos sin cobertura`, dividido entre `Activos totales`, debe dar exactamente la "Cobertura CENEPRED". Y "Activos totales" de un emisor debe ser **igual en las tres hojas** (el total no depende del desastre); lo que cambia entre hojas es "sin cobertura" y por tanto la cobertura %.
+
+¿Quieres las tres visibles como quedaron, o oculto las dos de conteo dejando solo el %?
