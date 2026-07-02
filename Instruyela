@@ -1,0 +1,180 @@
+Como no especificaste, sigo con la opción recomendada y te aviso claramente qué asumí: **renormalización proporcional** (cada nivel dividido entre la cobertura, mantiene la forma de la distribución) y la columna **"Nivel 4+5" usa los porcentajes ya renormalizados** (los mismos que se ven al lado, consistentes visualmente). Si prefieres el reparto igualitario o los originales sin diluir, dímelo después y lo ajusto.
+
+Importante: esto **solo toca el Excel**, no el cálculo real de `m/tot` que usas en el resto del script (los valores de `aum_emp_niv`, `aum_emp_tot`, HTML, etc. quedan intactos). Es puramente un ajuste de visualización en esta hoja.
+
+## Cambio 1 — encabezado (agregar "Nivel 4+5")
+
+Busca:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM Perú (S/)",
+                "AUM Cubierto (S/)", "Cobertura (S/)", "% ponderación", "Países"]
+
+        for L in niveles:
+            cols += [f"% Nivel {L}", f"Monto Nivel {L} (S/)"]
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura por Activos", "Activos totales", "Activos sin cobertura"]
+```
+
+Reemplaza por:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM Perú (S/)",
+                "AUM Cubierto (S/)", "Cobertura (S/)", "% ponderación", "Países"]
+
+        for L in niveles:
+            cols += [f"% Nivel {L}", f"Monto Nivel {L} (S/)"]
+        cols += ["Nivel 4+5"]
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura por Activos", "Activos totales", "Activos sin cobertura"]
+```
+
+## Cambio 2 — valores de la fila (renormalizar + agregar Nivel 4+5)
+
+Busca:
+
+```python
+            cob_soles = (aum_emp_cub.get(e, 0) / tot) if tot else 0   # cobertura por plata
+            fila = [e, emp_sector.get(e, ""), aum_orig, tot,
+                    aum_emp_cub.get(e, 0), cob_soles, pct_pond, paises]
+
+            for L in niveles:
+                m = aum_emp_niv.get(e, {}).get(L, 0)
+                fila += [(m / tot if tot else 0), m]
+```
+
+Reemplaza por:
+
+```python
+            cob_soles = (aum_emp_cub.get(e, 0) / tot) if tot else 0   # cobertura por plata
+            fila = [e, emp_sector.get(e, ""), aum_orig, tot,
+                    aum_emp_cub.get(e, 0), cob_soles, pct_pond, paises]
+
+            # SOLO VISUAL: renormaliza los % de nivel para que sumen 100% en el Excel
+            # (divide cada % entre la cobertura). No afecta ningún otro cálculo del script.
+            pct_niveles_vis = []
+            for L in niveles:
+                m = aum_emp_niv.get(e, {}).get(L, 0)
+                pct_bruto = (m / tot) if tot else 0
+                pct_vis = (pct_bruto / cob_soles) if cob_soles else 0
+                pct_niveles_vis.append(pct_vis)
+                fila += [pct_vis, m]
+
+            nivel_4_5 = pct_niveles_vis[3] + pct_niveles_vis[4]   # niveles[3]=4, niveles[4]=5
+            fila += [nivel_4_5]
+```
+
+Nota: `niveles = [1, 2, 3, 4, 5]`, así que `pct_niveles_vis[3]` es el del nivel 4 y `pct_niveles_vis[4]` el del nivel 5 — coincide por índice con el valor, no hace falta buscar por diccionario.
+
+## Cambio 3 — formato por celda
+
+El bloque de formato tenía este mapeo de columnas:
+- 3,4,5 = AUM; 6 = Cobertura(S/); 7 = % pond.; 8 = Países; 9-18 = niveles (%/monto); 19-22 = scores; 23 = mitigante; 24 = ERR; 25 = Cob.Activos; 26,27 = conteos.
+
+Insertamos "Nivel 4+5" **después** del bloque de niveles (que ahora termina en 18), así que "Nivel 4+5" es la nueva columna **19**, y todo lo que era 19-27 se corre **+1** a 20-28.
+
+Busca:
+
+```python
+            for j, v in enumerate(fila, start=1):
+                c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+                if j == 24:                                  # Clasificación ERR (última de bloque)
+                    c.alignment = A_LW
+                elif j == 8:                                 # Países
+                    c.alignment = A_L
+                else:
+                    c.alignment = A_L if j in (1, 2) else (A_R if j in (3, 4, 5) else A_C)
+                if j in (3, 4, 5):                           # AUM Total / Perú / Cubierto
+                    c.number_format = FMT_S
+                elif j == 6:                                 # Cobertura (S/)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j == 7:                                 # % ponderación
+                    c.number_format = FMT_P
+                elif 9 <= j <= 18:                           # bloques % / monto por nivel
+                    c.number_format = FMT_P if (j % 2 == 1) else FMT_S
+                elif 19 <= j <= 22:                          # scores
+                    c.number_format = FMT_SC; c.fill = fill_score(v)
+                elif j == 23 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+                elif j == 25:                                # Cobertura por Activos (%)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j in (26, 27):                          # Activos totales / sin cobertura
+                    c.number_format = '#,##0'; c.alignment = A_C
+```
+
+Reemplaza por:
+
+```python
+            for j, v in enumerate(fila, start=1):
+                c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+                if j == 25:                                  # Clasificación ERR (última de bloque)
+                    c.alignment = A_LW
+                elif j == 8:                                 # Países
+                    c.alignment = A_L
+                else:
+                    c.alignment = A_L if j in (1, 2) else (A_R if j in (3, 4, 5) else A_C)
+                if j in (3, 4, 5):                           # AUM Total / Perú / Cubierto
+                    c.number_format = FMT_S
+                elif j == 6:                                 # Cobertura (S/)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j == 7:                                 # % ponderación
+                    c.number_format = FMT_P
+                elif 9 <= j <= 18:                           # bloques % / monto por nivel
+                    c.number_format = FMT_P if (j % 2 == 1) else FMT_S
+                elif j == 19:                                # Nivel 4+5
+                    c.number_format = FMT_P; c.alignment = A_C
+                    c.font = Font(name="Calibri", size=10, bold=True, color="1F2533")
+                elif 20 <= j <= 23:                          # scores
+                    c.number_format = FMT_SC; c.fill = fill_score(v)
+                elif j == 24 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+                elif j == 26:                                # Cobertura por Activos (%)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j in (27, 28):                          # Activos totales / sin cobertura
+                    c.number_format = '#,##0'; c.alignment = A_C
+```
+
+## Cambio 4 — widths
+
+Busca:
+
+```python
+        widths = [26, 16, 18, 18, 18, 13, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                     16, 13, 18]
+```
+
+Reemplaza por (agrego un ancho para "Nivel 4+5" tras las 5 parejas de nivel):
+
+```python
+        widths = [26, 16, 18, 18, 18, 13, 13, 26] + [11, 16] * 5 + [12,
+                                                                     10, 11, 11, 12, 16, 30,
+                                                                     16, 13, 18]
+```
+
+## Cambio 5 — ocultado y freeze
+
+Busca:
+
+```python
+        # ocultar Países (8), Monto Nivel 1-5 (10,12,14,16,18), Scores (19-22),
+        # Activos totales/sin cobertura (26,27)
+        for j in (8, 10, 12, 14, 16, 18, 19, 20, 21, 22, 26, 27):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+
+        ws.freeze_panes = "I5"
+```
+
+Reemplaza por:
+
+```python
+        # ocultar Países (8), Monto Nivel 1-5 (10,12,14,16,18), Scores (20-23),
+        # Activos totales/sin cobertura (27,28). Nivel 4+5 (19) queda VISIBLE.
+        for j in (8, 10, 12, 14, 16, 18, 20, 21, 22, 23, 27, 28):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+
+        ws.freeze_panes = "I5"
+```
+
+Verificación al abrir: para cualquier empresa, la suma de los 5 "% Nivel" ahora debe dar exactamente **100%** (o 0% si la empresa no tiene ninguna cobertura). "Nivel 4+5" debe ser la suma de las columnas de Nivel 4 y Nivel 5 visibles al lado.
