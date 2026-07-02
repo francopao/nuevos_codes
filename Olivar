@@ -1,0 +1,48 @@
+Entendido. Cuatro tramos con dos familias de color (rojo para alto riesgo, verde para bajo), en tonos pastel suaves pero distinguibles:
+
+- **≥ 75%** → rojo pastel más oscuro (alerta alta)
+- **50%–75%** → rojo pastel claro (alerta media)
+- **25%–50%** → verde pastel claro (bajo)
+- **< 25%** → verde pastel más suave (muy bajo)
+
+Te doy el código. Solo hay que agregar una función de color y aplicarla en la celda de "Nivel 4+5" (columna 19).
+
+## Cambio 1 — función de color (agrégala junto a `fill_score`/`fill_mit`)
+
+Busca donde está definida `fill_mit` (cerca del inicio de `generar_excel_tabla_resumen`) y agrega justo debajo:
+
+```python
+    def fill_nivel45(v):
+        if v is None:
+            return None
+        if v >= 0.75:
+            return PatternFill("solid", fgColor="F1B0B0")   # rojo pastel más oscuro
+        if v >= 0.50:
+            return PatternFill("solid", fgColor="F8D7D7")   # rojo pastel claro
+        if v >= 0.25:
+            return PatternFill("solid", fgColor="D9F0D9")   # verde pastel claro
+        return PatternFill("solid", fgColor="EAF7EA")        # verde pastel muy suave
+```
+
+## Cambio 2 — aplicarlo en la celda
+
+Busca (dentro del bloque de formato que ya tienes):
+
+```python
+                elif j == 19:                                # Nivel 4+5
+                    c.number_format = FMT_P; c.alignment = A_C
+                    c.font = Font(name="Calibri", size=10, bold=True, color="1F2533")
+```
+
+Reemplaza por:
+
+```python
+                elif j == 19:                                # Nivel 4+5
+                    c.number_format = FMT_P; c.alignment = A_C
+                    c.font = Font(name="Calibri", size=10, bold=True, color="1F2533")
+                    c.fill = fill_nivel45(v)
+```
+
+Eso es todo — reutiliza exactamente el mismo `if j == 19` que ya tenías, solo le agrega la línea del color.
+
+Con esto, cada fila de "Nivel 4+5" se pinta sola según su valor: verde tenue si el riesgo alto (niveles 4-5) pesa poco en la cartera de ese emisor, rojo tenue si pesa mucho. Los tonos son pasteles bajos en saturación (no chillones) pero con suficiente contraste entre los cuatro tramos para distinguirlos de un vistazo. Si al verlo en tu Excel algún tono te parece muy fuerte o muy tenue, dime cuál y ajusto solo ese hex.
