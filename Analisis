@@ -1,0 +1,153 @@
+Entiendo perfecto. Dos cosas: renombrar la columna existente a "Cobertura por Activos", y añadir una nueva "Cobertura (S/)" (cobertura por plata = AUM Cubierto / AUM Perú) justo al lado de "AUM Cubierto (S/)". Esa nueva sí debe calzar con la suma de los 5 %.
+
+Déjame ver los tres puntos exactos donde tocar: encabezados, valores de fila, y formato.
+
+Ya tengo el mapa completo. Insertamos "Cobertura (S/)" en la posición 6 (justo tras "AUM Cubierto (S/)" que es la col 5). Eso corre **+1** todo lo que viene después. Te doy los cinco cambios exactos.
+
+## Cambio 1 — encabezados (líneas 4881-4889)
+
+Reemplaza:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM Perú (S/)",
+                "AUM Cubierto (S/)", "% ponderación", "Países"]
+
+
+        for L in niveles:
+            cols += [f"% Nivel {L}", f"Monto Nivel {L} (S/)"]
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura CENEPRED", "Activos totales", "Activos sin cobertura"]
+```
+
+por:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM Perú (S/)",
+                "AUM Cubierto (S/)", "Cobertura (S/)", "% ponderación", "Países"]
+
+        for L in niveles:
+            cols += [f"% Nivel {L}", f"Monto Nivel {L} (S/)"]
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura por Activos", "Activos totales", "Activos sin cobertura"]
+```
+
+(Inserté "Cobertura (S/)" en posición 6, y renombré "Cobertura CENEPRED" → "Cobertura por Activos".)
+
+## Cambio 2 — valores de la fila (líneas 4910-4922)
+
+Reemplaza:
+
+```python
+            fila = [e, emp_sector.get(e, ""), aum_orig, tot,
+                    aum_emp_cub.get(e, 0), pct_pond, paises]
+
+            for L in niveles:
+                m = aum_emp_niv.get(e, {}).get(L, 0)
+                fila += [(m / tot if tot else 0), m]
+
+
+            n_tot = act_total.get(e, 0)
+            n_sin = act_sincob.get(e, 0)
+            cob = (n_tot - n_sin) / n_tot if n_tot else 0        # % de cobertura
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit, err,
+                     cob, n_tot, n_sin]
+```
+
+por:
+
+```python
+            cob_soles = (aum_emp_cub.get(e, 0) / tot) if tot else 0   # cobertura por plata
+            fila = [e, emp_sector.get(e, ""), aum_orig, tot,
+                    aum_emp_cub.get(e, 0), cob_soles, pct_pond, paises]
+
+            for L in niveles:
+                m = aum_emp_niv.get(e, {}).get(L, 0)
+                fila += [(m / tot if tot else 0), m]
+
+
+            n_tot = act_total.get(e, 0)
+            n_sin = act_sincob.get(e, 0)
+            cob = (n_tot - n_sin) / n_tot if n_tot else 0        # cobertura por activos
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit, err,
+                     cob, n_tot, n_sin]
+```
+
+`cob_soles = aum_emp_cub / tot` es exactamente la suma de los 5 % (mismo numerador y denominador). Por eso ahora sí calzan.
+
+## Cambio 3 — formato por celda (líneas 4930-4951)
+
+Todo corre +1. Reemplaza el bloque entero por:
+
+```python
+            for j, v in enumerate(fila, start=1):
+                c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+                if j == 24:                                  # Clasificación ERR (última de bloque)
+                    c.alignment = A_LW
+                elif j == 8:                                 # Países
+                    c.alignment = A_L
+                else:
+                    c.alignment = A_L if j in (1, 2) else (A_R if j in (3, 4, 5) else A_C)
+                if j in (3, 4, 5):                           # AUM Total / Perú / Cubierto
+                    c.number_format = FMT_S
+                elif j == 6:                                 # Cobertura (S/)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j == 7:                                 # % ponderación
+                    c.number_format = FMT_P
+                elif 9 <= j <= 18:                           # bloques % / monto por nivel
+                    c.number_format = FMT_P if (j % 2 == 1) else FMT_S
+                elif 19 <= j <= 22:                          # scores
+                    c.number_format = FMT_SC; c.fill = fill_score(v)
+                elif j == 23 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+                elif j == 25:                                # Cobertura por Activos (%)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j in (26, 27):                          # Activos totales / sin cobertura
+                    c.number_format = '#,##0'; c.alignment = A_C
+```
+
+Ojo el cambio de paridad: los bloques de nivel ahora arrancan en col 9 (impar), así que el `%` cae en **impares** (`j % 2 == 1`).
+
+## Cambio 4 — widths (líneas 4954-4955)
+
+Reemplaza:
+
+```python
+        widths = [26, 16, 18, 18, 18, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                 16, 13, 18]
+```
+
+por (agrego un ancho para "Cobertura (S/)" tras las 3 de AUM):
+
+```python
+        widths = [26, 16, 18, 18, 18, 13, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                     16, 13, 18]
+```
+
+## Cambio 5 — ocultado y freeze (líneas 4960-4964)
+
+Todo corre +1. Reemplaza:
+
+```python
+        # NUEVO: ocultar Monto Nivel 1-5 (columnas pares 8,10,12,14,16) y Scores (17-20)
+        for j in (7,9, 11, 13, 15, 17, 18, 19, 20, 21, 25, 26):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+
+        ws.freeze_panes = "H5"
+```
+
+por:
+
+```python
+        # ocultar Países (8), Monto Nivel 1-5 (10,12,14,16,18), Scores (19-22),
+        # Activos totales/sin cobertura (26,27)
+        for j in (8, 10, 12, 14, 16, 18, 19, 20, 21, 22, 26, 27):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+
+        ws.freeze_panes = "I5"
+```
+
+Nota: antes ocultabas la col 7 (que era Países); ahora Países es la 8. Ajusté eso. Si prefieres **no** ocultar Países, quita el `8` de la lista.
+
+Verificación al abrir: para cualquier empresa, la suma de los 5 "% Nivel" debe dar **exactamente** el valor de "Cobertura (S/)". Y "Cobertura (S/)" = AUM Cubierto / AUM Perú. La "Cobertura por Activos" seguirá siendo distinta (mide activos, no plata) — eso es lo esperado ahora.
