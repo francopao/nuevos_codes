@@ -1,0 +1,145 @@
+Ahora leo la función `generar_excel_tabla_resumen` para ver tu estructura real y darte los cambios exactos.
+
+Ya vi tu código real. Es importante: tu versión **no tiene** la columna "AUM ponderado completo" que te sugerí antes; tienes 3 columnas de AUM así:
+
+- Columna 3 = `tot` = `aum_emp_tot` (que en tu código **ya es el AUM ponderado COMPLETO**, calculado sin filtrar por score, líneas 4802-4810) → hoy etiquetada "AUM Total (S/)"
+- Columna 4 = `aum_orig` = holding original o `tot` → hoy "AUM sin ponderar (S/)"
+- No hay una tercera de "cubierto".
+
+Entonces, sorpresa: en tu código actual el "AUM Total" (col 3) **ya es el ponderado completo constante entre hojas**, no el cubierto. El "cubierto" no existe como columna; solo vive implícito en los % por nivel.
+
+Con tu esquema de nombres deseado (Total = sin ponderar del emisor entero; Perú = ponderado completo; Cubierto = con score), tienes **dos columnas** hoy y quieres **tres**. Falta agregar la de "Cubierto". Te doy los cambios exactos sobre tu archivo.
+
+## Cambio 1 — calcular el AUM cubierto por hoja
+
+En el bucle de desastres, donde calculas `aum_emp_niv` (líneas 4837-4849), el cubierto es la suma de esos niveles. Agrégalo. Localiza (línea 4849):
+
+```python
+        emisores = emisores_all          # universo completo, mismo en las 3 hojas
+```
+
+Agrega **debajo**:
+
+```python
+        # NUEVO: AUM cubierto = suma del AUM en niveles con score de ESTE desastre
+        aum_emp_cub = {e: sum(v.values()) for e, v in aum_emp_niv.items()}
+```
+
+## Cambio 2 — encabezados (línea 4878)
+
+Reemplaza:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)",
+                "AUM sin ponderar (S/)", "% ponderación", "Países"]   # NUEVO
+```
+
+por:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM Perú (S/)",
+                "AUM Cubierto (S/)", "% ponderación", "Países"]
+```
+
+Orden lógico embudo: Total (emisor entero) → Perú (ponderado) → Cubierto (con score).
+
+## Cambio 3 — valores de la fila (líneas 4905-4906)
+
+Reemplaza:
+
+```python
+            fila = [e, emp_sector.get(e, ""), tot,
+                    aum_orig, pct_pond, paises]                       # NUEVO
+```
+
+por:
+
+```python
+            fila = [e, emp_sector.get(e, ""), aum_orig, tot,
+                    aum_emp_cub.get(e, 0), pct_pond, paises]
+```
+
+Aquí está la clave del reordenamiento: `aum_orig` (emisor entero) va a **AUM Total**, `tot` (ponderado completo) va a **AUM Perú**, y `aum_emp_cub` (con score) va a **AUM Cubierto**.
+
+Ojo con el denominador de los `% Nivel L`: siguen usando `tot` (línea 4909, `m / tot`). Eso es correcto — el % de cada nivel se lee sobre el AUM Perú, y suman la cobertura del desastre. Déjalo tal cual.
+
+## Cambio 4 — formato por celda (líneas 4924-4948)
+
+Insertamos 1 columna, así que todo lo posterior a la col 5 se corre **+1**. Reemplaza todo el bloque `for j, v in enumerate(fila...)` (4924-4948) por:
+
+```python
+            for j, v in enumerate(fila, start=1):
+                c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+                if j == 23:                                  # Clasificación ERR (última de bloque)
+                    c.alignment = A_LW
+                elif j == 7:                                 # Países
+                    c.alignment = A_L
+                else:
+                    c.alignment = A_L if j in (1, 2) else (A_R if j in (3, 4, 5) else A_C)
+                if j in (3, 4, 5):                           # AUM Total / Perú / Cubierto
+                    c.number_format = FMT_S
+                elif j == 6:                                 # % ponderación
+                    c.number_format = FMT_P
+                elif 8 <= j <= 17:                           # bloques % / monto por nivel
+                    c.number_format = FMT_P if (j % 2 == 0) else FMT_S
+                elif 18 <= j <= 21:                          # scores
+                    c.number_format = FMT_SC; c.fill = fill_score(v)
+                elif j == 22 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+                elif j == 24:                                # Cobertura CENEPRED (%)
+                    c.number_format = FMT_P; c.alignment = A_C
+                elif j in (25, 26):                          # Activos totales / sin cobertura
+                    c.number_format = '#,##0'; c.alignment = A_C
+```
+
+Nota: los bloques de nivel ahora arrancan en col 8 y el `%` cae en columnas **pares** (`j % 2 == 0`).
+
+## Cambio 5 — widths (línea 4951)
+
+Reemplaza:
+
+```python
+        widths = [26, 16, 18, 22, 18, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                 16, 13, 18]
+```
+
+por (un ancho más al frente para la columna extra de AUM):
+
+```python
+        widths = [26, 16, 18, 18, 18, 13, 26] + [11, 16] * 5 + [10, 11, 11, 12, 16, 30,
+                                                                 16, 13, 18]
+```
+
+## Cambio 6 — ocultado (línea 4958)
+
+Todo se corrió +1. Las columnas de Monto por nivel eran 8,10,12,14,16 → ahora 9,11,13,15,17; scores 17-20 → 18-21; activos 25,26 quedan igual (estaban al final). Reemplaza:
+
+```python
+        for j in (8, 10, 12, 14, 16, 17, 18, 19, 20,25,26):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+```
+
+por:
+
+```python
+        for j in (9, 11, 13, 15, 17, 18, 19, 20, 21, 25, 26):
+            ws.column_dimensions[get_column_letter(j)].hidden = True
+```
+
+## Cambio 7 — freeze (línea 4961)
+
+Antes congelaba en G (col 7 = primer nivel). Ahora Países es col 7 y el primer nivel es col 8. Reemplaza:
+
+```python
+        ws.freeze_panes = "G5"
+```
+
+por:
+
+```python
+        ws.freeze_panes = "H5"
+```
+
+El `auto_filter` (línea 4963) usa `len(cols)`, se ajusta solo — no lo toques.
+
+Con esto tienes las tres columnas visibles con tus nombres: **AUM Total** (emisor entero), **AUM Perú** (ponderado), **AUM Cubierto** (con score en ese desastre). Verificación al abrir: para un no-holding, AUM Total = AUM Perú; AUM Cubierto ≤ AUM Perú siempre; y AUM Cubierto debe cuadrar con la suma de los montos por nivel de esa fila.
