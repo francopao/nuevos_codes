@@ -1,0 +1,35 @@
+Perfecto, es solo renombrar los tres encabezados. **Ningún cálculo cambia** — los valores que ya se calculan son exactamente los que quieres, solo llevan otro nombre. Y como no agregamos ni quitamos columnas, **no hay corrimiento de índices**: los formatos, anchos, ocultado y freeze se quedan igual.
+
+Solo hay que tocar el orden de las columnas para que quede lógico, porque hoy están así:
+
+- Columna 3: "AUM Total (S/)" → es el cubierto (con score)
+- Columna 4: "AUM ponderado completo (S/)" → es el de Perú
+- Columna 5: "AUM sin ponderar (S/)" → es el total del emisor
+
+Y tú quieres verlas leyéndose como el embudo natural: **AUM Total → AUM Perú → AUM Cubierto**. Eso significa que además de renombrar, conviene **reordenar** para que el número de columna 3 sea el "Total" (el más grande), el 4 sea "Perú", y el 5 sea "Cubierto".
+
+Aquí está el detalle delicado: reordenar sí cambiaría índices y me obligaría a reajustar todo el corrimiento otra vez. Para evitarte ese riesgo, te doy la opción más segura: **solo renombrar, sin mover nada de sitio**. Quedarían en este orden físico (Cubierto, Perú, Total), que no es el embudo ideal pero es cero-riesgo. Si prefieres el orden embudo, te lo hago aparte con cuidado.
+
+**Opción segura (solo renombrar).** Localiza el encabezado:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Total (S/)", "AUM ponderado completo (S/)",
+                "AUM sin ponderar (S/)", "% ponderación", "Países"]
+```
+
+Cámbialo por:
+
+```python
+        cols = ["Empresa", "Sector", "AUM Cubierto (S/)", "AUM Perú (S/)",
+                "AUM Total (S/)", "% ponderación", "Países"]
+```
+
+Eso es todo. La correspondencia queda:
+
+- Columna 3, `tot` → ahora se llama **"AUM Cubierto (S/)"** (lo que yo llamaba AUM Total / con score).
+- Columna 4, `aum_emp_full.get(e,0)` → ahora **"AUM Perú (S/)"** (el ponderado completo).
+- Columna 5, `aum_orig` → ahora **"AUM Total (S/)"** (el sin ponderar, el emisor entero).
+
+Los valores en `fila = [e, emp_sector.get(e, ""), tot, aum_emp_full.get(e, 0), aum_orig, pct_pond, paises]` **no se tocan** — cada uno ya cae bajo su nuevo nombre.
+
+Una cosa que quiero que confirmes, porque afecta la lectura: con este renombrado, en el Excel el orden físico de izquierda a derecha será **Cubierto, Perú, Total**. Es decir, el más chico primero y el más grande al final, que se lee "al revés" del embudo. ¿Te sirve así (opción segura), o prefieres que reordene a **Total, Perú, Cubierto** aunque eso implique que yo reajuste con cuidado los índices de formato/ocultado para que nada se rompa? Dime cuál y procedo.
