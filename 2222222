@@ -1,0 +1,9 @@
+def leer_hoja(ruta, hoja):
+    wb = load_workbook(ruta, read_only=True, data_only=True, keep_links=False)
+    ws = wb[hoja]
+    # Forzar recalculo de dimensiones: archivos MSCI/exportados suelen
+    # traer <dimension> corrupto y read_only lee solo 1x1.
+    ws.reset_dimensions()
+    data = list(ws.iter_rows(values_only=True))
+    wb.close()
+    return pd.DataFrame(data)
