@@ -1,0 +1,45 @@
+El error `com_error: 'El objeto invocado ha desconectado de sus clientes'` es la típica inestabilidad de COM de xlwings (Excel se cae/desconecta mientras Python lo consulta). La solución robusta es dejar xlwings y leer con **openpyxl** (tu estándar). Instrucciones puntuales:
+
+**1. Reemplaza los imports superiores por:**
+```python
+import pandas as pd
+import numpy as np
+import re
+from pathlib import Path
+from openpyxl import load_workbook
+```
+
+**2. Crea un helper único de lectura** (arriba, antes de `recor`):
+```python
+def leer_hoja(ruta, hoja):
+    wb = load_workbook(ruta, read_only=True, data_only=True, keep_links=False)
+    ws = wb[hoja]
+    data = list(ws.iter_rows(values_only=True))
+    wb.close()
+    return pd.DataFrame(data)
+```
+
+**3. Sustituye cada bloque xlwings** de este patrón:
+```python
+wb = xw.Book(ruta, read_only=True, update_links=False)
+sheet = wb.sheets['NOMBRE']
+sheet = sheet.used_range.value
+df = pd.DataFrame(sheet)
+wb.close()
+```
+por una sola línea:
+```python
+df = leer_hoja(ruta, 'NOMBRE')
+```
+
+Ubicaciones a cambiar (hoja entre comillas):
+- `txt_obtenido`: `'CalcP'` (VP.xlsm) y `'Data'` (LATAM.xlsx)
+- `txt_TD`: `'CalcP'` (VP.xlsm) y hoja `hoja` (TD_ESG_Histórico.xlsx)
+- `parametroBU`: `'BU'` (Parametria.xlsx)
+- `dashboard`: `'Base'` (Subyacentes 2.xlsx) y `'Sheet1'` (Comparables.xlsx)
+
+**4. Ojo con `data_only=True`:** devuelve el último valor calculado guardado. Si algún .xlsm nunca se ha abierto/guardado en Excel tras editar fórmulas, esas celdas saldrán `None`. VP.xlsm es macro-heavy; si `CalcP` depende de recálculo en vivo, ábrelo y guárdalo una vez en Excel antes de correr el script para que openpyxl vea los valores cacheados.
+
+**5. Detalle de `.iloc` con índices:** openpyxl arranca el índice del DataFrame en 0 (no en 4 como salía con xlwings). En `txt_obtenido` tu `df.drop([4],axis=0)` y `df = df.iloc[4:,[3,2]]` seguían funcionando porque el `iloc[4:]` reindexa igual, pero revisa que `df.drop([4])` y `df.drop([0])` sigan apuntando a la fila header correcta tras el cambio; si algo se desalinea, cambia esos drops por `.iloc[1:]` sobre el df ya recortado.
+
+Con esto eliminas la dependencia de Excel abierto y desaparece el `com_error`.
