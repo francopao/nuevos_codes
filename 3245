@@ -1,0 +1,140 @@
+Tienes razón. Déjame leer el código completo (hay una parte que no había visto) y cruzarlo contra los archivos para darte un blindaje real, no parche por parche.Ya tengo la vista completa. Vi el código entero y ahora entiendo dónde está frágil. Déjame darte un blindaje real y no parche por parche.
+
+**El diagnóstico de fondo:** tu código depende de que los archivos externos (que tú NO controlas) mantengan exactamente el mismo formato mes a mes: nombres de columna idénticos, headers en la misma fila, mismo orden de columnas. Cuando el proveedor cambia algo mínimo (como quitar el sufijo ` (P)` en junio), tu proceso explota con un `KeyError` ciego que no dice qué pasó. El patrón se repite en varios sitios: `Detallado`, EPU/ETF, `VP.xlsm`, `Parametria`, etc.
+
+La estrategia de blindaje tiene tres piezas. Te las dejo como un módulo de helpers que pegas **una vez al inicio** de tu notebook, y luego reemplazas los puntos frágiles.
+
+## 1. Helpers de blindaje (pégalos al inicio, después de los imports)
+
+```python
+# ============================================================
+#  HELPERS DE BLINDAJE  (pegar una vez, después de los imports)
+# ============================================================
+import difflib
+
+def abrir_libro(ruta_principal, ruta_alterna=None):
+    """Abre ruta_principal en solo-lectura; si no existe, cae a ruta_alterna."""
+    try:
+        return xw.Book(ruta_principal, read_only=True, update_links=False)
+    except FileNotFoundError:
+        if ruta_alterna is None:
+            raise
+        print(f"[AVISO] No existe:\n  {ruta_principal}\n-> Usando alternativa:\n  {ruta_alterna}")
+        return xw.Book(ruta_alterna, read_only=True, update_links=False)
+
+
+def resolver_columna(df, nombres_posibles, obligatoria=True):
+    """
+    Devuelve el nombre REAL de la columna en df que coincide con alguno de
+    'nombres_posibles'. Tolera:
+      - variantes exactas (lista de alias)
+      - sufijos/prefijos ((P), espacios extra, etc.)
+      - fuzzy match como último recurso
+    """
+    if isinstance(nombres_posibles, str):
+        nombres_posibles = [nombres_posibles]
+
+    cols = list(df.columns)
+    cols_str = {str(c).strip(): c for c in cols}
+
+    # 1) match exacto (con strip)
+    for nom in nombres_posibles:
+        if nom in cols_str:
+            return cols_str[nom]
+
+    # 2) match por prefijo (ej: 'Market Value (%)' matchea 'Market Value (%) (P)')
+    for nom in nombres_posibles:
+        for c_str, c_real in cols_str.items():
+            if c_str.startswith(nom) or nom.startswith(c_str):
+                return c_real
+
+    # 3) fuzzy match (último recurso)
+    for nom in nombres_posibles:
+        cerca = difflib.get_close_matches(nom, list(cols_str.keys()), n=1, cutoff=0.85)
+        if cerca:
+            print(f"[AVISO] Columna '{nom}' no exacta; usando aproximada '{cerca[0]}'.")
+            return cols_str[cerca[0]]
+
+    if obligatoria:
+        raise KeyError(
+            f"No se encontró ninguna de {nombres_posibles}.\n"
+            f"Columnas disponibles: {cols}"
+        )
+    return None
+
+
+def localizar_fila_header(df, columna_ancla, max_filas=30):
+    """
+    Busca la fila que contiene 'columna_ancla' (ej: 'SBS', 'ISIN') y devuelve
+    su índice posicional. Absorbe corrimientos verticales del used_range.
+    """
+    for i in range(min(max_filas, len(df))):
+        valores = [str(v).strip() for v in df.iloc[i].tolist()]
+        if columna_ancla in valores:
+            return i
+    raise ValueError(
+        f"No se encontró la fila con '{columna_ancla}' en las primeras {max_filas} filas."
+    )
+```
+
+## 2. Arreglo de EPU/ETF (tu error actual)
+
+Reemplaza `plantilla_epu_etf` completa por esta versión, que ya no hardcodea `'Market Value (%) (P)'`:
+
+```python
+def plantilla_epu_etf(anio, mes):
+    ruta_base = ("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\"
+                 "Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\"
+                 "1.Data Histórica\\Dataset\\Comparables\\")
+
+    def _leer_comparable(nombre_archivo, sbs_valor):
+        wb = xw.Book(ruta_base + nombre_archivo, read_only=True, update_links=False)
+        sheet = wb.sheets[0].used_range.value
+        wb.close()
+        dfx = pd.DataFrame(sheet)
+        dfx.columns = dfx.iloc[0, ::]
+        dfx = dfx.drop([0], axis=0)
+
+        # --- resolución tolerante de columnas ---
+        col_isin = resolver_columna(dfx, ['ISIN'])
+        col_mv   = resolver_columna(dfx, ['Market Value (%) (P)', 'Market Value (%)'])
+
+        dfx = dfx[dfx[col_isin].notna()]
+        dfx = dfx[dfx[col_mv].notna()]
+        dfx[col_mv] = dfx[col_mv] / 100
+        dfx = dfx.get([col_isin, col_mv])
+        dfx.columns = ['ISIN', 'Market Value (%) (P)']   # nombre estándar interno
+        dfx['Market Value (%) (P)'].fillna(0, inplace=True)
+
+        # expandir por AFP x Fondo
+        out = pd.DataFrame()
+        for i in ["Integra", "Habitat", "Prima", "Profuturo", "Ex_Integra"]:
+            for j in ["F1", "F2", "F3", "Multifondos"]:
+                d = dfx.copy(deep=True)
+                d["Fondo"] = j
+                d["AFP"] = i
+                out = pd.concat([out, d])
+        out = out.reset_index(drop=True)
+        out["SBS"] = sbs_valor
+        out["key1"] = out["SBS"] + out["Fondo"] + out["AFP"]
+        return out
+
+    df_epu = _leer_comparable(anio + mes + " EPU US.xlsx",  '5460042E8427')
+    df_ETF = _leer_comparable(anio + mes + " ETF Perú.xlsx", '5076822E0800')
+    return df_epu, df_ETF
+```
+
+Nota: como internamente renombro a `'Market Value (%) (P)'`, **el resto de tu pipeline** (línea 887 `epu["Market Value (%) (P)"] * epu['Weight']`) sigue funcionando sin tocar nada.
+
+## 3. Puntos frágiles restantes que conviene blindar igual
+
+Vi estos otros lugares que van a romperse con el mismo tipo de cambio silencioso. Te los marco por prioridad:
+
+- **`df_obtenido` (Detallado):** ya lo blindamos con `localizar_fila_header` + delta. Cámbialo para usar el helper: `fila = localizar_fila_header(df, 'SBS')`.
+- **`VP.xlsm` → `set_index("SBS")` / `set_index("ISIN")`** (líneas 106, 1009): si les cambian esos nombres, muere. Envuelve con `resolver_columna` antes del `set_index`.
+- **`DataValorCuota_IN` → `set_index("Fecha")`** (línea 140): igual.
+- **`Parametria` BU → `set_index("SBS")` / `"ISIN"` / `"Cod.Emisor"`** (varias): mismo patrón. Ojo que ahí mezclas `'Cod.Emisor'` y `'codEmisor'` — inconsistencia que ya es un riesgo latente.
+
+Si quieres, puedo generarte un **archivo `.py` completo** con todo el código ya reescrito e integrado (los ~1140 líneas con todos estos puntos blindados y usando `openpyxl` en solo-lectura donde no necesitas escribir en Excel, que además elimina el riesgo de que se toque `G&P_MLab.xlsm`). Así lo pegas de una y quedas cubierto para los próximos meses.
+
+¿Te armo ese `.py` consolidado, o prefieres seguir aplicando los parches sueltos como hasta ahora?
