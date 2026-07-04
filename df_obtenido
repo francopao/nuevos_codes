@@ -1,0 +1,82 @@
+def abrir_libro(ruta_principal, ruta_alterna):
+    """Abre ruta_principal; si no existe, cae a ruta_alterna."""
+    try:
+        return xw.Book(ruta_principal, read_only=True, update_links=False)
+    except FileNotFoundError:
+        print(f"[AVISO] No existe: {ruta_principal}\n-> Usando alternativa: {ruta_alterna}")
+        return xw.Book(ruta_alterna, read_only=True, update_links=False)
+
+
+def df_obtenido(escenario):
+    ruta_principal = (
+        r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones'
+        r'\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\G&P input\G&P_MLab_'
+        + mes + anio + '.xlsm'
+    )
+    ruta_alterna = r'Z:\Benchmarking\G&P_MLab.xlsm'
+
+    wb = abrir_libro(ruta_principal, ruta_alterna)
+    sheet = wb.sheets['Abs']
+    sheet.range('E3').value = escenario
+
+    sheet_df = wb.sheets['Detallado']
+    time.sleep(10)
+    print(sheet_df.range('C5').value)
+    sheet = sheet_df.used_range.value
+    df = pd.DataFrame(sheet)
+    wb.close()
+    df = df.iloc[8::, 1:60]
+
+    header1 = df.iloc[0]
+    header2 = df.iloc[1]
+
+    # --- localizar dinámicamente 'SBS' en vez de asumir posición fija ---
+    candidatos = [i for i, h in enumerate(header2) if str(h).strip() == 'SBS']
+    if not candidatos:
+        raise ValueError(
+            f"No se encontró 'SBS' en el header de 'Detallado'. Header2 leído: {header2.tolist()}"
+        )
+    delta = candidatos[0] - 0  # 0 = posición original esperada de 'SBS'
+    if delta != 0:
+        print(f"[AVISO] 'SBS' se corrió {delta} columna(s); ajustando índices automáticamente.")
+
+    df.columns = [
+        (str(h1).strip() + "_" + str(h2).strip()) if pd.notna(h1) else str(h2).strip()
+        for h1, h2 in zip(header1, header2)
+    ]
+    df = df.iloc[2:]
+    df.columns = df.columns.astype(str).str.strip()
+
+    idx_base = [0,2,4,6,7,8,11,14,15, 22,23,24,25,26,27,28,29,30,31,33,34,
+                35,36,37,38,39,40,41,42,44,45,46,47,48,49,50,51,52,53]
+    idx = [i + delta for i in idx_base]
+
+    df = df.iloc[:, idx]
+    df = df.reset_index(drop=True)
+
+    if 'SBS' not in df.columns:
+        raise ValueError(
+            f"Tras ajustar por 'delta', 'SBS' sigue sin aparecer. Columnas resultantes: {df.columns.tolist()}"
+        )
+
+    df.insert(1, 'SBS2', df["SBS"].apply(recor))
+    del df['PBS']
+    df.columns = ['SBS', 'SBS2','Nombre', 'Asset Class', 'Cat', 'SubCat', 'Sub Cat2', 'Categoría','AC Dir', 'Rank Rt',
+               'INF1', 'HAF1GAP', 'RIF1GAP', 'PFF1GAP', 'SIF1GAP',
+               'INF2', 'HAF2GAP', 'RIF2GAP', 'PFF2GAP', 'SIF2GAP',
+               'INF3', 'HAF3GAP', 'RIF3GAP', 'PFF3GAP', 'SIF3GAP']
+
+    wb2 = xw.Book(r'Z:\Benchmarking\VP.xlsm', read_only=True, update_links=False)
+    sheet2 = wb2.sheets['CalcP']
+    sheet2 = sheet2.used_range.value
+    wb2.close()
+    df2 = pd.DataFrame(sheet2)
+    df2 = df2.iloc[4:, [2,3,10]]
+    df2.columns = df2.iloc[0,::]
+    df2 = df2.drop([4], axis=0)
+    df2 = df2.set_index("SBS")
+    dic = df2.to_dict()
+
+    df.insert(0, 'ISIN', df["SBS"].map(dic['ISIN']))
+
+    return df
