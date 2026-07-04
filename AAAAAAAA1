@@ -1,0 +1,380 @@
+#%% md
+# 1. Comparables (versión blindada)
+#%%
+import pandas as pd
+import numpy as np
+import xlwings as xw
+import re
+import time
+import os
+import datetime
+from datetime import datetime as dt
+
+pd.set_option('future.no_silent_downcasting', True)
+
+dia = '30'
+mes = '06'
+anio = '2026'
+
+RUTA_RIESGO = r'Z:\Mesa de Inversiones\Trading\RIESGO - Consulta General.xlsm'
+RUTA_MKTCAP = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\Comparables\Market Cap.xlsx"
+RUTA_COMPARABLES = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\Comparables\\"
+RUTA_SUBYACENTES = r"Y:\Riesgos Inversiones\1. Nueva organización de Carpetas\AFP\4. Riesgos de Mercado\4.10 Reportes Regulatorios\4.10.15 Base maestra - Inventario\0 Subyacentes.xlsx"
+RUTA_OUTPUT = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Output\Intermedio\\"
+
+# clave interna -> nombre de archivo (evita depender de slicing de nombres)
+COMPARABLES_FILES = {
+    "ACWI US": "ACWI US.xlsx",
+    "CEMB US": "CEMB US.xlsx",
+    "EEM US": "EEM US.xlsx",
+    "EPU US": "EPU US.xlsx",
+    "ETF Perú": "ETF Perú.xlsx",
+    "IEMG US": "IEMG US.xlsx",
+    "ILF US": "ILF US.xlsx",
+    "SWDA LN": "SWDA LN.xlsx",
+}
+
+REQUIRED_COLS = [
+    'ISIN', 'Market Value (%) (P)', 'Name', 'MSCI ESG Rating (P)', 'Crncy',
+    'Cntry (Risk)', 'Class - Broad', 'Px Close (P)'
+]
+
+# Bloomberg a veces exporta estas columnas sin el sufijo "(P)", o con la
+# primera columna (Name) sin encabezado (queda como 'Unnamed: 0'). Este mapa
+# tolera ambas variantes sin depender de qué formato trajo el archivo.
+ALIAS_COLUMNAS = {
+    'Name': ['Name', 'Unnamed: 0', 'Unnamed:0'],
+    'Market Value (%) (P)': ['Market Value (%) (P)', 'Market Value (%)'],
+    'MSCI ESG Rating (P)': ['MSCI ESG Rating (P)', 'MSCI ESG Rating'],
+    'Px Close (P)': ['Px Close (P)', 'Px Close'],
+}
+
+
+def resolver_alias_columnas(df):
+    """Renombra variantes conocidas de columnas a su nombre canónico
+    (p.ej. 'Market Value (%)' -> 'Market Value (%) (P)')."""
+    df = df.copy()
+    for canonico, alias_list in ALIAS_COLUMNAS.items():
+        if canonico in df.columns:
+            continue
+        for alias in alias_list:
+            if alias in df.columns:
+                df = df.rename(columns={alias: canonico})
+                break
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Utilidades de limpieza
+# ---------------------------------------------------------------------------
+
+def limpiar_numero(serie):
+    """Convierte a float, removiendo asteriscos y espacios que a veces
+    contaminan las celdas numéricas exportadas desde Bloomberg."""
+    return pd.to_numeric(
+        serie.astype(str).str.replace('*', '', regex=False).str.strip().replace(
+            {'': np.nan, 'nan': np.nan, 'None': np.nan}
+        ),
+        errors='coerce'
+    )
+
+
+def normalizar_columnas(df):
+    df = df.copy()
+    df.columns = [str(c).strip().replace('\n', ' ') if c is not None else c for c in df.columns]
+    return deduplicar_columnas(df)
+
+
+def deduplicar_columnas(df):
+    """Si tras normalizar quedan columnas duplicadas (p.ej. dos 'Pos (Mkt) (P)'),
+    les agrega sufijo .1, .2... para que no rompan selecciones por nombre."""
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique():
+        idxs = cols[cols == dup].index
+        for i, idx in enumerate(idxs):
+            if i != 0:
+                cols[idx] = f"{dup}.{i}"
+    df.columns = cols
+    return df
+
+
+def encontrar_fila_encabezado(ruta, hoja=0, max_filas_busqueda=10, columna_ancla='ISIN'):
+    """Algunos exports traen una fila de título arriba del encabezado real.
+    Busca en las primeras filas cuál calza como encabezado (contiene la
+    columna ancla, p.ej. 'ISIN')."""
+    preview = pd.read_excel(ruta, sheet_name=hoja, header=None, nrows=max_filas_busqueda)
+    for i in range(len(preview)):
+        fila = preview.iloc[i].astype(str).str.strip()
+        if (fila == columna_ancla).any():
+            return i
+    return 0  # fallback: asumir que la primera fila es el encabezado
+
+
+def leer_comparable(ruta, nombre_archivo):
+    if not os.path.exists(ruta):
+        raise FileNotFoundError(f"No se encontró el archivo: {ruta}")
+
+    header_row = encontrar_fila_encabezado(ruta)
+    df = pd.read_excel(ruta, header=header_row)
+    df = normalizar_columnas(df)
+    df = resolver_alias_columnas(df)
+
+    faltantes = [c for c in REQUIRED_COLS if c not in df.columns]
+    if faltantes:
+        raise KeyError(
+            f"En '{nombre_archivo}' faltan columnas requeridas {faltantes}. "
+            f"Columnas encontradas: {list(df.columns)}"
+        )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Tipo de cambio
+# ---------------------------------------------------------------------------
+
+def abrir_libro(app, ruta, intentos=3, espera=3):
+    """Abre un libro reutilizando la App de Excel compartida, con reintentos
+    ante fallas COM transitorias (WinError -2147467259 y similares)."""
+    ultimo_error = None
+    for intento in range(1, intentos + 1):
+        try:
+            return app.books.open(ruta, read_only=True, update_links=False)
+        except Exception as e:
+            ultimo_error = e
+            print(f"[AVISO] Intento {intento}/{intentos} falló al abrir '{ruta}': {e}")
+            time.sleep(espera)
+    raise OSError(f"No se pudo abrir '{ruta}' tras {intentos} intentos. Último error: {ultimo_error}")
+
+
+def tc1(app, dia, mes, anio):
+    fecha = f"{anio}-{mes}-{dia}"
+    print(fecha)
+    fecha_sin_guion = re.sub("-", "", fecha)
+
+    wb = None
+    try:
+        wb = abrir_libro(app, RUTA_RIESGO)
+        sheet = wb.sheets['Tipo de Cambio']
+        sheet.range('B1').value = fecha_sin_guion
+        time.sleep(5)
+        data = sheet.used_range.value
+    finally:
+        if wb is not None:
+            wb.close()
+
+    df = pd.DataFrame(data)
+    valor = None
+    for i, j in zip(df[4], df[3]):
+        if str(i) == '2':
+            valor = j
+            break
+
+    if valor is None:
+        raise ValueError(f"No se pudo ubicar el tipo de cambio para la fecha {fecha} en '{RUTA_RIESGO}'.")
+
+    print(valor)
+    return float(valor)
+
+
+# ---------------------------------------------------------------------------
+# AUM por comparable (Market Cap.xlsx)
+# ---------------------------------------------------------------------------
+
+def obtener_aum_por_comparable(app, mes, anio):
+    wb = None
+    try:
+        wb = abrir_libro(app, RUTA_MKTCAP)
+        sheet = wb.sheets['MKT']
+        data = sheet.used_range.value
+    finally:
+        if wb is not None:
+            wb.close()
+
+    df_h = pd.DataFrame(data)
+    df_h = df_h.drop([0])
+    df_h.columns = df_h.iloc[0, ::]
+    df_h = df_h.drop([1])
+    df_h = normalizar_columnas(df_h)
+    df_h.columns = df_h.columns.str.replace(' Equity', '', regex=False)
+
+    fecha_col = dt.strptime(f"01/{mes}/{anio}", '%d/%m/%Y')
+    print(fecha_col)
+
+    if 'FECHA' not in df_h.columns:
+        raise KeyError(f"'Market Cap.xlsx' no tiene columna 'FECHA'. Columnas: {list(df_h.columns)}")
+
+    df_h = df_h.loc[df_h['FECHA'] == fecha_col]
+
+    if len(df_h) != 1:
+        raise ValueError(
+            f"Se esperaba 1 fila para la fecha {fecha_col} en 'Market Cap.xlsx', "
+            f"pero se encontraron {len(df_h)}"
+        )
+
+    columnas_aum = {
+        "IEMG US": "IEMG US", "CEMB US": "CEMB US", "ILF US": "ILF US",
+        "ACWI US": "ACWI US", "EEM US": "EEM US", "SWDA LN": "SWDA LN",
+        "EPU US": "EPU US", "ETF Perú": "ETFPERUD PE",
+    }
+
+    aum = {}
+    faltantes = [col for col in columnas_aum.values() if col not in df_h.columns]
+    if faltantes:
+        raise KeyError(f"'Market Cap.xlsx' no tiene las columnas {faltantes}. Columnas: {list(df_h.columns)}")
+
+    for clave, col in columnas_aum.items():
+        valor = limpiar_numero(df_h[col]).iloc[0]
+        if pd.isna(valor):
+            raise ValueError(f"El valor de AUM para '{clave}' (columna '{col}') está vacío o no es numérico.")
+        aum[clave] = float(valor)
+
+    print(aum)
+    return aum
+
+
+# ---------------------------------------------------------------------------
+# Diccionario de países (Subyacentes.xlsx / Parámetros)
+# ---------------------------------------------------------------------------
+
+def obtener_diccionario_paises(app):
+    wb3 = None
+    try:
+        wb3 = abrir_libro(app, RUTA_SUBYACENTES)
+        sheet3 = wb3.sheets['Parametros']
+        data = sheet3.used_range.value
+    finally:
+        if wb3 is not None:
+            wb3.close()
+
+    df_dic3 = pd.DataFrame(data)
+    df_dic3.columns = df_dic3.iloc[1, ::]
+    df_dic3 = df_dic3.drop([0, 1], axis=0)
+    df_dic3 = normalizar_columnas(df_dic3)
+
+    requeridas = ['Nombre País', 'Geografía Integra', 'Mercado', 'Country Code']
+    faltantes = [c for c in requeridas if c not in df_dic3.columns]
+    if faltantes:
+        raise KeyError(f"'Subyacentes.xlsx' (Parametros) no tiene columnas {faltantes}. Columnas: {list(df_dic3.columns)}")
+
+    df_dic3 = df_dic3.get(requeridas)
+    df_dic3['Country Code'] = df_dic3['Country Code'].astype(str).str.strip()
+    df_dic3 = df_dic3.drop_duplicates(subset='Country Code', keep='last')
+    df_dic3 = df_dic3.set_index("Country Code")
+    return df_dic3.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Proceso principal
+# ---------------------------------------------------------------------------
+
+def comparables(dia, mes, anio):
+    app = xw.App(visible=False, add_book=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    try:
+        return _comparables_impl(app, dia, mes, anio)
+    finally:
+        try:
+            app.quit()
+        except Exception as e:
+            print(f"[AVISO] No se pudo cerrar limpiamente la App de Excel: {e}")
+
+
+def _comparables_impl(app, dia, mes, anio):
+    tc = tc1(app, dia, mes, anio)
+    aum_dict = obtener_aum_por_comparable(app, mes, anio)
+
+    df_Total = pd.DataFrame()
+    errores = []
+
+    for clave, nombre_base in COMPARABLES_FILES.items():
+        nombre_archivo = f"{anio}{mes} {nombre_base}"
+        ruta = os.path.join(RUTA_COMPARABLES, nombre_archivo)
+        print(nombre_archivo)
+
+        try:
+            df_h = leer_comparable(ruta, nombre_archivo)
+
+            df_h['Sector1'] = df_h['Name'].apply(lambda x: x[2:] if str(x).startswith('› ') else '')
+            df_h['Sector1'] = df_h['Sector1'].replace('', np.nan)
+            df_h['Sector1'] = df_h['Sector1'].ffill()
+
+            df_h = df_h[df_h["ISIN"].notna()]
+            df_h['Market Value (%) (P)'] = limpiar_numero(df_h['Market Value (%) (P)'])
+            df_h = df_h[df_h['Market Value (%) (P)'].notna()]
+
+            df_h.insert(3, 'AFP', clave)
+            df_h['Market Value (%) (P)'] = df_h['Market Value (%) (P)'] / 100
+
+            print('El Market Value en el archivo ' + nombre_archivo + ' es: ' + str(df_h['Market Value (%) (P)'].sum()))
+            df_Total = pd.concat([df_Total, df_h]).sort_index(ignore_index=True)
+
+        except Exception as e:
+            errores.append(f"{nombre_archivo}: {e}")
+            print(f"[ERROR] Falló '{nombre_archivo}': {e}")
+
+    if df_Total.empty:
+        raise RuntimeError(
+            "No se pudo procesar ningún archivo de comparables. Errores:\n" + "\n".join(errores)
+        )
+
+    if errores:
+        print("=== AVISO: algunos archivos fallaron y fueron omitidos ===")
+        for err in errores:
+            print(" - " + err)
+
+    df_Total = df_Total.get([
+        'ISIN', 'Market Value (%) (P)', 'AFP', 'Name', 'MSCI ESG Rating (P)',
+        'Crncy', 'Cntry (Risk)', 'Class - Broad', 'Px Close (P)', 'Sector1'
+    ])
+
+    df_Total.insert(2, 'Fondo', 'Multifondos')
+    df_Total.insert(3, 'AssetClass', 'RVI')
+    df_Total.insert(4, 'Strategy', 'BU')
+    df_Total.insert(6, 'AUM', '')
+    df_Total.insert(7, 'Tipo', tc)
+    df_Total.insert(8, 'Precio', '')
+    df_Total.insert(9, 'Q', '')
+
+    df_Total['Precio'] = limpiar_numero(df_Total['Px Close (P)'])
+    df_Total = df_Total.drop('Px Close (P)', axis=1)
+
+    df_Total.insert(11, 'Empresa', df_Total['Name'])
+    df_Total.insert(12, 'SBS', '')
+
+    fecha = dt.strptime(f"01/{mes}/{anio}", '%d/%m/%Y')
+    df_Total.insert(13, 'Fecha', fecha)
+    df_Total.insert(14, 'cod emisor', '')
+
+    df_Total = df_Total.rename(columns={
+        "Market Value (%) (P)": "Weight", "Name": "Nombre", "Sector1": "Sector GICS"
+    })
+
+    diccionario2 = obtener_diccionario_paises(app)
+    cntry_risk = df_Total["Cntry (Risk)"].astype(str).str.strip()
+    df_Total.insert(19, 'País', cntry_risk.map(diccionario2['Nombre País']))
+    df_Total.insert(20, 'Región', cntry_risk.map(diccionario2['Geografía Integra']))
+    df_Total.insert(21, 'Mercado', cntry_risk.map(diccionario2['Mercado']))
+
+    sin_match = df_Total.loc[df_Total['País'].isna(), 'Cntry (Risk)'].dropna().unique()
+    if len(sin_match) > 0:
+        print(f"[AVISO] Country Code(s) sin match en Subyacentes/Parametros: {list(sin_match)}")
+
+    df_Total['AFP'] = df_Total['AFP'].astype(str).str.strip()
+    df_Total['AUM'] = df_Total['AFP'].map(aum_dict)
+    sin_aum = df_Total.loc[df_Total['AUM'].isna(), 'AFP'].unique()
+    if len(sin_aum) > 0:
+        raise ValueError(f"No se encontró AUM para las AFP: {list(sin_aum)}")
+
+    df_Total['Pct_FFMM'] = df_Total['Weight']
+
+    ruta_salida = RUTA_OUTPUT + f"{anio}{mes} Comparables.xlsx"
+    df_Total.to_excel(ruta_salida, index=False)
+    print(f"Archivo generado: {ruta_salida}")
+
+    return df_Total
+
+
+#%%
+df = comparables(dia, mes, anio)
+#%%
