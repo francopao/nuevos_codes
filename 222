@@ -1,0 +1,47 @@
+import openpyxl
+
+def _leer_xlsx_openpyxl(ruta, hoja=0):
+    """Lee un .xlsx con openpyxl (sin Excel/COM) y devuelve un DataFrame crudo."""
+    wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True, keep_links=False)
+    ws = wb[wb.sheetnames[hoja]] if isinstance(hoja, int) else wb[hoja]
+    data = [row for row in ws.iter_rows(values_only=True)]
+    wb.close()
+    return pd.DataFrame(data)
+
+
+def plantilla_epu_etf(anio, mes):
+    ruta_base = ("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\"
+                 "Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\"
+                 "1.Data Histórica\\Dataset\\Comparables\\")
+
+    def _leer_comparable(nombre_archivo, sbs_valor):
+        dfx = _leer_xlsx_openpyxl(ruta_base + nombre_archivo, hoja=0)
+        dfx.columns = dfx.iloc[0, ::]
+        dfx = dfx.drop([0], axis=0)
+
+        # --- resolución tolerante de columnas ---
+        col_isin = resolver_columna(dfx, ['ISIN'])
+        col_mv   = resolver_columna(dfx, ['Market Value (%) (P)', 'Market Value (%)'])
+
+        dfx = dfx[dfx[col_isin].notna()]
+        dfx = dfx[dfx[col_mv].notna()]
+        dfx[col_mv] = dfx[col_mv] / 100
+        dfx = dfx.get([col_isin, col_mv])
+        dfx.columns = ['ISIN', 'Market Value (%) (P)']
+        dfx['Market Value (%) (P)'].fillna(0, inplace=True)
+
+        out = pd.DataFrame()
+        for i in ["Integra", "Habitat", "Prima", "Profuturo", "Ex_Integra"]:
+            for j in ["F1", "F2", "F3", "Multifondos"]:
+                d = dfx.copy(deep=True)
+                d["Fondo"] = j
+                d["AFP"] = i
+                out = pd.concat([out, d])
+        out = out.reset_index(drop=True)
+        out["SBS"] = sbs_valor
+        out["key1"] = out["SBS"] + out["Fondo"] + out["AFP"]
+        return out
+
+    df_epu = _leer_comparable(anio + mes + " EPU US.xlsx",  '5460042E8427')
+    df_ETF = _leer_comparable(anio + mes + " ETF Perú.xlsx", '5076822E0800')
+    return df_epu, df_ETF
