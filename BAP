@@ -1,0 +1,168 @@
+# Expediente Técnico de Riesgo Físico Climático
+## Credicorp Ltd. (BAP) — Periodo 2S26
+
+**Metodología:** TCFD + mapas oficiales CENEPRED + información pública corporativa
+**Alcance:** Exclusivamente riesgo físico de activos (se excluye riesgo de transición, huella de carbono y ESG general)
+**Fecha de análisis:** Julio 2026 · Datos CENEPRED generados 2026-07-02
+
+---
+
+## 1. Resumen ejecutivo
+
+| Indicador | Valor | Fuente |
+|---|---|---|
+| Score Global de riesgo físico (CENEPRED, ponderado por AUM) | **2.06 / 5** | Exposicion_Riesgo_CENEPRED 2S26.xlsx |
+| Score Inundación | **3.93 / 5** (peligro dominante) | ídem |
+| Score Movimientos de Masa | 1.96 / 5 | ídem |
+| Score Sequía Severa | 0.29 / 5 (irrelevante) | ídem |
+| AUM total mapeado a activos físicos | S/ 1,450.9 MM | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Inundación | **90.9%** | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Mov. de Masa | 10.1% | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Sequía | 25.1% | ídem |
+| Inmuebles, mobiliario y equipo, neto (2025) | S/ 2,069.0 MM (vs. S/1,438.6 MM en 2024, +43.8%) | Informe Auditado Consolidado 2025, Estado de Situación Financiera |
+| Clasificación de la posición | Equity directo - Local | Exposicion_Riesgo_CENEPRED 2S26.xlsx |
+
+**Lectura clave:** Credicorp es la posición de mayor peso absoluto en AUM del universo analizado (S/1,450.9 MM, la mayor de las 30 empresas mapeadas) y su riesgo físico está concentrado casi por completo en **inundación** (score 3.93, el segundo más alto del universo tras Auna y Banbif), con exposición prácticamente nula a sequía. El score global (2.06) queda moderado porque el modelo pondera tres peligros por igual, pero para efectos de tu reunión el peligro relevante es uno solo: inundación urbana/costera en las zonas donde se concentra la red de agencias.
+
+**Nivel de confianza general de este expediente: MEDIO.** Ver Sección 6 para el detalle de qué está confirmado, qué es inferencia y qué es hipótesis.
+
+---
+
+## 2. Identificación de activos físicos
+
+### 2.1 Qué es el "activo físico" en el caso de Credicorp
+
+Credicorp Ltd. es una **holding financiera** (BCP Perú, BCP Bolivia, Mibanco Perú, Mibanco Colombia, Credicorp Capital, Prima AFP, Pacífico Seguros, ASB Bank Corp). A diferencia de una minera o una industrial, su activo físico relevante **no es una planta productiva sino la red de agencias, oficinas corporativas y data centers**, cuyo daño afecta continuidad operativa y atención al cliente, no producción física de un bien.
+
+**Confirmado (Informe Auditado Consolidado 2025, Nota 9):**
+- Terrenos: S/ 529.3 MM (neto, 2025)
+- Edificios y otras construcciones: S/ 685.9 MM (neto, 2025)
+- Instalaciones: S/ 291.1 MM
+- Total Inmuebles, mobiliario y equipo neto: **S/ 2,069.0 MM**
+- Nota textual: *"Los terrenos y edificaciones están destinados principalmente para el alquiler de oficinas"* — es decir, parte de la cartera inmobiliaria es de renta a terceros, no solo uso propio.
+- **"El Grupo mantiene seguros sobre sus principales activos de acuerdo con las políticas establecidas por la Gerencia."** (mitigante genérico confirmado, sin detalle de cobertura específica para inundación/aluvión — ver Sección 5).
+- No hay evidencia de deterioro de valor de activos fijos reportada en los tres últimos ejercicios (2023-2025).
+
+### 2.2 Sedes principales confirmadas (Reporte Anual y de Sostenibilidad 2025, Sección "Contactos")
+
+| Entidad | Dirección confirmada | Distrito |
+|---|---|---|
+| BCP – Sede Central | Av. República de Panamá 4575, Surquillo, Lima | Surquillo |
+| Grupo Pacífico – Sede Central | Juan de Arona 830, San Isidro, Lima 27 | San Isidro |
+| Prima AFP – Sede Central | Av. Juan de Arona 830, Piso 11, San Isidro | San Isidro |
+| Credicorp Capital Perú | Av. El Derby 055, Torre 3, Piso 7, Santiago de Surco | Surco |
+| BCP Bolivia – Sede Central | Calle Colón esq. Mercado 1308, La Paz | La Paz, Bolivia |
+| Credicorp Capital Chile | Av. Apoquindo 3721, Piso 9, Las Condes, Santiago | Las Condes, Chile |
+| Credicorp Capital Colombia | Calle 34 N°6-65, Bogotá | Bogotá, Colombia |
+| ASB Bank Corp / Credicorp Capital Panamá | Calle 50 y Elvira Méndez, Ciudad de Panamá | Panamá |
+
+### 2.3 Distribución geográfica del AUM (hoja "Activos por Empresa")
+
+El archivo `Riesgos_Climáticos 2S26.xlsx` distribuye el AUM de Credicorp/BCP en **~238 distritos** a nivel nacional, sin nombre de agencia específico (campo "Activo Físico" = `(activo s/d)`, es decir, sin dato de identificación del inmueble). Los 10 distritos de mayor concentración de AUM:
+
+| Distrito | AUM asignado (S/) | % del AUM Perú (aprox.) | Score Inund. | Score MM |
+|---|---|---|---|---|
+| Lima (Cercado) | 644,173,613 | 44.4% | 4 | 2 |
+| San Isidro | 312,440,836 | 21.5% | 4 | 1 |
+| Miraflores | 125,511,472 | 8.7% | 4 | 2 |
+| Arequipa | 36,942,912 | 2.5% | 5 | 2 |
+| La Punta (Callao) | 30,387,314 | 2.1% | 4 | 1 |
+| Trujillo | 29,456,751 | 2.0% | 5 | 1 |
+| Chiclayo | 16,841,823 | 1.2% | 4 | 1 |
+| Piura | 12,328,857 | 0.8% | 5 | 1 |
+| Juliaca | 8,159,542 | 0.6% | 1 | 3 |
+| Cusco | 7,916,857 | 0.5% | 3 | 4 |
+
+**Interpretación con cautela (INFERENCIA, no confirmado):** Estos montos casi con certeza no representan "valor de inmuebles" sino una proxy de **AUM/exposición crediticia y operativa distribuida geográficamente** (probablemente ponderada por presencia de agencias/cartera de clientes por distrito), replicada de forma casi idéntica entre la fila "Credicorp" y la fila "Banco de Crédito del Perú" (BCP) con un factor de escala ~4.14x. Esto sugiere que "Credicorp" consolida BCP + Mibanco + Pacífico + Prima + Credicorp Capital + ASB, y que el archivo pudo haber usado la distribución geográfica de BCP como proxy para todo el grupo. **Esto debe confirmarse contigo o con el proveedor de datos del archivo CENEPRED — no fue posible verificarlo con los documentos públicos disponibles.**
+
+**Discrepancia relevante para tu reunión:** Ninguna de las tres sedes centrales confirmadas (Surquillo, San Isidro, Surco) coincide exactamente con el distrito "Lima" (Cercado) que concentra el 44% del AUM en el archivo. Esto indica que el modelo geográfico refleja la **red de agencias y/o cartera crediticia**, no la ubicación de las sedes corporativas ni de los data centers. Es una pregunta legítima para la gerencia: *¿la exposición reportada corresponde a valor de inmuebles propios, a cartera de crédito geolocalizada, o a ambos?*
+
+---
+
+## 3. Relación con los escenarios de peligro CENEPRED
+
+### 3.1 Inundación (peligro dominante — Score 3.93/5)
+
+- 90.9% del AUM de Credicorp está en zonas de Nivel CENEPRED 4 o 5 de inundación.
+- Los tres distritos de mayor concentración (Lima Cercado, San Isidro, Miraflores = 74.6% del AUM) tienen Score de Inundación = 4 (Nivel Alto).
+- Arequipa, Trujillo, Piura y Chiclayo (concentración adicional de ~6.5% del AUM) están en Nivel 5 (Muy Alto).
+- **Contexto de peligro (ZONAS_CRITICAS INGENMET Jun-2026 / Informe ENFEN):** el litoral norte y centro peruano (Piura, Lambayeque, La Libertad, Lima, Ica) presenta actualmente condiciones de vigilancia ante anomalías cálidas superficiales del mar (El Niño costero), lo que eleva la probabilidad de eventos de precipitación extrema e inundación urbana en el corto-mediano plazo. **Esto es contexto de peligro regional confirmado por fuente oficial (ENFEN), no un pronóstico específico para activos de Credicorp.**
+
+### 3.2 Movimientos de masa (Score 1.96/5 — secundario)
+
+- Solo 10.1% del AUM en Nivel 4+5.
+- Cusco (Score MM=4) y Juliaca (Score MM=3) son los distritos con mayor riesgo relativo de movimiento de masa dentro de la cartera, pero representan participación menor del AUM total (<1.2% combinado).
+
+### 3.3 Sequía severa (Score 0.29/5 — irrelevante para el caso de Credicorp)
+
+- Coherente con la naturaleza del negocio: sequía afecta directamente a sectores con dependencia hídrica física (agro, minería, generación hidroeléctrica), no a una red bancaria/aseguradora, salvo por el canal indirecto de riesgo crediticio hacia clientes agrícolas (mencionado cualitativamente en el TCFD, ver 4.2).
+
+---
+
+## 4. Hallazgo metodológico crítico: qué SÍ y qué NO reporta el TCFD de Credicorp sobre riesgo físico
+
+Este es el punto más importante a validar en tu reunión.
+
+**Confirmado (TCFD Report 2025 de Credicorp, Secciones 2 y 3):**
+- El TCFD de Credicorp trata el riesgo físico casi en su totalidad como **riesgo físico de sus clientes/carteras** (riesgo de crédito, de inversión y de suscripción de seguros), no como riesgo físico de sus propios activos inmobiliarios/operativos.
+- Cita textual (traducida): *"Los eventos como inundaciones, lluvias intensas y deslizamientos incrementan la probabilidad y severidad de pérdidas"* — en el contexto de **suscripción de pólizas de Pacífico Seguros**, no de sus propias sedes.
+- Pacífico Seguros: desde 2025 evalúa riesgo físico por geolocalización para "activos inmobiliarios priorizados" en su **cartera de colateral hipotecario/garantías**, usando su propia expertise de suscripción — **no hay evidencia pública de que este mismo proceso se aplique a las sedes/agencias propias de BCP, Mibanco o Prima**.
+- El TCFD no divulga: (a) número de agencias, (b) inventario geolocalizado de sedes propias, (c) análisis de escenario climático físico aplicado a sus propios inmuebles, (d) valor asegurado de activos propios frente a inundación específicamente.
+- Menciones de "data center" en el TCFD y en el Reporte Anual son exclusivamente sobre eficiencia energética (LED, chillers, UPS) — **cero mención de resiliencia o exposición física de los data centers ante inundación o sismo**, pese a que un data center dañado es de alta criticidad operativa para un banco.
+
+**Implicación para tu tesis de inversión:** Credicorp gestiona el riesgo físico climático principalmente como **riesgo de tercero** (clientes/colateral vía Pacífico Seguros), y no divulga públicamente un análisis equivalente sobre su propia huella inmobiliaria. Esto es una asimetría de información relevante: el banco puede estar bien protegido en el lado de suscripción de seguros, pero no hay evidencia pública de que aplique el mismo rigor a sus propias sedes y data centers.
+
+---
+
+## 5. Mitigantes identificados (solo con evidencia pública — no se infiere nada adicional)
+
+| Mitigante | Evidencia | Alcance | Confianza |
+|---|---|---|---|
+| Seguro sobre activos fijos principales | Nota 9, Informe Auditado 2025: *"El Grupo mantiene seguros sobre sus principales activos"* | Genérico, sin desglose por peligro ni por sede | Alto (confirmado), pero de bajo detalle |
+| Inspección de riesgo físico en suscripción de seguros (Pacífico Seguros) | TCFD 2025, Sección 3.C | Aplica a **clientes asegurados**, no confirmado que aplique a sedes propias | Alto para clientes / Nulo para activos propios |
+| Geolocalización de riesgo físico en colateral inmobiliario | TCFD 2025, iniciativa 2025 | Cartera de garantías hipotecarias, no inmuebles propios | Medio (iniciativa nueva, sin resultados divulgados aún) |
+| Revisión periódica de valor residual y vida útil de activos, sin evidencia de deterioro 2023-2025 | Nota 9, Informe Auditado | Contable, no específico a clima | Alto (confirmado) |
+| Campo "Mitigante (2S26)" en archivo CENEPRED | Valor = "—" (vacío) | Sin mitigante cargado en la fuente para Credicorp | Confirmado ausencia de dato — la hoja "Mitigantes" del archivo está vacía ("No se cargó archivo de mitigantes") |
+
+**No se identificó evidencia pública de:** planes de continuidad de negocio específicos ante inundación, valor asegurado por sede, inversión en diques/barreras físicas, relocalización de data centers, ni backup geográfico redundante fuera de Lima. Esto **no significa que no existan** — solo que no están divulgados en las fuentes revisadas.
+
+---
+
+## 6. Nivel de confianza y trazabilidad
+
+| Elemento | Estado | Fuente |
+|---|---|---|
+| Scores CENEPRED por peligro y AUM en Nivel 4+5 | **Confirmado** | Exposicion_Riesgo_CENEPRED 2S26.xlsx / Riesgos_Climáticos 2S26.xlsx |
+| Valor contable de inmuebles/terrenos/edificios | **Confirmado** | Informe Auditado Consolidado 2025, Nota 9 |
+| Direcciones de sedes centrales | **Confirmado** | Reporte Anual y Sostenibilidad 2025, Sección "Contactos" |
+| Relación entre distritos de AUM y agencias/inmuebles reales | **Inferencia** — no verificado con fuente primaria | — |
+| Que "Credicorp" y "BCP" en el archivo CENEPRED representen consolidado vs. entidad individual con proxy geográfico compartido | **Hipótesis** — requiere confirmación con el proveedor de datos | — |
+| Nivel real de aseguramiento específico contra inundación | **No disponible** — el Grupo confirma tener seguros pero no detalla cobertura por peligro | — |
+| Coordenadas exactas de agencias individuales | **No disponible en fuentes públicas revisadas** | — |
+
+**Cómo reducir la incertidumbre antes de tu reunión:**
+1. Preguntar directamente si el modelo de geolocalización de riesgo físico que Pacífico Seguros aplica a clientes/colateral también se aplica internamente a las sedes y data centers de BCP/Mibanco/Prima.
+2. Solicitar el número de agencias por distrito (dato operativo que la memoria no desglosa) para verificar si la distribución de AUM del archivo CENEPRED corresponde a valor inmobiliario o a cartera crediticia.
+3. Preguntar por planes de continuidad de negocio (BCM) y redundancia de data centers ante escenario de inundación en Lima Cercado/San Isidro/Miraflores (Nivel 4 CENEPRED confirmado en los tres).
+4. Confirmar si el seguro "sobre sus principales activos" incluye específicamente peligro de inundación/aluvión o solo incendio/todo riesgo genérico.
+
+---
+
+## 7. Preguntas sugeridas para la reunión con Credicorp/BAP
+
+1. El TCFD divulga gestión de riesgo físico principalmente para clientes (crédito, colateral, suscripción de seguros). ¿Existe un proceso equivalente de evaluación geolocalizada de riesgo físico para las sedes, agencias y data centers propios del Grupo?
+2. Los tres distritos con mayor concentración de exposición en nuestro modelo (Lima Cercado, San Isidro, Miraflores) están en Nivel 4 CENEPRED de inundación. ¿Cuántas agencias y qué % de la operación crítica (procesamiento, data center primario/secundario) están ubicadas en estos distritos?
+3. ¿El "seguro sobre los principales activos" mencionado en la Nota 9 de los EEFF incluye cobertura específica de inundación/aluvión, y con qué deducible?
+4. ¿Existe un data center de respaldo (DR site) fuera de Lima, y en qué nivel de riesgo CENEPRED se ubica?
+5. Dado el contexto ENFEN actual de vigilancia de El Niño costero, ¿hay algún plan de contingencia activado o reforzado para 2S26 en agencias de la costa norte (Piura, Chiclayo, Trujillo)?
+6. ¿Puede la compañía confirmar o corregir nuestra interpretación de que la distribución geográfica de "activos" en modelos de riesgo de terceros corresponde a cartera crediticia/AUM y no a valor de inmuebles propios?
+
+---
+
+## 8. Nota sobre "pricing" de activos físicos riesgosos
+
+Tal como solicitaste, **no se inventa ningún dato de valorización específico por activo** porque no existe en las fuentes públicas revisadas. Lo único cuantificable con la información disponible es:
+
+- Valor contable total de terrenos + edificios: S/ 1,215.1 MM neto (529.3 + 685.9), 2025.
+- De este total, el **74.6% del AUM del modelo de riesgo** (proxy, no necesariamente equivalente 1:1 al valor contable) está concentrado en 3 distritos de Nivel 4 de inundación (Lima, San Isidro, Miraflores).
+- Una aproximación simplista de "valor contable en zona de riesgo alto/muy alto" sería aplicar el 90.9% (participación de Nivel 4+5 en el modelo AUM) al valor contable de inmuebles: **S/ 1,215.1 MM × 90.9% ≈ S/ 1,104 MM** de valor contable de inmuebles potencialmente ubicado en zonas de inundación Nivel 4-5. **Esto es una estimación metodológica basada en supuestos, NO un dato reportado por la empresa — debe presentarse como tal y validarse en la reunión.**
