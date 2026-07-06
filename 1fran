@@ -1,0 +1,81 @@
+Solo el fragmento con la corrección (columna `'Market Value (%) (P)'` ya no existe tal cual en el Excel actual — cambió el sufijo/formato del header). Reemplaza la función `def plantilla_epu_etf(anio, mes):` de la línea 730 por esto:
+
+```python
+def _col_market_value(df):
+    """Localiza la columna de Market Value tolerando cambios de sufijo/espacios en el header."""
+    for c in df.columns:
+        if str(c).strip().startswith("Market Value"):
+            return c
+    raise KeyError(f"No se encontró columna 'Market Value...'. Columnas disponibles: {list(df.columns)}")
+
+
+def plantilla_epu_etf(anio, mes): 
+    ruta = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Dataset\\Comparables\\"+anio+mes+" EPU US.xlsx"
+    wb = xw.Book(ruta,read_only=True, update_links=False)  
+    sheet = wb.sheets[0]
+    sheet = sheet.used_range.value
+    wb.close()
+    
+    df_p = pd.DataFrame(sheet)
+    df_p.columns = df_p.iloc[0,::]
+    df_p = df_p.drop([0],axis=0)
+    df_p = df_p[df_p["ISIN"].notna()]
+    col_mv = _col_market_value(df_p)
+    df_p = df_p[df_p[col_mv].notna()]
+    
+    df_p[col_mv] = df_p[col_mv]/100
+    df_p = df_p.get(['ISIN', col_mv])
+    df_p = df_p.rename(columns={col_mv: 'Market Value (%) (P)'})
+    df_p['Market Value (%) (P)'] = df_p['Market Value (%) (P)'].fillna(0)
+
+    df_epu = pd.DataFrame()
+    for i in ["Integra","Habitat","Prima","Profuturo","Ex_Integra"]:  
+        for j in ["F1","F2","F3","Multifondos"]:
+            df = df_p.copy(deep=True)
+            df["Fondo"]=j
+            df["AFP"]=i
+            df_epu = pd.concat([df_epu, df])
+            
+    df_epu = df_epu.reset_index()
+    df_epu = df_epu.drop(['index'], axis=1)
+    
+    df_epu["SBS"] = '5460042E8427'
+    df_epu["key1"] = df_epu["SBS"]+ df_epu["Fondo"] + df_epu["AFP"]
+    
+    ##################################################################################################
+    ruta = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Dataset\\Comparables\\"+anio+mes+" ETF Perú.xlsx"
+    wb = xw.Book(ruta,read_only=True, update_links=False)  
+    sheet2 = wb.sheets[0]
+    sheet2 = sheet2.used_range.value
+    
+    df_p2 = pd.DataFrame(sheet2)
+    wb.close()
+    df_p2.columns = df_p2.iloc[0,::]
+    df_p2 = df_p2.drop([0],axis=0)
+    df_p2 = df_p2[df_p2["ISIN"].notna()]
+    col_mv2 = _col_market_value(df_p2)
+    df_p2 = df_p2[df_p2[col_mv2].notna()]
+    
+    df_p2[col_mv2] = df_p2[col_mv2]/100
+    df_p2 = df_p2.get(['ISIN', col_mv2])
+    df_p2 = df_p2.rename(columns={col_mv2: 'Market Value (%) (P)'})
+    df_p2['Market Value (%) (P)'] = df_p2['Market Value (%) (P)'].fillna(0)
+
+    df_ETF = pd.DataFrame()
+    for i in ["Integra","Habitat","Prima","Profuturo","Ex_Integra"]:  
+        for j in ["F1","F2","F3","Multifondos"]:
+            df = df_p2.copy(deep=True)
+            df["Fondo"]=j
+            df["AFP"]=i
+            df_ETF = pd.concat([df_ETF, df])
+            
+    df_ETF = df_ETF.reset_index()
+    df_ETF = df_ETF.drop(['index'], axis=1)
+    
+    df_ETF["SBS"] = '5076822E0800'
+    df_ETF["key1"] = df_ETF["SBS"]+ df_ETF["Fondo"] + df_ETF["AFP"]
+    
+    return df_epu, df_ETF
+```
+
+Cambios: la columna ya no se llama exactamente `'Market Value (%) (P)'` en el Excel (cambió sufijo/espacios), así que `_col_market_value` la localiza por su prefijo real y luego se renombra al nombre esperado para que el resto del pipeline no se rompa. También cerré el `wb` de EPU antes de abrir el de ETF (antes quedaba abierto).
