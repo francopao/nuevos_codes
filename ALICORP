@@ -1,0 +1,186 @@
+# Expediente Técnico de Riesgo Físico Climático
+## Alicorp S.A.A. — Periodo 2S26
+
+**Metodología:** TCFD + mapas oficiales CENEPRED + información pública corporativa
+**Alcance:** Exclusivamente riesgo físico de activos (excluye transición, emisiones, huella de carbono, reputación y ESG general)
+**Fuentes primarias Alicorp:** Memoria Anual 2025, Notas a los EEFF Consolidados 1T26, Reporte de Responsabilidad Compartida RSPO 2025
+**Fecha de análisis:** Julio 2026 · Datos CENEPRED generados 2026-07-02
+
+---
+
+## 1. Resumen ejecutivo
+
+| Indicador | Valor | Fuente |
+|---|---|---|
+| Score Global de riesgo físico (CENEPRED, ponderado por AUM) | **2.15 / 5** | Exposicion_Riesgo_CENEPRED 2S26.xlsx |
+| Score Inundación | **3.89 / 5** (peligro dominante) | ídem |
+| Score Movimientos de Masa | 2.44 / 5 (secundario, relevante) | ídem |
+| Score Sequía Severa | 0.11 / 5 (irrelevante en el modelo) | ídem |
+| AUM (posición en cartera) | S/ 94.6 MM | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Inundación | **72.2%** | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Mov. de Masa | 27.8% | ídem |
+| % del AUM en Nivel CENEPRED 4+5 — Sequía | 0% | ídem |
+| Valor contable consolidado de activos (total sociedad) | S/ 10,668,796 mil (S/ 10,668.8 MM) | Memoria Anual 2025, 2.10 |
+| Propiedades, planta y equipo neto (consolidado, 1T26 / Mar-2026) | S/ 3,225.8 MM | Notas EEFF 1T26, Nota 13 |
+| Clasificación de la posición | Equity directo - Local | Exposicion_Riesgo_CENEPRED 2S26.xlsx |
+
+**Lectura clave:** A diferencia de Credicorp (holding financiero cuyo "activo físico" es red de agencias), Alicorp es una **industrial de consumo masivo con plantas productivas físicas y concretas**, lo que hace el análisis mucho más trazable: la memoria identifica plantas por nombre, distrito y valor contable. El peligro dominante vuelve a ser **inundación** (score 3.89, muy alto y comparable al 3.93 de Credicorp), pero Alicorp tiene un componente de **movimiento de masa materialmente mayor** (score 2.44 vs. 1.96 de Credicorp; 27.8% del AUM en Nivel 4+5), impulsado por plantas en distritos de quebrada como Lurigancho y Chaclacayo.
+
+**Ventaja analítica sobre Credicorp:** Alicorp SÍ declara públicamente evaluar riesgo físico climático en el 100% de sus sitios de mayor importancia operativa, alineado a TCFD (fuente: RSPO 2025). Esto es más de lo que divulga Credicorp sobre sus activos propios. El detalle específico por planta, sin embargo, no es público (ver Sección 4).
+
+**Nivel de confianza general: MEDIO-ALTO** en identificación y ubicación de activos (mejor que Credicorp); MEDIO en cuantificación del impacto. Ver Sección 6.
+
+---
+
+## 2. Identificación de activos físicos
+
+### 2.1 Plantas industriales con valor contable confirmado (Memoria Anual 2025, sección 2.10)
+
+Estos son valores contables individuales de activos, expresados en miles de soles al 31-dic-2025 — **dato confirmado y directamente citado de la memoria**:
+
+| Planta | Ubicación (confirmada) | Actividad | Valor contable (S/ miles) |
+|---|---|---|---|
+| **COPSA** | Callao | Aceites, grasas, salsas, detergentes, jabones, panetones | **515,706** |
+| **Lurín (Intradevco)** | Lurín, Lima | Limpieza del hogar y aseo personal | **551,087** |
+| **Faucett** | Callao | Harinas, pastas, galletas | **267,344** |
+| **Molino Callao** | Callao | Harinas, pastas, galletas | **94,191** |
+| **Sidsur + Molino Arequipa** | Arequipa | Harinas y galletas | **68,414** |
+| **Total activos citados en plantas** | | | **~1,496,742** |
+
+- Domicilio legal de la sociedad: **Av. Argentina N° 4793, Carmen de La Legua Reynoso, Callao** (confirmado, Memoria 2.1).
+- Otros inmuebles confirmados en memoria: Fundo Santa Genoveva (Lurín, 12 hectáreas); Fundo San Carlos (Chilca, Cañete, 300,000 m²); planta de alimentos balanceados; planta de aceite de pescado histórica en Fundo San Miguel, Catacaos, Piura (transferida en 2012 — ya no es activo propio).
+
+### 2.2 Activos mapeados en el modelo CENEPRED (Riesgos_Climáticos 2S26.xlsx)
+
+El modelo distribuye 16 activos de Alicorp (marcas/subsidiarias: ALICORP, INTRADEVCO, MASTERBREAD, APUDEX, VITAPRO, IDE) por distrito. **Aquí sí hay nombre de activo por marca** (mejor granularidad que Credicorp), con score CENEPRED por distrito:
+
+| Marca / Activo | Distrito | Score Inund. | Score MM | Comentario de exposición |
+|---|---|---|---|---|
+| ALICORP | Callao (Callao) | **5** | 1 | Muy alto inund. — coincide con COPSA/plantas Callao (mayor valor contable) |
+| ALICORP | Carmen de la Legua (Callao) | **4** | 1 | Alto inund. — coincide con domicilio legal / plantas Callao |
+| ALICORP / INTRADEVCO | Lurín (Lima) | 3 | 3 | Medio-medio — planta Lurín (S/551 MM, el mayor valor individual) |
+| ALICORP | Piura (Piura) | **5** | 1 | Muy alto inund. |
+| ALICORP | Chiclayo (Lambayeque) | **4** | 1 | Alto inund. |
+| ALICORP | Arequipa | **5** | 2 | Muy alto inund. — coincide con Sidsur/Molino Arequipa |
+| ALICORP | Miraflores (Lima) | **4** | 2 | Alto inund. (probable oficina comercial) |
+| ALICORP | Lurigancho (Lima) | **4** | **5** | Alto inund. + **Muy alto mov. de masa** (zona de quebrada) |
+| MASTERBREAD | Lurigancho (Lima) | **4** | **5** | ídem — doble exposición |
+| MASTERBREAD | Chaclacayo (Lima) | **4** | **4** | Alto inund. + Alto mov. de masa (quebrada) |
+| MASTERBREAD | Paita (Piura) | **4** | 2 | Alto inund. |
+| APUDEX / MASTERBREAD | Ate (Lima) | 3 | **4** | Medio inund. + Alto mov. de masa |
+| VITAPRO | Moche (Trujillo, La Libertad) | **4** | 1 | Alto inund. |
+| IDE (Industrias del Espino) | El Cenepa (Condorcanqui, Amazonas) | 1 | 3 | Bajo inund. / Medio MM — palma, selva |
+
+**Nota:** MASTERBREAD y una planta de galletas en Callao aparecen mencionadas también en la memoria (Ate N°1779 clasificado como mantenido para la venta, según Nota EEFF 1T26 línea 1218). Las adiciones de PP&E del 1T26 confirman inversión activa en las plantas del **Callao** (galletas, salsas, aceites, estaciones de carga) y **Lurín** (cuidado personal/hogar), es decir, los sitios de mayor exposición a inundación siguen siendo el centro de la inversión de capital.
+
+---
+
+## 3. Relación con los escenarios de peligro CENEPRED
+
+### 3.1 Inundación (peligro dominante — Score 3.89/5)
+
+- 72.2% del AUM en Nivel 4+5.
+- **Las plantas de mayor valor contable están en los distritos de mayor peligro de inundación:** las plantas del Callao (COPSA S/515.7 MM + Faucett S/267.3 MM + Molino Callao S/94.2 MM = ~S/877 MM de valor contable) están en distritos con score de inundación 4-5. Arequipa (Sidsur/Molino, S/68.4 MM) en Nivel 5.
+- Contexto de peligro (ENFEN / ZONAS CRÍTICAS INGENMET Jun-2026): el litoral norte y central (Piura, Lambayeque, La Libertad, Callao, Arequipa) está bajo vigilancia por anomalías cálidas del mar (El Niño costero), elevando probabilidad de precipitación extrema e inundación. **Alicorp tiene plantas confirmadas en Piura, Chiclayo, Paita, Moche (Trujillo) y Callao — toda la franja costera de mayor peligro actual.**
+
+### 3.2 Movimientos de masa (Score 2.44/5 — secundario pero MATERIAL)
+
+- 27.8% del AUM en Nivel 4+5 — significativamente mayor que Credicorp (10.1%).
+- Concentrado en las plantas de panificación **MASTERBREAD en Lurigancho (MM=5) y Chaclacayo (MM=4)**, y **APUDEX/MASTERBREAD en Ate (MM=4)** — distritos de quebradas de la cuenca del Rímac, históricamente afectados por huaicos (flujos de detritos) durante eventos de El Niño.
+- Este es un riesgo **distinto y adicional** al de Credicorp: mientras el banco casi no tiene exposición a movimiento de masa, las plantas de pan de Alicorp en el eje Lurigancho–Chaclacayo–Ate sí la tienen de forma tangible.
+
+### 3.3 Sequía severa (Score 0.11/5 — irrelevante en el modelo)
+
+- 0% del AUM en Nivel 4+5 dentro del modelo CENEPRED.
+- **Advertencia analítica (INFERENCIA):** este score bajo puede subestimar el riesgo real. Alicorp tiene un negocio de **aceite de palma (Industrias del Espino / IDE, Palmawasi–San Martín)** y de **acuicultura (Vitapro)** intensivos en agua y dependientes de condiciones agroclimáticas. El modelo mapeó solo 1 de 16 activos con score de sequía válido (cobertura de sequía = 6.25% según el Excel), por lo que **la sequía está severamente sub-mapeada para Alicorp**, no necesariamente ausente. La materia prima agrícola (palma, trigo importado, pescado) es sensible a sequía aguas arriba en la cadena, aunque no golpee directamente la planta. Ver pregunta 5.
+
+---
+
+## 4. Hallazgo metodológico: qué reporta Alicorp sobre riesgo físico (comparado con Credicorp)
+
+**Confirmado (RSPO 2025, sección "Climate action strategy / Adaptation Component"):**
+- Alicorp declara una estrategia climática con componentes de mitigación y **adaptación**, con hoja de ruta alineada a **TCFD**.
+- Cita textual del objetivo de adaptación: evalúan riesgos físicos y de transición en el **100% de sus sitios de mayor importancia operativa**, analizan escenarios climáticos para anticipar impactos e identificar vulnerabilidades, e integran el riesgo climático en la toma de decisiones estratégicas y de inversión.
+- En 2025 incorporaron una **nueva funcionalidad de evaluación de riesgo climático en la cadena de suministro** (enfocada en palma, vía la herramienta de trazabilidad satelital de IDE).
+
+**Diferencia clave frente a Credicorp:** Alicorp SÍ afirma evaluar riesgo físico sobre sus **propios sitios operativos** (no solo sobre terceros/clientes). Esto es metodológicamente más avanzado que la divulgación de Credicorp, que trata el riesgo físico casi solo como riesgo de cartera/cliente.
+
+**Limitación (lo que NO divulga):**
+- No publica los **resultados** de esas evaluaciones por planta (qué sitio salió en qué nivel de riesgo, qué escenario RCP usaron, qué pérdida esperada estimaron).
+- No divulga inventario geolocalizado con coordenadas ni valor asegurado por peligro.
+- La memoria anual (documento financiero-legal) es **pobre en clima**: no menciona inundación, sequía ni movimiento de masa como factor de riesgo de activos. Todo el contenido climático está en el reporte RSPO (documento de sostenibilidad de palma), no en la memoria. **Esta separación es en sí un hallazgo:** el riesgo físico de las plantas no está integrado en la narrativa de riesgo de la memoria financiera.
+
+---
+
+## 5. Mitigantes identificados (solo evidencia pública)
+
+| Mitigante | Evidencia | Alcance | Confianza |
+|---|---|---|---|
+| Evaluación de riesgo físico y de transición en 100% de sitios de mayor importancia operativa | RSPO 2025, componente de adaptación | Declarativo; resultados no publicados | Alto que existe el proceso / Nulo sobre resultados |
+| Análisis de escenarios climáticos e integración en decisiones de inversión | RSPO 2025 | Declarativo | Medio |
+| Funcionalidad de riesgo climático en cadena de suministro de palma | RSPO 2025 | Solo cadena de palma (IDE), no plantas de consumo masivo | Alto para palma / N/A para resto |
+| Seguros sobre activos | No hallado explícitamente en las fuentes de Alicorp revisadas | — | No disponible |
+| Campo "Mitigante (2S26)" en archivo CENEPRED | Valor = "—" (vacío) | Sin mitigante cargado en la fuente | Confirmada ausencia de dato |
+| Deterioro acumulado de PP&E reconocido | S/ 196.0 MM (Mar-2026, Nota 13) | Contable; no atribuido a causa climática | Confirmado el monto, causa desconocida |
+
+**No se identificó evidencia pública de:** cobertura de seguro por peligro específico, planes de continuidad operativa por planta, medidas físicas de protección (diques, drenaje, muros de contención en plantas de quebrada), ni redundancia productiva entre plantas. **No significa que no existan** — solo que no están en las fuentes revisadas.
+
+---
+
+## 6. Nivel de confianza y trazabilidad
+
+| Elemento | Estado | Fuente |
+|---|---|---|
+| Scores CENEPRED por peligro y % Nivel 4+5 | **Confirmado** | Excel CENEPRED 2S26 |
+| Valor contable por planta (COPSA, Lurín, Faucett, etc.) | **Confirmado** | Memoria 2025, 2.10 |
+| PP&E consolidado neto S/3,225.8 MM | **Confirmado** | Notas EEFF 1T26, Nota 13 |
+| Ubicación distrital de plantas | **Confirmado** | Memoria + Excel coinciden |
+| Que las plantas de mayor valor estén en distrito de mayor inundación | **Confirmado por cruce** | Memoria (valor) × Excel (score) |
+| Existencia de evaluación TCFD de riesgo físico en sitios propios | **Confirmado (declarativo)** | RSPO 2025 |
+| Resultado de esa evaluación por planta | **No disponible** | — |
+| Sub-mapeo de sequía (solo 1 de 16 activos) | **Confirmado como limitación del modelo** | Excel (cobertura sequía 6.25%) |
+| Correspondencia exacta activo-marca ↔ planta física nombrada en memoria | **Inferencia** — nombres de marca del Excel no siempre calzan 1:1 con nombres de planta de la memoria | — |
+
+**Cómo reducir la incertidumbre:**
+1. Solicitar los resultados de la evaluación TCFD de riesgo físico por sitio (Alicorp dice tenerla al 100% de sitios críticos).
+2. Confirmar cobertura de seguro por peligro (inundación, huaico) para las plantas del Callao, Lurín y del eje Lurigancho–Chaclacayo–Ate.
+3. Pedir el mapeo real de sequía sobre la cadena agrícola (palma IDE, trigo, pesca Vitapro), que el modelo CENEPRED sub-representa.
+
+---
+
+## 7. Preguntas sugeridas para la reunión con Alicorp
+
+1. El reporte RSPO indica que evalúan riesgo físico climático en el 100% de sus sitios de mayor importancia operativa alineado a TCFD. ¿Pueden compartir los resultados por planta: qué sitios resultaron en mayor nivel de riesgo de inundación y de movimiento de masa, y bajo qué escenario climático?
+2. Las plantas de mayor valor contable (COPSA, Faucett, Molino Callao — ~S/877 MM) están en distritos Callao con Nivel 4-5 CENEPRED de inundación. ¿Qué medidas físicas de protección y qué cobertura de seguro específica contra inundación tienen estos activos?
+3. Las plantas de panificación MASTERBREAD (Lurigancho, Chaclacayo) y APUDEX/MASTERBREAD (Ate) están en Nivel 4-5 de movimiento de masa (zona de huaicos del Rímac). ¿Existe plan de continuidad y protección ante flujos de detritos, especialmente ante el contexto ENFEN actual de El Niño costero?
+4. ¿Existe redundancia productiva entre plantas que permita reubicar producción crítica si una planta costera queda fuera de operación por inundación?
+5. El modelo de peligro sub-representa el riesgo de sequía sobre la cadena agrícola (palma de IDE en San Martín, insumos de Vitapro). ¿Cómo evalúan el riesgo de sequía/estrés hídrico aguas arriba en el abastecimiento de materia prima?
+6. La memoria financiera no menciona riesgo físico climático como factor de riesgo, mientras el reporte RSPO sí. ¿Está previsto integrar el riesgo físico de activos en la divulgación de riesgos de la memoria/EEFF?
+
+---
+
+## 8. Estimación de impacto y "pricing" (sin inventar datos)
+
+Solo con lo cuantificable públicamente:
+
+- **Valor contable directamente expuesto a inundación Nivel 4-5 (confirmado por cruce):** las plantas del Callao y Arequipa citadas en la memoria (COPSA S/515.7 MM + Faucett S/267.3 MM + Molino Callao S/94.2 MM + Sidsur/Arequipa S/68.4 MM = **S/ 945.6 MM** de valor contable) están todas en distritos con score de inundación 4-5. Es decir, **~63% del valor contable de plantas citado en la memoria (945.6 / 1,496.7) está en zona de inundación Muy Alta/Alta.** Esto es un cruce directo memoria×CENEPRED, de confianza alta.
+- La planta de Lurín (Intradevco, S/551.1 MM, el mayor valor individual) está en Nivel 3 de inundación (Medio) pero Nivel 3 de movimiento de masa.
+- **Aproximación de PP&E consolidado en zona de riesgo alto (estimación metodológica, NO dato de la empresa):** aplicando el 72.2% (participación de Nivel 4+5 de inundación en el modelo AUM) al PP&E neto consolidado de S/3,225.8 MM → **≈ S/2,329 MM** de PP&E potencialmente en zona de inundación Nivel 4-5. **Es una estimación basada en un supuesto de proporcionalidad, debe validarse en la reunión.**
+- Impacto sobre continuidad/ingresos: no cuantificable con datos públicos. La palanca a pedir es la evaluación TCFD interna que Alicorp declara tener.
+
+---
+
+## Anexo — Comparativo rápido Credicorp vs. Alicorp (para tu ranking)
+
+| Dimensión | Credicorp (BAP) | Alicorp |
+|---|---|---|
+| Score Global CENEPRED | 2.06 | **2.15** |
+| Score Inundación | **3.93** | 3.89 |
+| Score Mov. de Masa | 1.96 | **2.44** |
+| % AUM Nivel 4+5 Inundación | **90.9%** | 72.2% |
+| % AUM Nivel 4+5 Mov. Masa | 10.1% | **27.8%** |
+| Tipo de activo físico | Red de agencias / oficinas | Plantas industriales |
+| Trazabilidad de activos | Baja (agencias "s/d") | **Alta (plantas nombradas con valor)** |
+| Divulgación de riesgo físico de activos propios | Débil (trata riesgo como de cliente) | **Mejor (evalúa 100% sitios propios, TCFD)** |
+| Riesgo secundario distintivo | — | Movimiento de masa (huaicos Rímac) |
+| Confianza del expediente | Medio | **Medio-Alto** |
