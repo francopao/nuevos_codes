@@ -1,0 +1,28 @@
+El error es porque el Excel `G&P_MLab` ya no tiene dos filas de encabezado (categoría + campo). Ahora la fila que tu código trata como "header1" ya contiene los nombres reales de columna (SBS, Nombre, etc.), y lo que tratas como "header2" es en realidad la primera fila de datos. Por eso al concatenar `h1_h2` terminas con nombres tipo `"SBS_5374914AIP4B"` en vez de `"SBS"`.
+
+Reemplaza este bloque dentro de `df_obtenido`:
+
+```python
+header1 = df.iloc[0]  # fila 9
+header2 = df.iloc[1]  # fila 10
+
+df.columns = [
+    (str(h1).strip() + "_" + str(h2).strip()) if pd.notna(h1) else str(h2).strip()
+    for h1, h2 in zip(header1, header2)
+]
+
+df = df.iloc[2:]
+df.columns = df.columns.astype(str).str.strip()
+```
+
+por:
+
+```python
+header1 = df.iloc[0]  # única fila de encabezado real
+
+df.columns = header1.astype(str).str.strip()
+
+df = df.iloc[1:]  # los datos empiezan justo después del encabezado
+```
+
+Con esto `SBS`, `Nombre`, `GAP`, `PBS`, etc. quedan como nombres de columna reales (con `GAP`/`PBS` repetidos, que es justo lo que necesita `del df['PBS']` para funcionar), y el resto de la función (selección posicional, insert, del, rename final) sigue funcionando igual sin tocar nada más.
