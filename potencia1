@@ -1,0 +1,193 @@
+#%%
+# Parameters
+inicio = "042026"
+final = "052026"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+import warnings
+warnings.filterwarnings("ignore")
+
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1), int(a2) + 1)
+
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+meses_m = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre']
+meses_cod = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Setiembre','Octubre','Noviembre','Diciembre']
+
+#%% md
+### Generador de backups
+#%%
+import shutil
+
+source_file = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\9. Potencias Firme y Efectiva.xlsx"
+destination_dir = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\Backup"
+
+def copy_file_to_directory(source, des):
+    if not os.path.exists(des):
+        os.makedirs(des)
+    file_name = os.path.basename(source)
+    dest_file = os.path.join(des, file_name)
+    try:
+        shutil.copyfile(source, dest_file)
+        print("Archivo copiado exitosamente.")
+    except Exception as e:
+        print(f"Error al copiar el archivo: {str(e)}")
+
+copy_file_to_directory(source_file, destination_dir)
+
+#%%
+array_rutas = []
+for i in rango_anios:
+    if rango_anios[-1] == i:
+        if len(rango_anios) == 1:
+            for j in range(int(m1), int(m2) + 1):
+                jj = str(j).zfill(2)
+                array_rutas.append(jj + str(i))
+        else:
+            for j in range(1, int(m2) + 1):
+                jj = str(j).zfill(2)
+                array_rutas.append(jj + str(i))
+    elif i != rango_anios[0]:
+        for j in range(1, 13):
+            jj = str(j).zfill(2)
+            array_rutas.append(jj + str(i))
+    else:
+        if len(rango_anios) == 1:
+            for j in range(int(m1), int(m2) + 1):
+                jj = str(j).zfill(2)
+                array_rutas.append(jj + str(i))
+        else:
+            for j in range(int(m1), 13):
+                jj = str(j).zfill(2)
+                array_rutas.append(jj + str(i))
+
+#%%
+def main(mes, anio):
+    archivo = (r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro"
+               r"\Complementos BD\Utilities\BD\Reporte LVTP\\" + mes + anio + ".xlsx")
+
+    if not os.path.isfile(archivo):
+        print(f"Error Base (archivo no encontrado): {mes} {anio} -> {archivo}")
+        return
+
+    sheet1 = pd.read_excel(archivo, "Datos", header=None)
+    sheet2 = pd.read_excel(archivo, "C10", header=None)
+
+    potencias = sheet1.copy()
+
+    # --- Ubicar fila "Empresa" ---
+    filas_empresa = potencias[potencias[4] == "Empresa"].index
+    if len(filas_empresa) == 0:
+        print(f"Error Base (no se encontró 'Empresa'): {mes} {anio}")
+        return
+    primerafila = filas_empresa[0]
+
+    # --- Ubicar fila "TOTAL" de forma robusta (buscando en varias columnas) ---
+    mask_total = pd.Series(False, index=potencias.index)
+    for col in range(4, 13):
+        if col in potencias.columns:
+            mask_total = mask_total | (potencias[col].astype(str).str.strip().str.upper() == "TOTAL")
+    filas_total = potencias[mask_total & (potencias.index > primerafila)].index
+
+    if len(filas_total) == 0:
+        print(f"Error Base (no se encontró 'TOTAL'): {mes} {anio} -> se omite este archivo")
+        return
+    ultimafila = filas_total[0]
+
+    potencias = potencias.iloc[primerafila + 2:ultimafila + 1, 4:13]
+    potencias = potencias.set_axis(
+        ['Empresa','Orden','Vacio','Central','Unidad','Potencia Efectiva','Potencia Firme','Costo Variable','Unidad Forzada'],
+        axis=1
+    )
+    potencias = potencias[['Empresa','Central','Potencia Efectiva','Potencia Firme','Costo Variable']]
+    potencias = potencias.dropna(how='all')
+    potencias.loc[potencias['Central'] == 'TOTAL', 'Empresa'] = 'TOTAL'
+
+    ###### Diccionario
+    Diccionario = r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Diccionarios\Diccionario_Utilities.xlsx'
+    df_ren = pd.read_excel(Diccionario, sheet_name="Utilities")
+    df_ren = df_ren.set_index("Nombre_Antiguo")
+    dic_ren = df_ren.to_dict()
+
+    def dic_renombre_cambio(fila):
+        try:
+            return dic_ren["Nombre_Nuevo"][fila]
+        except KeyError:
+            print(f"Nombre no encontrado: {fila}")
+            raise KeyError(f"Nombre no encontrado: {fila}")
+
+    potencias['Empresa'] = potencias['Empresa'].apply(dic_renombre_cambio)
+    potencias['Central'] = potencias['Central'].apply(dic_renombre_cambio)
+    #########
+
+    # Potencia Efectiva
+    Pot_Efect = potencias[['Empresa','Central','Potencia Efectiva']].copy()
+    Pot_Efect['Potencia Efectiva'] = Pot_Efect['Potencia Efectiva'].fillna(0)
+    Pot_Efect['Potencia Efectiva'] = pd.to_numeric(Pot_Efect['Potencia Efectiva'], errors='coerce').fillna(0)
+    Pot_Efect = Pot_Efect.groupby(["Empresa","Central"], as_index=False).sum()
+    Pot_Efect.insert(0, "Tipo", "POTENCIA EFECTIVA")
+    Pot_Efect = Pot_Efect.set_axis(['Tipo','Empresa','Central','Valor'], axis=1)
+
+    # Potencia Firme
+    Pot_Firme = potencias[['Empresa','Central','Potencia Firme']].copy()
+    Pot_Firme['Potencia Firme'] = Pot_Firme['Potencia Firme'].fillna(0)
+    Pot_Firme['Potencia Firme'] = pd.to_numeric(Pot_Firme['Potencia Firme'], errors='coerce').fillna(0)
+    Pot_Firme = Pot_Firme.groupby(["Empresa","Central"], as_index=False).sum()
+    Pot_Firme.insert(0, "Tipo", "POTENCIA FIRME")
+    Pot_Firme = Pot_Firme.set_axis(['Tipo','Empresa','Central','Valor'], axis=1)
+
+    Junto = pd.concat([Pot_Efect, Pot_Firme])
+    mes_ = meses_[meses_n.index(mes)]
+    fecha_col = "01" + "/" + mes + "/" + anio
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+    Junto.columns.values[3] = fecha_col
+    Key = Junto["Tipo"] + Junto["Empresa"] + Junto["Central"]
+    Junto.insert(0, "Key1", Key)
+
+    # Base total
+    Ruta_Base = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\9. Potencias Firme y Efectiva.xlsx"
+    DF_F = Junto.copy()
+
+    with pd.ExcelFile(Ruta_Base) as reader:
+        BD_Total = reader.parse(sheet_name='Sheet1')
+
+    BD_Total_ = BD_Total.copy()
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("Key1")
+    dic_Total_ = BD_Total_.to_dict()
+
+    DF_Total2 = DF_F.copy()
+    DF_Total2['Indicador'] = DF_Total2['Key1'].map(dic_Total_['Indicador'])
+    DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+    DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+    BD_Total = pd.concat([BD_Total, DF_Total2])
+
+    DF_Total = DF_F.set_index("Key1")
+    dic_cr = DF_Total.to_dict()
+    BD_Total[fecha_col] = BD_Total['Key1'].map(dic_cr[fecha_col])
+
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+
+    print(f"OK: {mes} {anio} procesado correctamente.")
+
+#%%
+################################################################################
+#%%
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses_n[int(m) - 1]
+    anio = i[2::]
+    print(mes + ' ' + anio)
+    try:
+        main(mes, anio)
+    except Exception as e:
+        print(f"Error procesando {mes} {anio}: {e}")
