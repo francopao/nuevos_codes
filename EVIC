@@ -1,0 +1,27 @@
+No existe un mnemonic directo "EVIC" en Capital IQ porque es un concepto regulatorio (PCAF/EU Benchmark Regulation), no un campo nativo de CIQ. Tienes que construirlo sumando sus componentes con la función `=CIQ()`.
+
+**Fórmula EVIC** = Market Cap (común) + Deuda Total (book value) + Acciones Preferentes + Interés Minoritario
+
+```excel
+=CIQ($A$1,"IQ_MARKETCAP","IQ_CY","0","","","","")
+=CIQ($A$1,"IQ_TOTAL_DEBT","IQ_CY","0","","","","")
+=CIQ($A$1,"IQ_PREFERRED_EQUITY","IQ_CY","0","","","","")
+=CIQ($A$1,"IQ_MINORITY_INTEREST","IQ_CY","0","","","","")
+```
+
+Donde `$A$1` es tu ticker/CIQ ID.
+
+Luego:
+```excel
+=SUM(B1:B4)   ' EVIC
+```
+
+**Notas clave:**
+- `IQ_MARKETCAP` es a la fecha de balance (o la más cercana), no de hoy. Usa el parámetro de "As of Date" si necesitas el EVIC exactamente al cierre del período contable de la empresa (esto es lo que exige la metodología PCAF/EU para financed emissions).
+- No restes caja: a diferencia del Enterprise Value tradicional (`IQ_TEV`), el EVIC **no** resta cash & equivalents. Por eso no puedes usar directamente `IQ_TEV`.
+- Si la empresa no tiene preferentes o minoritarios, esos campos te devolverán 0 o NA — usa `IFERROR(...,0)` en cada línea para que el SUM no se rompa.
+
+Fórmula robusta:
+```excel
+=IFERROR(CIQ($A$1,"IQ_MARKETCAP","IQ_CY","0"),0)+IFERROR(CIQ($A$1,"IQ_TOTAL_DEBT","IQ_CY","0"),0)+IFERROR(CIQ($A$1,"IQ_PREFERRED_EQUITY","IQ_CY","0"),0)+IFERROR(CIQ($A$1,"IQ_MINORITY_INTEREST","IQ_CY","0"),0)
+```
