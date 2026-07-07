@@ -1,0 +1,243 @@
+#%%
+# Parameters
+inicio = "032026"
+final = "052026"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1),int(a2)+1)
+#%%
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+meses_m = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre']
+#%% md
+### Generador de backups
+
+#%%
+import os
+import shutil
+
+source_file = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\11. Caudales y Volumen.xlsx"
+destination_dir = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\Backup"
+
+def copy_file_to_directory(source, des):
+    if not os.path.exists(source):
+        print(f"[ERROR BACKUP] No existe el archivo fuente: {source}")
+        return
+    if not os.path.exists(des):
+        os.makedirs(des)
+    file_name = os.path.basename(source)
+    dest_file = os.path.join(des, file_name)
+    try:
+        shutil.copyfile(source, dest_file)
+        print(f"Archivo copiado exitosamente.")
+    except Exception as e:
+        print(f"Error al copiar el archivo: {str(e)}")
+
+copy_file_to_directory(source_file, destination_dir)
+#%%
+array_rutas = []
+for i in rango_anios:
+    if(rango_anios[-1]==i):
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0'+ str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+        else:
+            for j in range(1,int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+    elif(i != rango_anios[0]):
+        for j in range(1,13):
+            if(len(str(j))==1):
+                j = '0' + str(j)
+            ruta = str(j) + str(i)
+            array_rutas.append(ruta)
+
+    else:
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+        else:
+            for j in range(int(m1),13):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+#%%
+import warnings
+warnings.filterwarnings("ignore")
+#%%
+# --- Búsqueda flexible de la fila-ancla (nombre de objeto: río/embalse) ---
+# En vez de asumir que el nombre siempre está en la fila 0, se busca en las
+# primeras N filas. Esto blinda el script ante filas nuevas insertadas arriba
+# (p.ej. numeración de cuadro) en futuras actualizaciones del input.
+FILAS_BUSQUEDA = 6
+
+def encontrar_fila_ancla(df, objeto_name, max_filas=FILAS_BUSQUEDA):
+    """Busca en qué fila (0..max_filas-1) y columna aparece objeto_name.
+    Retorna (fila, columna) o (None, None) si no se encuentra."""
+    limite = min(max_filas, df.shape[0])
+    for r in range(limite):
+        fila_vals = df.iloc[r].astype(str).str.strip()
+        matches = df.columns[fila_vals == objeto_name]
+        if len(matches) > 0:
+            return r, df.columns.get_loc(matches[0])
+    return None, None
+
+
+def process_river_data(df, river_name, anio):
+    fila_nombre, filacol = encontrar_fila_ancla(df, river_name)
+
+    if fila_nombre is None:
+        print(f"[WARN] Objeto no encontrado en hoja (revisadas primeras {FILAS_BUSQUEDA} filas): {river_name}")
+        return None
+
+    # La fila de años se asume inmediatamente debajo de la fila del nombre,
+    # y los datos empiezan 2 filas debajo del nombre (ver estructura real del input).
+    fila_anios = fila_nombre + 1
+    fila_inicio_datos = fila_nombre + 2  # solo referencial / para mensaje de error
+
+    if fila_inicio_datos >= df.shape[0]:
+        print(f"[ERROR] Estructura inesperada para '{river_name}': no hay suficientes filas debajo del encabezado.")
+        return None
+
+    df_ = df.iloc[:, filacol:filacol+5]
+
+    anios_fila = df_.iloc[fila_anios, :].astype(str).str.strip()
+    if anio not in list(anios_fila):
+        print(f"[WARN] Año '{anio}' no encontrado en el bloque de '{river_name}'. Años disponibles: {list(anios_fila.dropna())}")
+        return None
+
+    df_.columns = df_.iloc[fila_anios, :]
+    # Igual que en la lógica original: se arranca desde la fila de años
+    # (que queda duplicada tras asignar columnas) y se descarta más abajo,
+    # para que "Semana" quede 1-indexado igual que en el histórico ya generado.
+    df_ = df_.iloc[fila_anios:, 1:]
+    df_ = df_.reset_index(drop=True)
+
+    df_.insert(0, "Semana", df_.index)
+
+    if anio not in df_.columns:
+        print(f"[ERROR] No se pudo aislar la columna del año '{anio}' para '{river_name}' tras el recorte.")
+        return None
+
+    df_ = df_[['Semana', anio]]
+    df_ = df_.iloc[1:, :]
+    df_ = df_.set_axis(['Semana', river_name], axis=1)
+    return df_
+
+
+def merge_river_data(df, anio, rivers):
+    Total = None
+
+    for idx, river in enumerate(rivers):
+        df_river = process_river_data(df, river, anio)
+
+        if df_river is None:
+            continue
+
+        if Total is None:
+            Total = df_river.copy()
+        else:
+            Total = pd.merge(Total, df_river, how='left', on='Semana')
+
+    return Total
+
+
+def main(mes, anio):
+
+    archivo = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Evaluaciones Mensuales\\" + mes + anio + ".xlsx"
+    Ruta_Base = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\11. Caudales y Volumen.xlsx"
+
+    if not os.path.isfile(archivo):
+        print(f"[ERROR INPUT] No se encontró el archivo mensual: {archivo}")
+        return
+
+    try:
+        df_caudal = pd.read_excel(archivo, "13.Caudales", header=None)
+    except Exception as e:
+        print(f"[ERROR INPUT] No se pudo leer la hoja '13.Caudales' en {archivo}: {e}")
+        return
+
+    try:
+        df_volumen = pd.read_excel(archivo, "11. Volúmenes", header=None)
+    except Exception as e:
+        print(f"[ERROR INPUT] No se pudo leer la hoja '11. Volúmenes' en {archivo}: {e}")
+        return
+
+    #Caudales naturales
+    df1 = df_caudal.iloc[9:, 12:]
+    df1 = df1.reset_index()
+    df1 = df1.iloc[::, 1:]
+    df1 = df1.reset_index(drop=True)
+
+    rivers_caudal = ['Caudal Natural del Río Pativilca','Caudal Natural del Río Santa','Caudal Natural del Río Chancay (Lambayeque)','Caudal Natural del Río Rímac','Caudal Natural del Río Mantaro','Caudal Natural del Río Tulumayo','Caudal Natural del Río Tarma','Caudal Turbinado C.H. Charcani V','Caudal Natural del Río Vilcanota','Caudal Natural del Río San Gabán','Caudal Natural del Río Huallaga','Caudal Natural del Río Cañete','Caudal Natural del Río Paucartambo','Caudal Natural del Río Locumba']
+    Total_Caudal = merge_river_data(df1, anio, rivers_caudal)
+
+    #Volumen util
+    df1 = df_volumen.iloc[9:, 11:]
+    df1 = df1.reset_index()
+    df1 = df1.iloc[::, 1:]
+    df1 = df1.reset_index(drop=True)
+
+    rivers_volumen = ['Volumen Útil del Embalse Junín','Volumen Útil del Río Pativilca','Volumen Útil del Río Santa','Volumen Útil del Río Rímac','Volumen Útil del Río Vilcanota','Volumen Útil del Río San Gabán','Volumen Útil del Río Cañete','Volumen Útil del Río Paucartambo','Volumen Útil del Río Locumba','Volumen Útil del Embalse Chaglla','Volumen Útil del Río Chili','Volumen Útil de las Subcuencas del Río Mantaro']
+    Total_Volumen = merge_river_data(df1, anio, rivers_volumen)
+
+    rivers_faltantes_caudal = [r for r in rivers_caudal if Total_Caudal is None or r not in Total_Caudal.columns]
+    rivers_faltantes_volumen = [r for r in rivers_volumen if Total_Volumen is None or r not in Total_Volumen.columns]
+    if rivers_faltantes_caudal:
+        print(f"[RESUMEN] Faltantes en Caudal para {mes}{anio}: {rivers_faltantes_caudal}")
+    if rivers_faltantes_volumen:
+        print(f"[RESUMEN] Faltantes en Volumen para {mes}{anio}: {rivers_faltantes_volumen}")
+
+    if Total_Caudal is None and Total_Volumen is None:
+        print(f"[ERROR] No se encontraron datos ni de caudales ni de volúmenes para {mes}{anio}. No se escribe nada.")
+        return
+
+    elif Total_Caudal is None:
+        print(f"[WARN] Solo se encontraron datos de Volumen para {mes}{anio}.")
+        Junto = Total_Volumen.copy()
+
+    elif Total_Volumen is None:
+        print(f"[WARN] Solo se encontraron datos de Caudal para {mes}{anio}.")
+        Junto = Total_Caudal.copy()
+
+    else:
+        Junto = pd.merge(Total_Caudal, Total_Volumen, how='right', on='Semana')
+
+    #Todo Junto
+    Junto.insert(0, "Año", anio)
+
+    Junto["Key"] = Junto["Año"].astype(str) + Junto["Semana"].astype(str)
+    Junto.insert(0, "Key1", Junto["Key"])
+
+    try:
+        Junto.to_excel(Ruta_Base)
+        print(f"[OK] Archivo escrito correctamente para {mes}{anio}: {Ruta_Base}")
+    except Exception as e:
+        print(f"[ERROR OUTPUT] No se pudo escribir el archivo de salida para {mes}{anio}: {e}")
+#%%
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses_n[int(m)-1]
+    anio = i[2::]
+    mes_ = meses_[int(m)-1]
+    print(mes + ' ' + anio)
+    main(mes, anio)
+#%%
