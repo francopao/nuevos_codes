@@ -1,0 +1,136 @@
+Ahora inspecciono BD Construcción a fondo, replicando lo que hace el código.Existe la hoja "Despachos". Ahora necesito ver los hints y el parser del código, y luego volcar la hoja Despachos para comparar.Ahora vuelco la hoja Despachos tal como la ve el código, y aplico el mismo parser para ver dónde se rompe.Ahí está el problema, clarísimo. Mira las filas 29-30: las plantas **sí existen** en columna C con el formato correcto (`Unacem - Atocongo`, `Unacem - Andino`), pero fíjate en la **columna B**: dice `'FORMULA'`. Y los valores numéricos (`135.247`, etc.) están ahí. El parser está bien; el problema es otro. Veamos las filas de plantas completas y qué pasa con la suma de la ventana:Ahí está la causa raíz. Las fechas van **hasta diciembre 2026** (col 353), y hay una columna extra `2026` (col 354, un total anual). El log decía `sumando despachos del semestre anterior (2026-07 a 2026-07); 1 columna(s)` — solo 1 columna y con rango raro (jul-jul). Eso significa que `_cols_en_ventana` calculó mal la ventana. Veamos esa función:Ahora veo el diseño. `_meses_semestre_anterior()` calcula el semestre objetivo según la fecha actual. Hoy es **julio 2026**, así que el "semestre anterior" es ene-jun 2026. Veamos qué devuelve y por qué solo cazó 1 columna:Ahí está el problema completo, confirmado. La lógica dice: como hoy es **julio 2026** (`ref.month = 7 > 6`), el semestre en curso empieza en julio: `y=2026, ini=7`, rango `range(7, 7+1)` = **solo julio 2026**. Por eso el log decía "2026-07 a 2026-07; 1 columna".
+
+Y aquí está el detalle fatal: la columna de **julio 2026** en la BD (col 348) tiene datos, pero mira las filas de plantas — sus valores de despacho para julio 2026 muy probablemente están **vacíos** (la BD llega hasta jun 2026 con datos reales; jul-dic 2026 son celdas futuras vacías o cero). Verifiquémoslo:Confirmado el diagnóstico completo, y hay **dos** problemas encadenados:
+
+1. **Julio 2026 está vacío** (`None`) en todas las plantas. La BD trae datos reales solo hasta un mes previo; el mes en curso (julio) aún no se ha cargado. Como la ventana pide **solo julio 2026**, la suma da 0 para todas las plantas → se descartan en la línea 1567 (`if mt <= 0: continue`) → 0 plantas.
+
+2. **Junio 2026 = 0** (no `None`, sino cero). Y la última columna "con dato" (col 354) es el **total anual 2026**, no un mes — porque su encabezado en fila 5 es `2026` (un número de año, no fecha), y da la casualidad de que tiene valor. Esto ensucia cualquier fallback.
+
+El fallback de `_cols_en_ventana` (línea 1374-1378) **no se activó** porque sí encontró la columna de julio (existe la fecha, aunque el dato de la planta esté vacío). El fallback solo salta si no hay *ninguna* columna de fecha coincidente, no si los datos están vacíos.
+
+La raíz es la **metodología de ventana**: "semestre en curso hasta el mes actual" falla cuando el mes actual aún no tiene datos cargados. En julio, pide julio, y julio está vacío.
+
+La solución más robusta y mínima: que la ventana **ignore meses sin datos reales** y, si el mes en curso está vacío, use los meses previos disponibles. Lo más limpio es filtrar, dentro de la ventana objetivo, las columnas cuyas plantas realmente tengan datos — pero eso es específico por fila. Mejor a nivel de ventana: **quedarnos con los meses del semestre que existan Y tengan al menos un dato numérico en las filas de planta**.
+
+Te doy dos opciones, tú eliges:
+
+**Opción A (recomendada, cambio mínimo y general):** modificar `_cols_en_ventana` para que descarte columnas del objetivo que estén **completamente vacías** en la zona de datos, y si tras eso la ventana queda vacía, caiga al fallback de "últimos meses con datos". Esto arregla construcción y blinda utilities ante el mismo problema (mes en curso sin cargar).
+
+**Opción B (cambio de metodología):** volver a "semestre completo anterior" (la lógica comentada en líneas 1336-1340). En julio 2026 pediría ene-jun 2026… pero junio da 0 y quizás otros meses también estén a medio cargar, así que no resuelve del todo si la carga va retrasada.
+
+La A es más segura porque no depende de cuán al día esté la BD. Aquí está el cambio de la Opción A. **Reemplaza** la función `_cols_en_ventana` completa (líneas 1350-1379) por:
+
+```python
+def _cols_en_ventana(ws, fila_fecha):
+    """Columnas cuyas fechas (en 'fila_fecha') caen en el semestre objetivo Y que
+    además tienen al menos un dato numérico en la zona de filas de datos (para no
+    contar meses futuros aún sin cargar, p.ej. el mes en curso). Si tras filtrar no
+    queda ninguna, hace fallback a los 6 meses más recientes CON datos y lo informa."""
+    import datetime
+    objetivo = _meses_semestre_anterior()
+    obj_set = set(objetivo)
+
+    # ¿tiene esta columna algún número en la zona de datos? (bajo fila_fecha)
+    fila_ini = fila_fecha + 1
+    fila_fin = ws.max_row
+    def col_tiene_datos(c):
+        for rr in range(fila_ini, fila_fin + 1):
+            v = ws.cell(rr, c).value
+            if isinstance(v, (int, float)) and v != 0:
+                return True
+        return False
+
+    todas = []   # (date, col) solo columnas-fecha CON datos reales
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(fila_fecha, c).value
+        d = v if isinstance(v, datetime.datetime) else None
+        if d is None and isinstance(v, str):
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+                try:
+                    d = datetime.datetime.strptime(v.strip().split()[0], fmt); break
+                except Exception:
+                    pass
+        if d is not None and col_tiene_datos(c):
+            todas.append((d, c))
+
+    cols = [c for d, c in todas if (d.year, d.month) in obj_set]
+    presentes = {(d.year, d.month) for d, c in todas if (d.year, d.month) in obj_set}
+    faltantes = [ym for ym in objetivo if ym not in presentes]
+    etq = f"{objetivo[0][0]}-{objetivo[0][1]:02d} a {objetivo[-1][0]}-{objetivo[-1][1]:02d}"
+    if not cols:
+        # fallback: 6 meses más recientes CON datos
+        todas.sort(reverse=True)
+        cols = [c for d, c in todas[:6]]
+        return cols, etq, faltantes, True
+    return cols, etq, faltantes, False
+```
+
+Los cambios respecto a tu versión: (1) agregué `col_tiene_datos(c)` que verifica que la columna tenga algún número distinto de 0 en la zona de datos; (2) solo se agregan a `todas` las columnas-fecha que además tienen datos reales; (3) el fallback ahora cae a los últimos meses **con datos**, no simplemente los últimos por fecha.
+
+Con esto, en julio 2026: la ventana objetivo es solo julio (por la metodología actual), julio está vacío → no entra en `cols` → **se activa el fallback** → toma los 6 meses más recientes con datos reales (que serían los previos a julio con números). Las plantas vuelven a tener MT > 0 y se mapean.
+
+Un punto que quiero que confirmes, porque afecta el resultado: con la metodología "semestre en curso" (líneas 1343-1347), aunque arregle el fallback, si estás a inicio de semestre y solo hay 1-2 meses cargados, la ventana será corta. ¿Prefieres que además cambie la metodología a **semestre completo anterior** (reactivar líneas 1336-1340) para que la ventana siempre sean 6 meses estables? Eso daría ene-jun 2026 en tu caso — pero necesito verificar que esos 6 meses tengan datos. Déjame chequearlo antes de recomendarte:Dato crucial: los datos reales de las plantas llegan hasta **abril 2026**. Mayo y junio son `0`, y julio en adelante es `None`. Es decir, la BD está cargada con ~3 meses de rezago.
+
+Esto **descarta la Opción B** (semestre completo anterior = ene-jun 2026): incluiría mayo=0 y junio=0, subestimando. Y confirma que la **Opción A es la correcta**: el filtro `col_tiene_datos` con `v != 0` descarta mayo, junio y julio (todos 0 o vacíos), y el fallback toma los últimos 6 meses **con dato real** → nov 2025 a abr 2026. Esos sí tienen números en todas las plantas.
+
+Verifiquemos que el fallback de la Opción A daría exactamente esos 6 meses buenos:El fallback de la Opción A funciona: toma nov 2025 – abr 2026 (los 6 meses reales más recientes), y todas las plantas tienen sumas > 0. Se van a mapear correctamente.
+
+## Resumen del problema y la solución
+
+**Causa:** La ventana temporal pedía solo julio 2026 (metodología "semestre en curso hasta hoy"), pero la BD de construcción tiene ~3 meses de rezago: mayo/junio 2026 están en `0` y julio en adelante vacío. Los datos reales llegan hasta abril 2026. Como julio estaba vacío, la suma de cada planta daba 0 y todas se descartaban → `0 planta-distrito`.
+
+**Solución (Opción A):** que la ventana ignore columnas sin datos reales y, si queda vacía, use los 6 meses más recientes **con** datos. Robusto ante el rezago de carga, y protege también a Utilities del mismo fallo.
+
+## El cambio (único, mínimo)
+
+Reemplaza tu función `_cols_en_ventana` completa (líneas 1350-1379) por esta:
+
+```python
+def _cols_en_ventana(ws, fila_fecha):
+    """Columnas cuyas fechas (en 'fila_fecha') caen en el semestre objetivo Y que
+    además tienen al menos un dato numérico != 0 en la zona de filas de datos (para
+    no contar meses futuros o aún sin cargar, p.ej. el mes en curso). Si tras filtrar
+    no queda ninguna, hace fallback a los 6 meses más recientes CON datos y lo informa."""
+    import datetime
+    objetivo = _meses_semestre_anterior()
+    obj_set = set(objetivo)
+
+    fila_ini = fila_fecha + 1
+    fila_fin = ws.max_row
+    def col_tiene_datos(c):
+        for rr in range(fila_ini, fila_fin + 1):
+            v = ws.cell(rr, c).value
+            if isinstance(v, (int, float)) and v != 0:
+                return True
+        return False
+
+    todas = []   # (date, col) solo columnas-fecha CON datos reales
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(fila_fecha, c).value
+        d = v if isinstance(v, datetime.datetime) else None
+        if d is None and isinstance(v, str):
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+                try:
+                    d = datetime.datetime.strptime(v.strip().split()[0], fmt); break
+                except Exception:
+                    pass
+        if d is not None and col_tiene_datos(c):
+            todas.append((d, c))
+
+    cols = [c for d, c in todas if (d.year, d.month) in obj_set]
+    presentes = {(d.year, d.month) for d, c in todas if (d.year, d.month) in obj_set}
+    faltantes = [ym for ym in objetivo if ym not in presentes]
+    etq = f"{objetivo[0][0]}-{objetivo[0][1]:02d} a {objetivo[-1][0]}-{objetivo[-1][1]:02d}"
+    if not cols:
+        # fallback: 6 meses más recientes CON datos reales
+        todas.sort(reverse=True)
+        cols = [c for d, c in todas[:6]]
+        return cols, etq, faltantes, True
+    return cols, etq, faltantes, False
+```
+
+No toques nada más. `_suma_ventana`, `load_construccion`, `load_ubicaciones` y el resto quedan igual — ya funcionan bien; el único punto roto era la selección de columnas.
+
+Tras aplicarlo, el log de construcción debería cambiar de `0 planta-distrito de 0 empresa(s)` a algo como `6 planta-distrito de 2 empresa(s)`, con un WARN informando que usó los 6 meses más recientes disponibles (porque el semestre en curso estaba vacío). Y Unacem/Pacasmayo aparecerán en las tablas resumen del Excel.
+
+Una nota para que estés consciente del efecto lateral (positivo): este mismo arreglo aplica a Utilities, que usa la misma función. Si Utilities también tenía el mes en curso vacío, ahora tomará sus últimos meses con datos en vez de arriesgar una ventana vacía. Si quieres, cuando corras revisa que el log de Utilities siga mostrando un número de columnas razonable (no 1 ni 0); si ves algo raro ahí, me dices y lo miramos.
