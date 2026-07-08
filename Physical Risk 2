@@ -1,0 +1,67 @@
+El log da la clave exacta: `Construcción: 0 planta-distrito de 0 empresa(s)`. Los AUM sí se leen (Unacem y Pacasmayo aparecen con su plata), pero **0 plantas se geolocalizaron**. Sin planta-distrito, no hay aportes que mapear → no aparecen en las tablas resumen. El problema está en la carga/asignación geográfica de las plantas de construcción, no en la exposición.
+
+Déjame ver el código de construcción para encontrar por qué salen 0 plantas.
+
+Ya está el diagnóstico. El log muestra `0 planta-distrito de 0 empresa(s)` y —lo más revelador— **NO** aparece el WARN de "planta(s) SIN ubicación". Eso significa que `filas_planta` quedó vacío: el bucle de las líneas 1537-1543 no encontró **ninguna fila** cuya columna C tenga formato "Empresa - Planta" con empresa del universo. Si hubiera encontrado plantas pero sin ubicación, verías el WARN de sin_ubic. Como no lo ves, el problema es la **detección de filas de planta**, antes de ubicar.
+
+Las tres causas posibles, en orden de probabilidad:
+
+1. **La fila de fechas se detectó mal** (línea 1529-1534), y entonces `fila_fecha + 1` arranca el barrido en el lugar equivocado, saltándose las plantas.
+2. **Las plantas no están en la columna C** (col 3) en ese `.xlsm`, sino en otra columna.
+3. **El formato del texto** en col C no es "Empresa - Planta" con guion, o el nombre de empresa no matchea `EQUIV_EMPRESAS_CONSTRUCCION`.
+
+Para saber cuál es sin adivinar, necesito ver qué hay realmente en esa hoja. El `.xlsm` está en una ruta de red (`\\sppeapp00023\...`) a la que no tengo acceso desde aquí. Así que te doy un **bloque de diagnóstico** que puedes pegar y correr en Spyder: te imprime exactamente qué ve el código en esa hoja, y con su salida te doy el arreglo preciso.
+
+Pega esto en una celda nueva de Spyder (ajusta `cons_path` si hace falta; usa la misma ruta del log):
+
+```python
+# %% DIAGNÓSTICO CONSTRUCCIÓN — pegar y correr en Spyder
+import openpyxl, datetime
+cons_path = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\BD Construcción.xlsm"
+
+wb = openpyxl.load_workbook(cons_path, data_only=True)
+print("HOJAS:", wb.sheetnames)
+
+# ¿qué hoja elige el código?
+sheet = None
+for s in wb.sheetnames:
+    if any(norm(h) in norm(s) for h in CONS_SHEET_HINTS):
+        sheet = s; break
+if sheet is None:
+    sheet = wb.sheetnames[0]
+print("HOJA ELEGIDA:", sheet)
+ws = wb[sheet]
+print("DIMENSIONES:", ws.max_row, "filas x", ws.max_column, "cols")
+
+# fila de fechas detectada
+fila_fecha, best = 5, -1
+for rr in range(1, 9):
+    n = sum(1 for c in range(1, ws.max_column + 1)
+            if isinstance(ws.cell(rr, c).value, datetime.datetime))
+    if n > best:
+        best, fila_fecha = n, rr
+print("FILA DE FECHAS DETECTADA:", fila_fecha, "con", best, "fechas")
+
+# volcar las primeras columnas de las primeras 25 filas para ver dónde están las plantas
+print("\n--- CONTENIDO (filas 1-25, columnas 1-5) ---")
+for r in range(1, min(26, ws.max_row + 1)):
+    vals = [ws.cell(r, c).value for c in range(1, 6)]
+    print(f"F{r}:", vals)
+
+# probar el parser sobre columna C
+print("\n--- PARSER SOBRE COLUMNA C (col 3) ---")
+eq_norm = {norm(k): v for k, v in EQUIV_EMPRESAS_CONSTRUCCION.items()}
+for r in range(fila_fecha + 1, min(fila_fecha + 30, ws.max_row + 1)):
+    c3 = ws.cell(r, 3).value
+    if c3 is None:
+        continue
+    emp, planta = _parse_planta_construccion(c3)
+    match = norm(emp) in eq_norm if emp else False
+    print(f"F{r} C='{c3}' -> emp='{emp}' planta='{planta}' MATCH={match}")
+
+print("\nEQUIV_EMPRESAS_CONSTRUCCION claves:", list(EQUIV_EMPRESAS_CONSTRUCCION.keys()))
+```
+
+Ese script me dirá exactamente: en qué columna están las plantas, si la fila de fechas se detectó bien, cómo está escrito el texto de cada planta, y si el parser/matcheo funciona. Pégame su salida (aunque sea recortada a lo relevante) y te doy el arreglo puntual en `load_construccion`, sin tocar nada más.
+
+Una observación de paso que ya veo en el log: dice `Ubicaciones 'Centrales Eléctricas': 36 activos cargados`, o sea la hoja de ubicaciones sí carga 36 activos. Entonces la ubicación existe; el problema es que ninguna planta llega siquiera a la etapa de ubicarse. Confirma la hipótesis de que `filas_planta` está vacío. La salida del diagnóstico lo cerrará.
