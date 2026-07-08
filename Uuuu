@@ -1,0 +1,21 @@
+Cambia exactamente estas dos líneas:
+
+**Línea 69** — bloque ETF_SOV:
+```python
+df_td_esg['FUND_FINANCED_CARBON_EMISSIONS'].fillna('1', inplace=True)
+```
+por:
+```python
+df_td_esg['FUND_FINANCED_CARBON_EMISSIONS'] = df_td_esg['FUND_FINANCED_CARBON_EMISSIONS'].fillna('1')
+```
+
+**Línea 106** — bloque RF_SOV:
+```python
+df_td_esg['CARBON_EMISSIONS_EVIC_SCOPE_12_INTEN'].fillna('1', inplace=True)
+```
+por:
+```python
+df_td_esg['CARBON_EMISSIONS_EVIC_SCOPE_12_INTEN'] = df_td_esg['CARBON_EMISSIONS_EVIC_SCOPE_12_INTEN'].fillna('1')
+```
+
+Nada más. Con eso RF_SOV y ETF_SOV recuperan sus filas y vuelven a aparecer "Republica del Peru", "Republic of South Africa", etc.
