@@ -1,0 +1,171 @@
+Entiendo el objetivo: una hoja nueva "Cobertura" que sea tu **checklist de control** — cuántos emisores *deberían* analizarse (los Equity/Deuda directo-Local) versus cuántos el script *sí* consideró, con el motivo cuando falta. Antes de escribir código necesito ver cómo funciona tu proceso real, porque el aviso debe engancharse con los datos que el script ya genera.
+
+Déjame inspeccionar el zip y el flujo.Buenas noticias: ya tienes `_leer_clasificacion_err` (línea 4737) que lee la hoja Valorización y resuelve el nombre formulado. Ese es el motor que necesito. Déjame verlo y ver la hoja Valorización real para confirmar columnas AA/AE.Ahora inspecciono la hoja Valorización real para confirmar la estructura (fila header 3, columnas AA y AE, valores de Clasificación ERR, y cómo se ven los nombres formulados).Confirmado: **AA = "Clasificación ERR"** (idx 26) y **AE = "Nombre (G&P)"** (idx 30), header en fila 3 (idx 2). Ahora veo los valores reales: qué categorías ERR existen, y cómo llegan los nombres (formulados → valor).Los nombres formulados sí entregan su valor limpio (pandas lee el resultado de la fórmula, no la fórmula), y hay **37 emisores únicos directo-local** que *deberían* analizarse. Nota un caso importante: "Pluz Energía" aparece con **dos** clasificaciones (Deuda y Equity) — un emisor puede tener varias ERR. Ahora veo qué emisores realmente terminó considerando el output (la hoja actual del Excel generado) para saber cómo detectar "cobertura Sí/No".Ahora tengo el panorama completo. **37 emisores directo-local esperados vs 35 en el output.** Y hay nombres que no cuadran directo (ej. output tiene "Banco de Crédito del Perú" y "MiBanco" que en Valorización son "Credicorp"). Esto confirma que necesito comparar con el mapeo canónico. Veo qué emisores esperados **no** están cubiertos y por qué, para diseñar bien la columna "Comentario".
+
+Déjame entender la cadena canónica y cómo saber si un emisor "tiene score + AUM + activo físico". Reviso el `main()` y qué estructuras quedan disponibles.Muy claro. Estos 12 nombres no aparecen directo en el output por razones **distintas**, y eso es justo lo que tu columna "Comentario" debe distinguir:
+
+- **InRetail** → sí está, pero bajo "IFS"/"Intercorp" (mapeo canónico). No es falta de cobertura, es alias.
+- **Santander Consumer Bank** → output tiene "Santander Perú" (alias).
+- **Banco de la Nación, COFIDE, Fondo Mi Vivienda, Banco BCI, Banco GNB** → bancos/entidades sin geografía mapeada o sin activos físicos.
+- **El Comercio, Integratel, Intursa, Site del Perú, Luz del Sur** → emisores sin hoja de activos / sin mapeo geográfico.
+
+Para que el "Comentario" sea preciso necesito ver qué estructuras deja `main()` disponibles al momento de generar el Excel (para saber, por emisor, si falló por: sin match canónico, sin AUM, sin geografía/activo, o sin score). Déjame ver la firma de `generar_excel_tabla_resumen` y qué recibe, y el bloque de `main()` que la llama.Ya tengo todo lo necesario. Tengo el `equiv_canonico` (mapea nombre Valorización → canónico), `aum_emp_tot` (emisores con AUM+geografía mapeada), `districts` (para score), y `_leer_clasificacion_err` como patrón para leer la hoja. Con eso puedo construir la hoja "Cobertura" con lógica de comentario precisa.
+
+Ahora veo el final de la función (dónde guarda el workbook) para insertar la hoja nueva antes del `save`.Tengo todo. La hoja "Cobertura" se agrega justo antes de `os.makedirs` (línea 5013), dentro de la misma función, usando `wb` que ya está en memoria. Todos los datos que necesito ya están disponibles ahí: `equiv_canonico`, `aum_emp_tot`, `districts`, `scores`, `risk_path`, `sheet_val`.
+
+Necesito una última verificación: confirmar cómo detectar los 4 motivos de "No cobertura" con las estructuras disponibles. Reviso qué hay en `districts` para saber si un emisor canónico tiene score y activos.Ya tengo el mapa completo del sistema. Ahora construyo la solución. Voy a escribir el código de la hoja "Cobertura" como un bloque autocontenido que se inserta antes del `os.makedirs`.
+
+La lógica de cobertura y comentarios, según lo que verifiqué en tus datos:
+
+- **Emisores esperados** = nombres directo-local (55+53 filas → 37 únicos), resueltos a canónico.
+- **Cobertura = "Sí"** si el canónico está en `aum_emp_tot` (tiene AUM mapeado > 0, lo que implica geografía + activo físico) **y** tiene al menos un score válido.
+- **Cobertura = "No"** con comentario según el motivo detectable.
+
+Déjame ver la firma de `resolve_columns`/`detect_header_row` para leer AA y AE correctamente por posición.Perfecto, ya entiendo el patrón `resolve_columns` con hint de letra ("AE", "AA"). Tengo todo para escribir la solución final. Verifico mi lógica de motivos con un test rápido sobre los datos reales antes de entregarte el código.Todo cuadra: 37 esperados, 25 con cobertura, 12 sin. Ahora te entrego la solución. Es **un solo bloque nuevo** que se inserta en la función `generar_excel_tabla_resumen`, sin tocar nada de lo existente.
+
+## El cambio: insertar la hoja "Cobertura"
+
+En `generar_excel_tabla_resumen`, localiza el final (líneas 5010-5013):
+
+```python
+        if r > hrow + 1:
+            ws.auto_filter.ref = f"A{hrow}:{get_column_letter(len(cols))}{r-1}"
+
+    os.makedirs(out_dir, exist_ok=True)
+```
+
+Inserta **entre** el bloque del `for` y el `os.makedirs` este bloque nuevo (queda así):
+
+```python
+        if r > hrow + 1:
+            ws.auto_filter.ref = f"A{hrow}:{get_column_letter(len(cols))}{r-1}"
+
+    # ======================================================================
+    # NUEVO: HOJA "Cobertura" — checklist de emisores directo-Local.
+    # Universo esperado = filas de Valorización cuya "Clasificación ERR" (col AA)
+    # sea Equity/Deuda directo - Local. Se resuelve el nombre (col AE, formulado)
+    # a canónico y se marca si el script lo consideró (score + AUM + activo físico).
+    # ======================================================================
+    try:
+        ERR_OBJETIVO = {"EQUITY DIRECTO - LOCAL", "DEUDA CORPORATIVA DIRECTA - LOCAL"}
+
+        # 1) Leer Valorización: nombre (AE) + Clasificación ERR (AA)
+        _raw = pd.read_excel(risk_path, sheet_name=sheet_val, header=None)
+        _hdr, _ = detect_header_row(_raw, ["Nombre (G&P)", "VALOR_VECTOR_LOCAL"], max_scan=10)
+        _dfv = pd.read_excel(risk_path, sheet_name=sheet_val, header=_hdr).dropna(how="all")
+        _spec = {"nombre": (["Nombre (G&P)", "Nombre G P", "Nombre"], "AE"),
+                 "err":    (["Clasificación ERR", "Clasificacion ERR", "ERR"], "AA")}
+        _c = resolve_columns(_dfv.columns, _spec)
+        _dfv = _dfv.rename(columns={_c["nombre"]: "_nom", _c["err"]: "_err"})
+        _dfv["_errn"] = _dfv["_err"].astype(str).str.strip().apply(lambda x: norm(x))
+        _obj = _dfv[_dfv["_errn"].isin({norm(e) for e in ERR_OBJETIVO})].copy()
+
+        # 2) Universo esperado: por NOMBRE tal cual aparece (se repite por instrumento).
+        #    Guardamos las ERR distintas de cada nombre (un emisor puede tener varias).
+        _errs_por_nombre = {}
+        for _, _rr in _obj.iterrows():
+            _nm = str(_rr["_nom"]).strip()
+            if _nm and _nm.lower() != "nan":
+                _errs_por_nombre.setdefault(_nm, set()).add(str(_rr["_err"]).strip())
+
+        # 3) Mapeo nombre -> canónico (el mismo del resto del script)
+        _eqn = {norm(k): v for k, v in (equiv_canonico or {}).items()}
+
+        # 4) Señales de cobertura (ya calculadas arriba en esta función):
+        #    - aum_emp_tot: emisores con AUM ponderado > 0 (implica geografía + activo).
+        #    - scores: dict canónico -> {mm,inu,seq,global}; score>0 = tiene score.
+        _canon_con_aum = set(aum_emp_tot.keys())
+        _canon_con_score = {e for e, sc in scores.items()
+                            if (sc.get("global", 0) or 0) > 0}
+
+        # 5) Construir filas de la hoja
+        _rows_cob = []
+        for _nm in sorted(_errs_por_nombre.keys(), key=lambda x: x.lower()):
+            _cat = "; ".join(sorted(_errs_por_nombre[_nm]))
+            _canon = _eqn.get(norm(_nm))
+            if _canon is None:
+                _cob, _com = "No", ("El nombre no está en el mapeo de equivalencias "
+                                    "(EQUIV/EMPRESAS canónicas); el script no lo reconoce "
+                                    "como emisor analizable. Revisar alias en CONFIG.")
+            else:
+                _tiene_aum = _canon in _canon_con_aum
+                _tiene_score = _canon in _canon_con_score
+                if _tiene_aum and _tiene_score:
+                    _cob, _com = "Sí", ""
+                elif _tiene_aum and not _tiene_score:
+                    _cob, _com = "No", ("Tiene AUM y activos mapeados, pero ninguno de sus "
+                                        "distritos tiene score CENEPRED válido.")
+                elif (not _tiene_aum) and _tiene_score:
+                    _cob, _com = "No", ("Reconocido y con score, pero sin AUM/activo físico "
+                                        "mapeado (falta geografía o exposición efectiva).")
+                else:
+                    _com_extra = ("" if _canon == _nm.strip()
+                                  else f" (mapea a canónico '{_canon}')")
+                    _cob, _com = "No", ("Reconocido pero sin AUM ni activo físico mapeado: "
+                                        "no llegó a 'districts'. Posible falta de geografía "
+                                        "(sin hoja de activos / sin producción / sin banca) "
+                                        "o exposición nula." + _com_extra)
+            _rows_cob.append((_nm, _canon or "—", _cat, _cob, _com))
+
+        # 6) Escribir la hoja
+        ws_cob = wb.create_sheet(title="Cobertura")
+        ws_cob.sheet_view.showGridLines = False
+        _n_esp = len(_rows_cob)
+        _n_si = sum(1 for x in _rows_cob if x[3] == "Sí")
+        ws_cob["A1"] = "Cobertura de emisores directo - Local (Equity / Deuda corporativa)"
+        ws_cob["A1"].font = F_TIT
+        ws_cob["A2"] = (f"Emisores esperados: {_n_esp} · Con cobertura: {_n_si} · "
+                        f"Sin cobertura: {_n_esp - _n_si} · Periodo {periodo}")
+        ws_cob["A2"].font = F_SUB
+
+        _headers = ["Emisor (Valorización)", "Emisor canónico",
+                    "Clasificación ERR", "Cobertura", "Comentario"]
+        _hr = 4
+        for _j, _t in enumerate(_headers, start=1):
+            _cc = ws_cob.cell(row=_hr, column=_j, value=_t)
+            _cc.font = F_HEAD; _cc.fill = FILL_HEAD; _cc.alignment = A_C; _cc.border = BORDER
+
+        _rr2 = _hr + 1
+        for _nm, _canon, _cat, _cob, _com in _rows_cob:
+            _vals = [_nm, _canon, _cat, _cob, _com]
+            for _j, _v in enumerate(_vals, start=1):
+                _cc = ws_cob.cell(row=_rr2, column=_j, value=_v)
+                _cc.font = F_BODY; _cc.border = BORDER
+                if _j in (1, 2, 3, 5):
+                    _cc.alignment = A_LW
+                else:
+                    _cc.alignment = A_C
+                    if _cob == "Sí":
+                        _cc.fill = PatternFill("solid", fgColor="D4EDDA")
+                    else:
+                        _cc.fill = PatternFill("solid", fgColor="F8D7DA")
+            _rr2 += 1
+
+        for _col, _w in zip("ABCDE", (30, 24, 42, 12, 60)):
+            ws_cob.column_dimensions[_col].width = _w
+        ws_cob.freeze_panes = "A5"
+        if _rr2 > _hr + 1:
+            ws_cob.auto_filter.ref = f"A{_hr}:E{_rr2 - 1}"
+        logfn(f"[Activos] Hoja 'Cobertura': {_n_esp} emisores esperados, "
+              f"{_n_si} con cobertura, {_n_esp - _n_si} sin.")
+    except Exception as _e_cob:
+        logfn(f"[Activos] No se pudo generar la hoja 'Cobertura': {_e_cob}")
+
+    os.makedirs(out_dir, exist_ok=True)
+```
+
+Eso es todo. No toca ninguna de las tres hojas por desastre ni ningún cálculo; solo agrega una cuarta hoja al mismo `wb` antes de guardarlo.
+
+## Qué obtienes
+
+Una hoja "Cobertura" con las 5 columnas que pediste:
+
+1. **Emisor (Valorización)** — el nombre tal como sale de la columna AE (valor de la fórmula), único por emisor aunque se repita por instrumento.
+2. **Emisor canónico** — a qué nombre interno mapea (te revela los alias, ej. InRetail → IFS).
+3. **Clasificación ERR** — su(s) categoría(s); si tiene varias (como Pluz Energía: Equity + Deuda), las lista juntas.
+4. **Cobertura** — "Sí"/"No" con celda verde/roja.
+5. **Comentario** — el motivo del "No", distinguiendo cuatro casos: no reconocido (falta alias en CONFIG), reconocido sin score, reconocido sin AUM/activo, o reconocido sin nada mapeado.
+
+El encabezado te da el contador directo: "Emisores esperados: 37 · Con cobertura: 25 · Sin cobertura: 12", que es exactamente tu comparador de "cuántos debía analizar vs cuántos consideró".
+
+Un punto que quiero que valides al correrlo, porque afecta la lectura de un caso: emisores como **MiBanco** y **BCP** aparecen en Valorización bajo el nombre "Credicorp" (no como filas propias directo-local), así que en esta hoja verás "Credicorp" una sola vez, no los tres. Si tú esperas verlos desagregados en el checklist, dímelo y ajustamos el criterio de agrupación. Con el criterio actual, el checklist refleja **lo que realmente hay en la columna AE**, que es lo que pediste.
