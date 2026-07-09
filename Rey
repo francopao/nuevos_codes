@@ -1,0 +1,133 @@
+Leído. Veo las líneas truncadas 82-98 antes de dar el diagnóstico, porque ahí está la clave del problema de MiBanco/BCP y Santander.
+
+Ahora tengo el panorama completo. Son tres pedidos distintos. Déjame verificar cada uno contra el código y los datos antes de darte los cambios, porque cada uno toca un punto diferente.
+
+**Pedido 1** — Desagregar MiBanco/BCP en la hoja Cobertura (no agrupar por Credicorp).
+**Pedido 2** — El WARN "Sin AUM en Valorización (col H)" — dice col H pero el AUM real está en col K (VALOR_VECTOR_LOCAL).
+**Pedido 3** — Santander Consumer Bank, Banco BCI, Banco GNB, etc. tienen AUM y deberían mapear geografía como los otros bancos vía FIN_PATTERNS, pero salen sin cobertura.
+
+Empiezo verificando el Pedido 2, que es el más concreto. Busco dónde sale ese WARN "Sin AUM en Valorización (col H)".
+
+Ahora entiendo el Pedido 2. El WARN dice literalmente "(col H)" pero eso es solo **texto del mensaje** — el AUM realmente se lee en `load_exposicion_sector`, que ya usa el hint "K"/"VALOR_VECTOR_LOCAL" (lo vi antes en línea 1265: `spec = {"nombre": (...,"AE"), ...}`). Verifiquemos qué columna usa `load_exposicion_sector` para el valor:
+
+Confirmado el diagnóstico completo de los tres pedidos:
+
+**Pedido 2 — es solo texto engañoso, NO un bug de lectura.** El AUM ya se lee de la columna K (`VALOR_VECTOR_LOCAL`) correctamente vía `resolve_columns` con hint dinámico (línea 1266). Los WARN dicen "(col H)" porque el mensaje está desactualizado. Entonces "Colegios Peruanos, InRetail, Intursa, Lima Expresa" **realmente no tienen AUM** — no es que se lea mal la columna. Verifiquémoslo:
+
+Muy revelador. **Estos emisores SÍ tienen AUM en la columna K** (InRetail S/752M, Lima Expresa S/264M, Intursa S/116M, Colegios Peruanos S/86M). Entonces el WARN "Sin AUM" es un **falso negativo**: el problema es que su nombre en la hoja de activos (`spec["empresa"]`) no matchea con el nombre en la columna AE de Valorización a través de `equiv_hoja`.
+
+El detalle está en `equiv_hoja` (línea 6509): usa `spec["exp"]` como los nombres de Valorización. Si el `spec["exp"]` de InRetail no incluye el string exacto "InRetail" tal como está en AE, no matchea. Veamos el `EMPRESAS_HOJA` de estos cuatro:
+
+Ahí está la causa raíz del Pedido 2, clarísima. Los `spec["exp"]` **no coinciden** con los nombres reales en la columna AE:
+
+- **InRetail**: el spec busca `"InRetail Shopping Malls", "InRetail Consumer", "InRetail Peru"`, pero en AE el nombre real es simplemente **"InRetail"** (que sí tiene S/752M).
+- **Colegios Peruanos**: busca `"PF Colegios Peruanos"`, pero en AE es **"Colegios Peruanos"**.
+- **Intursa**: busca `"Inversiones Nacionales de Turismo"`, pero en AE es **"Intursa"**.
+- **Lima Expresa**: busca `"Línea Amarilla"`, pero en AE es **"Lima Expresa"**.
+
+Por eso el AUM existe pero no se asigna: el nombre esperado en `exp` no está en Valorización. La solución es agregar el nombre real de AE a cada `exp`.
+
+Ahora verifico el **Pedido 3** (Santander Consumer, Banco BCI, Banco GNB). El log dice que aparecen como "no mapeados" en la auditoría financiera (líneas 32,37,38). Estos deberían mapear geografía vía FIN_PATTERNS como los demás bancos. Veamos qué es FIN_PATTERNS y por qué no entran:
+
+FIN_PATTERNS es solo el patrón de archivo del B-2358. La geografía bancaria viene de `EQUIV_BANCOS_GEO`. Veamos ambos diccionarios financieros:
+
+Ahora entiendo el Pedido 3 completo. El diseño tiene **dos capas separadas** para financieros:
+
+1. **`EQUIV_BANCOS_GEO`** (geografía, del B-2358): sí tiene Santander Consumer, BCI, GNB.
+2. **`EQUIV_EXPOSICION_FINANCIERO`** (nombre en Valorización → canónico): **NO** tiene Santander Consumer Bank, Banco BCI, Banco GNB.
+
+Pero además, el universo financiero ahora sale de **Holdings** (nota línea 246-247). Entonces para que un banco se mapee necesita estar en **Holdings** (con su fila `Banca` + `Banco`). Veamos qué bancos están en la hoja Holdings:
+
+Ahora tengo el diagnóstico completo de los tres pedidos. Déjame ver por qué Santander Consumer, BCI, GNB no mapean, cruzando toda la información:
+
+**Santander Consumer** SÍ está en Holdings (`'Santander Consumer', 'Banca', 'SANTANDER CONSUMER BANK'`), pero el log dice `Holdings: 'Santander Consumer' sin AUM en Valorización (o factor 0); se omite`. El problema: en Holdings el emisor se llama **"Santander Consumer"** pero en Valorización (AE) el nombre es **"Santander Consumer Bank"**. El `exp_fin` se arma con los nombres de Holdings, y busca "Santander Consumer" en Valorización → no lo halla porque allá está como "Santander Consumer Bank".
+
+**Banco BCI y Banco GNB** NO están en Holdings en absoluto, por eso no se mapean (aunque tengan geografía en `EQUIV_BANCOS_GEO` y AUM en Valorización).
+
+Confirmemos los nombres exactos en Valorización:
+
+Diagnóstico completo confirmado. Ahora tengo todo para darte los cambios. Son **tres problemas independientes** con solución en el Excel (Holdings) y en dos puntos del código.
+
+Antes de escribir, el resumen del diagnóstico para que estemos alineados:
+
+**Pedido 1 (desagregar MiBanco/BCP en hoja Cobertura):** Hoy la hoja agrupa por nombre de AE. MiBanco y BCP no aparecen porque en AE están bajo "Credicorp". En realidad son un tema de mapeo canónico. Lo resuelvo mostrando cada nombre de AE tal cual (ya lo hace) — el punto es que "MiBanco"/"BCP" **no existen como filas propias en AE**, están dentro de Credicorp. Necesito confirmar contigo cómo quieres verlos (ver más abajo).
+
+**Pedido 2 (InRetail, Colegios, Intursa, Lima Expresa "sin AUM"):** Falso negativo. Sí tienen AUM en col K, pero sus `spec["exp"]` en `EMPRESAS_HOJA` no coinciden con el nombre real de AE. Se arregla agregando el nombre real a cada `exp`.
+
+**Pedido 3 (Santander Consumer, BCI, GNB):** Son bancos con AUM y con geografía en `EQUIV_BANCOS_GEO`, pero: Santander Consumer está en Holdings con nombre incompleto ("Santander Consumer" vs "Santander Consumer Bank" en AE), y BCI/GNB no están en Holdings. Se arregla en el Excel Holdings.
+
+Voy con los tres:
+
+## Solución Pedido 2 — corregir `EMPRESAS_HOJA` (código)
+
+Localiza el bloque `EMPRESAS_HOJA` (líneas ~393-399) y corrige los cuatro `exp` para incluir el nombre real de la columna AE:
+
+**Colegios Peruanos** — reemplaza:
+```python
+    {"hoja": "Colegios Peruanos","empresa": "Colegios Peruanos","sector": SECTOR_EDU,"exp": ["PF Colegios Peruanos"]},
+```
+por:
+```python
+    {"hoja": "Colegios Peruanos","empresa": "Colegios Peruanos","sector": SECTOR_EDU,"exp": ["PF Colegios Peruanos", "Colegios Peruanos"]},
+```
+
+**InRetail** — reemplaza:
+```python
+    {"hoja": "InRetail",         "empresa": "InRetail",     "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Shopping Malls", "InRetail Consumer", "InRetail Peru"]},
+```
+por:
+```python
+    {"hoja": "InRetail",         "empresa": "InRetail",     "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Shopping Malls", "InRetail Consumer", "InRetail Peru", "InRetail"]},
+```
+
+**Intursa** — reemplaza:
+```python
+    {"hoja": "Intursa",          "empresa": "Intursa",      "sector": SECTOR_CONSUMO,
+     "exp": ["Inversiones Nacionales de Turismo"]},
+```
+por:
+```python
+    {"hoja": "Intursa",          "empresa": "Intursa",      "sector": SECTOR_CONSUMO,
+     "exp": ["Inversiones Nacionales de Turismo", "Intursa"]},
+```
+
+**Lima Expresa** — reemplaza:
+```python
+    {"hoja": "Lima Expresa",     "empresa": "Lima Expresa", "sector": SECTOR_INFRA,  "exp": ["Línea Amarilla"]},
+```
+por:
+```python
+    {"hoja": "Lima Expresa",     "empresa": "Lima Expresa", "sector": SECTOR_INFRA,  "exp": ["Línea Amarilla", "Lima Expresa"]},
+```
+
+## Solución Pedido 3 — corregir la hoja Holdings (Excel, no código)
+
+En tu hoja Holdings del Excel:
+
+1. **Santander Consumer** — corrige el nombre del emisor para que coincida con AE. Cambia la celda `Emisor` de esa fila de `Santander Consumer` a **`Santander Consumer Bank`**. (La columna Banco `SANTANDER CONSUMER BANK` ya está bien.)
+
+2. **Banco BCI Perú** — agrega una fila nueva:
+   `Emisor = Banco BCI Peru | Fuente = Banca | Banco = BANCO BCI | Hoja_Activos = (vacío) | AUM_Factor = 1 | Sector = Financiero | País = Perú`
+
+3. **Banco GNB** — agrega una fila nueva:
+   `Emisor = Banco GNB | Fuente = Banca | Banco = BANCO GNB | Hoja_Activos = (vacío) | AUM_Factor = 1 | Sector = Financiero | País = Perú`
+
+Nota: el nombre en `Emisor` debe coincidir **exactamente** (tras normalizar) con el nombre en la columna AE de Valorización — que confirmé son "Banco BCI Peru" y "Banco GNB". Los valores de `Banco` deben coincidir con las claves de `EQUIV_BANCOS_GEO`, que ya tiene "BANCO BCI" y "BANCO GNB". Ya están, así que mapearán geografía sin tocar código.
+
+Si quieres incluir también **Banco de la Nación** (tiene S/5.5M y ERR directo-local), necesitarías su geografía: agrégalo a `EQUIV_BANCOS_GEO` en el código con su clave del B-2358, y una fila en Holdings. Pero primero confirma si el B-2358 trae "BANCO DE LA NACION" — si no está en ese resumen, no habrá geografía y quedará sin cobertura legítimamente.
+
+## Pedido 1 — hoja Cobertura: desagregar MiBanco/BCP
+
+Aquí necesito tu decisión, porque hay una ambigüedad de fondo. En la columna AE de Valorización, **MiBanco y BCP no existen como emisores separados**: su AUM está bajo el nombre "Credicorp" (S/1,450M). Los nombres "MiBanco" y "Banco de Crédito del Perú" que ves en el log vienen de la **hoja Holdings** (donde tú los separaste 0.84/0.16), no de Valorización.
+
+Entonces, cuando dices "quiero ver desagregado MiBanco y BCP en la hoja Cobertura", hay dos interpretaciones:
+
+**Opción A:** La hoja Cobertura lista **solo lo que hay en la columna AE** (tu universo real de instrumentos directo-local). Ahí Credicorp es una sola línea. MiBanco/BCP no aparecen porque no son emisores directo-local en Valorización — son una subdivisión tuya en Holdings. Esta es la lógica actual y es la más fiel al "universo esperado".
+
+**Opción B:** La hoja Cobertura toma el universo de **Holdings** (emisores efectivamente mapeados), donde sí existen MiBanco y BCP por separado. Pero entonces ya no es "emisores directo-local de Valorización", es otra cosa.
+
+Mi pregunta concreta: la hoja Cobertura, ¿debe seguir representando **"emisores directo-local que hay en Valorización (col AE/AA)"** —tu checklist de cuántos *deberías* cubrir— o quieres que represente **"emisores mapeados en el proceso"** (universo Holdings + hojas + minería), donde MiBanco/BCP salen separados?
+
+Según lo que elijas, el Pedido 1 se resuelve distinto (y en un caso puede que MiBanco/BCP simplemente no correspondan a esa hoja). Dime y te doy ese último cambio.
