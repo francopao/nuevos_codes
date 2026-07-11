@@ -1,0 +1,368 @@
+###############################################################################
+#                                                                             #
+#   MÓDULO 13 — EXCEL EXPORTER                                                #
+#   Serializa los objetos del pipeline a .xlsx. Nombres con SEMESTRE embebido. #
+#   Un workbook multi-hoja por "familia" + los históricos que pediste:         #
+#     - Valorización (con columnas __xlsx si hubo backtesting)                 #
+#     - Final (pivots)                                                         #
+#     - Presentación (cortes del comité)                                       #
+#     - BD(MSCI) post-proxies                                                  #
+#     - Instrumentos heredados (histórico exportable, R4)                     #
+#   Requiere: pip install openpyxl (motor de escritura de pandas).            #
+#                                                                             #
+###############################################################################
+
+import re as _re
+
+
+def _sanitize_sheet_name(name: str) -> str:
+    """Excel: nombre de hoja <=31 chars, sin  []:*?/\\ ."""
+    name = _re.sub(r'[\[\]:\*\?/\\]', "_", str(name))
+    return name[:31] if len(name) > 31 else name
+
+
+class ExcelExporter:
+    """Escribe los DataFrames del pipeline a .xlsx en un directorio de salida.
+
+    No aborta si un objeto es None/vacío: lo omite con aviso. Devuelve la lista
+    de rutas escritas (para present/log).
+    """
+
+    def __init__(self, config: Config, out_dir: Optional[str] = None,
+                 verbose: bool = True):
+        self.config = config
+        self.semestre = getattr(config, "semestre", "SEMESTRE")
+        # Por defecto, exporta a una subcarpeta 'export_<semestre>' junto al workbook.
+        base = out_dir or os.path.join(
+            getattr(config, "reportes_root", "."), f"export_{self.semestre}")
+        self.out_dir = base
+        self.verbose = verbose
+        self.written: List[str] = []
+
+    # ---- API pública -------------------------------------------------------
+    def export_all(self, *,
+                   valorizacion: Optional[pd.DataFrame] = None,
+                   final_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+                   presentacion_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+                   bd_msci: Optional[pd.DataFrame] = None,
+                   inherited_history: Optional[pd.DataFrame] = None,
+                   perdieron_huella: Optional[pd.DataFrame] = None) -> List[str]:
+        os.makedirs(self.out_dir, exist_ok=True)
+        if self.verbose:
+            print(f"  [Módulo 13] Exportando a: {self.out_dir}")
+
+        if valorizacion is not None:
+            self._write_single(valorizacion, "Valorizacion", "Valorizacion")
+        if final_bundle:
+            self._write_bundle(final_bundle, "Final")
+        if presentacion_bundle:
+            self._write_bundle(presentacion_bundle, "Presentacion")
+        if bd_msci is not None:
+            self._write_single(bd_msci, "BD_MSCI_post_proxies", "BD(MSCI)")
+        if inherited_history is not None:
+            self._write_single(inherited_history, "Instrumentos_heredados",
+                               "Heredados", allow_empty=True)
+        if perdieron_huella is not None:
+            self._write_single(perdieron_huella, "Perdieron_Huella",
+                               "Perdieron", allow_empty=True)
+
+        if self.verbose:
+            print(f"  [Módulo 13] {len(self.written)} archivo(s) escrito(s).")
+        return self.written
+
+    # ---- Escritura ---------------------------------------------------------
+    def _fname(self, stem: str) -> str:
+        return os.path.join(self.out_dir, f"{stem}_{self.semestre}.xlsx")
+
+    def _write_single(self, df: pd.DataFrame, stem: str, sheet: str,
+                      allow_empty: bool = False) -> None:
+        if df is None or (df.empty and not allow_empty):
+            if self.verbose:
+                print(f"  [Módulo 13] [omito] '{stem}' vacío o None.")
+            return
+        path = self._fname(stem)
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as xw:
+                df.to_excel(xw, sheet_name=_sanitize_sheet_name(sheet), index=self._needs_index(df))
+            self.written.append(path)
+            if self.verbose:
+                print(f"  [Módulo 13] [OK] {os.path.basename(path)} "
+                      f"({df.shape[0]}x{df.shape[1]}).")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [Módulo 13] [ERROR] No pude escribir '{stem}': {exc}")
+
+    def _write_bundle(self, bundle: Dict[str, pd.DataFrame], stem: str) -> None:
+        items = {k: v for k, v in bundle.items()
+                 if isinstance(v, pd.DataFrame) and not v.empty}
+        if not items:
+            if self.verbose:
+                print(f"  [Módulo 13] [omito] bundle '{stem}' sin DataFrames.")
+            return
+        path = self._fname(stem)
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as xw:
+                for name, df in items.items():
+                    df.to_excel(xw, sheet_name=_sanitize_sheet_name(name),
+                                index=self._needs_index(df))
+            self.written.append(path)
+            if self.verbose:
+                print(f"  [Módulo 13] [OK] {os.path.basename(path)} "
+                      f"({len(items)} hojas).")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [Módulo 13] [ERROR] No pude escribir bundle '{stem}': {exc}")
+
+    @staticmethod
+    def _needs_index(df: pd.DataFrame) -> bool:
+        """Conserva el índice solo si es significativo (pivots con índice nombrado)."""
+        return bool(df.index.name) or isinstance(df.index, pd.MultiIndex)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 14 — DASHBOARD HTML (comité de inversiones)                        #
+#   HTML autocontenido (Plotly inline, offline) distribuible por correo.       #
+#   Gráficos (R9):                                                            #
+#     - Métricas y Metas: serie temporal Huella / Intensidad                  #
+#     - Portafolio local por SECTOR y por PAÍS (apilado)                      #
+#     - Benchmark por PAÍS (AUM de Market Cap)                                #
+#     - Rating ASG (LEADER/AVERAGE/LAGGARD/No coberturado)                    #
+#     - Menores contribuyentes por emisor (columnas agrupadas)               #
+#     - Controversias e Inversión Temática (PIE)                             #
+#   Requiere: pip install plotly                                             #
+#                                                                             #
+###############################################################################
+
+# Paleta de comité (sobria, alto contraste).
+PALETTE = ["#1f4e5f", "#2e8b8b", "#c9a227", "#8c4a3c", "#6b7b8c",
+           "#3d5a3d", "#a34e6b", "#4a6fa5", "#7a5c99", "#b5651d"]
+COL_HUELLA = "#1f4e5f"
+COL_INTENS = "#c9a227"
+
+
+class DashboardHTML:
+    """Ensambla un dashboard HTML autocontenido a partir de los bundles del
+    Módulo 11 (Final) y 12 (Presentación) + serie histórica opcional."""
+
+    def __init__(self, config: Config, verbose: bool = True):
+        self.config = config
+        self.semestre = getattr(config, "semestre", "SEMESTRE")
+        self.verbose = verbose
+        self._figs: List[Tuple[str, str]] = []  # (titulo, div_html)
+
+    # ---- API pública -------------------------------------------------------
+    def build(self, *,
+              final_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+              presentacion_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+              serie_metricas: Optional[pd.DataFrame] = None,
+              au4_total_huella: Optional[float] = None,
+              out_path: Optional[str] = None) -> Optional[str]:
+        try:
+            import plotly.graph_objects as go
+            import plotly.io as pio
+        except ImportError:
+            print("  [Módulo 14] [ERROR] Falta plotly. Instala: pip install plotly")
+            return None
+
+        self._go = go
+        self._pio = pio
+        pres = presentacion_bundle or {}
+
+        # --- 1) Métricas y Metas (serie temporal) --------------------------
+        if serie_metricas is not None and not serie_metricas.empty:
+            self._add(self._fig_serie(serie_metricas), "Métricas y Metas")
+        # --- 2) Portafolio local por sector / país -------------------------
+        self._add(self._fig_stacked_bucket(pres.get("local_por_sector"),
+                  "Portafolio local — por Sector"), "Portafolio local — Sector")
+        self._add(self._fig_stacked_bucket(pres.get("local_por_pais"),
+                  "Portafolio local — por País"), "Portafolio local — País")
+        # --- 3) Rating ASG -------------------------------------------------
+        self._add(self._fig_stacked_bucket(pres.get("rating_asg"),
+                  "Rating ASG"), "Rating ASG")
+        # --- 4) Menores contribuyentes (clustered) -------------------------
+        self._add(self._fig_clustered(pres.get("menores_contribuyentes"),
+                  "Menores contribuyentes al rating"), "Menores contribuyentes")
+        # --- 5) Controversias (pie) ----------------------------------------
+        self._add(self._fig_pie(pres.get("controversias"),
+                  "Controversias", cat="categoria", val="conteo"), "Controversias")
+        # --- 6) Inversión Temática (pie, opcional) -------------------------
+        if pres.get("inversion_tematica") is not None:
+            self._add(self._fig_pie(pres.get("inversion_tematica"),
+                      "Inversión Temática", cat="categoria", val="valor"),
+                      "Inversión Temática")
+        # --- 7) Benchmark por país (si hay AUM) ----------------------------
+        for k in pres:
+            if k.startswith("benchmark_"):
+                self._add(self._fig_benchmark(pres[k], k), k)
+
+        html = self._assemble(au4_total_huella, final_bundle)
+
+        out = out_path or os.path.join(
+            getattr(self.config, "reportes_root", "."),
+            f"export_{self.semestre}", f"Dashboard_Huella_{self.semestre}.html")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        if self.verbose:
+            print(f"  [Módulo 14] Dashboard -> {out} ({len(self._figs)} gráficos).")
+        return out
+
+    # ---- Figuras -----------------------------------------------------------
+    def _add(self, div: Optional[str], titulo: str) -> None:
+        if div:
+            self._figs.append((titulo, div))
+
+    def _to_div(self, fig) -> str:
+        return self._pio.to_html(fig, full_html=False, include_plotlyjs=False,
+                                 config={"displayModeBar": False})
+
+    def _base_layout(self, fig, title: str):
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, color="#1f2d3d")),
+            template="plotly_white", margin=dict(t=48, l=48, r=24, b=40),
+            font=dict(family="Segoe UI, Helvetica, Arial", size=12, color="#333"),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.25),
+            height=360, paper_bgcolor="white", plot_bgcolor="white",
+        )
+        return fig
+
+    def _fig_serie(self, df: pd.DataFrame):
+        go = self._go
+        period = df.columns[0]
+        fig = go.Figure()
+        if "Huella" in df.columns:
+            fig.add_bar(x=df[period], y=pd.to_numeric(df["Huella"], errors="coerce"),
+                        name="Huella (miles Tn CO2)", marker_color=COL_HUELLA)
+        if "Intensidad" in df.columns:
+            fig.add_scatter(x=df[period], y=pd.to_numeric(df["Intensidad"], errors="coerce"),
+                            name="Intensidad (Tn CO2/USD MM)", yaxis="y2",
+                            mode="lines+markers", line=dict(color=COL_INTENS, width=3))
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False))
+        return self._to_div(self._base_layout(fig, "Métricas y Metas"))
+
+    def _fig_stacked_bucket(self, df: Optional[pd.DataFrame], title: str):
+        if df is None or df.empty:
+            return None
+        go = self._go
+        buckets = df["bucket"].tolist()
+        fig = go.Figure()
+        # Huella y Intensidad como dos columnas apiladas por bucket (color = bucket).
+        for i, b in enumerate(buckets):
+            row = df[df["bucket"] == b].iloc[0]
+            fig.add_bar(x=["Huella", "Intensidad"],
+                        y=[pd.to_numeric(row.get("Huella"), errors="coerce"),
+                           pd.to_numeric(row.get("Intensidad"), errors="coerce")],
+                        name=str(b), marker_color=PALETTE[i % len(PALETTE)])
+        fig.update_layout(barmode="stack")
+        return self._to_div(self._base_layout(fig, title))
+
+    def _fig_clustered(self, df: Optional[pd.DataFrame], title: str):
+        if df is None or df.empty:
+            return None
+        go = self._go
+        x = df["emisor"].astype(str).tolist()
+        fig = go.Figure()
+        fig.add_bar(x=x, y=pd.to_numeric(df["Huella"], errors="coerce"),
+                    name="Huella", marker_color=COL_HUELLA)
+        fig.add_bar(x=x, y=pd.to_numeric(df["Intensidad"], errors="coerce"),
+                    name="Intensidad", marker_color=COL_INTENS)
+        fig.update_layout(barmode="group", xaxis_tickangle=-30)
+        return self._to_div(self._base_layout(fig, title))
+
+    def _fig_pie(self, df: Optional[pd.DataFrame], title: str, cat: str, val: str):
+        if df is None or df.empty or cat not in df.columns or val not in df.columns:
+            return None
+        go = self._go
+        fig = go.Figure(go.Pie(labels=df[cat].astype(str),
+                               values=pd.to_numeric(df[val], errors="coerce"),
+                               hole=0.45, marker=dict(colors=PALETTE)))
+        return self._to_div(self._base_layout(fig, title))
+
+    def _fig_benchmark(self, df: Optional[pd.DataFrame], key: str):
+        if df is None or df.empty:
+            return None
+        go = self._go
+        if "pais" in df.columns and "AUM_pais" in df.columns:
+            fig = go.Figure(go.Bar(x=df["pais"].astype(str),
+                                   y=pd.to_numeric(df["AUM_pais"], errors="coerce"),
+                                   marker_color=PALETTE))
+        else:  # solo AUM total
+            fig = go.Figure(go.Bar(x=df["ticker"].astype(str),
+                                   y=pd.to_numeric(df["AUM"], errors="coerce"),
+                                   marker_color=COL_HUELLA))
+        return self._to_div(self._base_layout(fig, key.replace("_", " ").title()))
+
+    # ---- Ensamblado HTML ---------------------------------------------------
+    def _kpi_cards(self, au4, final_bundle) -> str:
+        cards = []
+        if au4 is not None:
+            cards.append(("Huella total (Tn CO2)", f"{au4:,.0f}"))
+        if final_bundle and "Final_totales" in final_bundle:
+            tot = final_bundle["Final_totales"]
+            if not tot.empty:
+                r = tot.iloc[0]
+                if "Sum of Inv MM$" in tot.columns:
+                    cards.append(("Inversión (USD MM)", f"{r['Sum of Inv MM$']:,.1f}"))
+                if " Intensidad" in tot.columns:
+                    cards.append(("Intensidad total", f"{r[' Intensidad']:,.2f}"))
+        if not cards:
+            return ""
+        html = '<div class="kpi-row">'
+        for label, value in cards:
+            html += f'<div class="kpi"><div class="kpi-val">{value}</div>' \
+                    f'<div class="kpi-lbl">{label}</div></div>'
+        return html + "</div>"
+
+    def _assemble(self, au4, final_bundle) -> str:
+        plotly_js = self._pio.to_html(
+            self._go.Figure(), full_html=False, include_plotlyjs=True
+        ).split("<script")[1].split(">", 1)[1].rsplit("</script>", 1)[0]
+        # (extrae el bloque plotly.js embebido una sola vez)
+
+        cards = self._kpi_cards(au4, final_bundle)
+        chart_html = ""
+        for _, div in self._figs:
+            chart_html += f'<div class="card">{div}</div>'
+
+        return f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Huella de Carbono — {self.semestre}</title>
+<script>{plotly_js}</script>
+<style>
+  body {{ margin:0; background:#f4f6f8; font-family:'Segoe UI',Helvetica,Arial,sans-serif; color:#1f2d3d; }}
+  .header {{ background:linear-gradient(135deg,#1f4e5f,#2e8b8b); color:#fff; padding:28px 40px; }}
+  .header h1 {{ margin:0; font-size:24px; font-weight:600; }}
+  .header p {{ margin:6px 0 0; opacity:.85; font-size:13px; }}
+  .kpi-row {{ display:flex; gap:16px; padding:24px 40px 0; flex-wrap:wrap; }}
+  .kpi {{ background:#fff; border-radius:10px; padding:18px 24px; box-shadow:0 1px 4px rgba(0,0,0,.08); min-width:160px; }}
+  .kpi-val {{ font-size:26px; font-weight:700; color:#1f4e5f; }}
+  .kpi-lbl {{ font-size:12px; color:#6b7b8c; margin-top:4px; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:20px; padding:24px 40px 40px; }}
+  .card {{ background:#fff; border-radius:10px; padding:12px; box-shadow:0 1px 4px rgba(0,0,0,.08); }}
+  .foot {{ text-align:center; color:#9aa7b3; font-size:11px; padding:20px; }}
+</style></head>
+<body>
+  <div class="header">
+    <h1>Medición de Huella de Carbono</h1>
+    <p>Comité de Inversiones y Riesgos · Semestre {self.semestre} · AFP Integra</p>
+  </div>
+  {cards}
+  <div class="grid">{chart_html}</div>
+  <div class="foot">Generado automáticamente por el pipeline ESG · {self.semestre}</div>
+</body></html>"""
