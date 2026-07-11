@@ -1,0 +1,54 @@
+Perfecto. Entonces el filtro es: excluir `PORTAFOLIO = IN-FONDO0`, o `GRUPO` que empiece con `DPZ`, o `GRUPO = CDLP`. Aquí está el **Ajuste 1 corregido** para cubrir DPZ*:
+
+## Ajuste 1 — Filtro de exclusión (Módulo 10)
+
+En `ValorizacionBuilder.build()`, justo después de la primera línea `df = self.df`, agrega:
+
+```python
+        # Filtro de negocio: excluir IN-FONDO0 (solo informativo),
+        # GRUPO que empiece con DPZ (DPZ, DPZ6B, ...) y GRUPO = CDLP.
+        _port = df[self.portafolio_col].map(lambda p: (_to_string(p) or "").upper())
+        if "GRUPO" in df.columns:
+            _grupo = df["GRUPO"].map(lambda g: (_to_string(g) or "").upper())
+            _excluir = (_port == "IN-FONDO0") | _grupo.str.startswith("DPZ") | (_grupo == "CDLP")
+        else:
+            _excluir = (_port == "IN-FONDO0")
+        n_excl = int(_excluir.sum())
+        df = df[~_excluir].reset_index(drop=True)
+        self.df = df
+        if self.verbose:
+            print(f"  [Módulo 10] Filtro exclusión (IN-FONDO0 / DPZ* / CDLP): "
+                  f"{n_excl} filas excluidas, quedan {len(df)}.")
+```
+
+## Ajuste 2 — Fallback CO2-H a 0 (Módulo 10)
+
+Busca en `build()` estas dos líneas consecutivas:
+
+```python
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+```
+
+Y **justo debajo** agrega:
+
+```python
+        # Lo que sigue sin intensidad tras BD+proxies+perdieron+herencia -> 0.0
+        # (equivale al 3er IFERROR de la fórmula del Excel; los soberanos ya
+        #  matchean por ISIN si Base MSCI está completo).
+        df[V_AJ] = pd.to_numeric(df[V_AJ], errors="coerce").fillna(0.0)
+```
+
+## Acción 3 (la más importante, sin código)
+
+Reemplaza el `Base MSCI (Sob+ETF+BU).xlsx` de tu ruta `Z:\...\Dataset\MSCI\` por la versión completa que subiste. **Ese era el problema real**: tu archivo en red tenía la hoja `202606` con 753 filas (sin los 42 soberanos peruanos), mientras que el correcto tiene 1000. Sin este reemplazo, los soberanos seguirán vacíos aunque apliques los ajustes de código.
+
+## Qué esperar después
+
+Con las tres cosas aplicadas:
+- Los **soberanos peruanos** se llenarán con 170.42 (vía ISIN, ya verificado).
+- Las **136 filas** IN-FONDO0/DPZ*/CDLP desaparecen del análisis.
+- Lo que quede sin match (fondos/ETFs/alternativos sin proxy) irá a **0** en vez de vacío, tal como el Excel.
+- **Huella dejará de estar vacía** → el dashboard se llenará.
+
+Un punto que quedará por validar cuando corras: de los 227 sin-match que vi, muchos son `FIAX/FIV/FMX` (fondos y ETFs) que en tu corrida real deberían resolverse por **proxies** (el Módulo 9, que en mi prueba no apliqué). Si tras correr con proxies aún quedan fondos importantes en 0, revisamos si el archivo de proxies los cubre. Pero primero corre con estos tres cambios y me dices cómo queda la Huella.
