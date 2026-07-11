@@ -1,0 +1,431 @@
+# -*- coding: utf-8 -*-
+"""
+query_reader.py — MÓDULO 1 del pipeline Huella de Carbono ESG (AFP Integra)
+===========================================================================
+
+CAMINO 3 (R2): refresco MANUAL + lectura PASIVA. Este módulo NO usa COM/xlwings
+ni escribe nada en el .xlsm. El usuario ya fijó B1=yyyymmdd, hizo RefreshAll,
+guardó y cerró. Aquí solo LEEMOS con openpyxl la data ya materializada de:
+
+    - 'Valorización de Instrumentos'  (headers FILA 3; A:AS)
+    - 'Cálculo Caja'                  (headers FILA 3)
+    - 'Tipo de Cambio'                (headers FILA 3)
+
+Las tres hojas viven en el MISMO workbook (Config.path_workbook).
+
+REGLA DURA (spec): matchear columnas por NOMBRE de header, no por letra.
+La resolución es tolerante a acentos, mayúsculas, espacios y guiones, con
+estrategia exact-first y contains como fallback. Devuelve DataFrames con
+nombres canónicos estables para que los módulos 2, 3 y 10 los consuman sin
+depender del orden físico de columnas.
+
+Notas de alcance:
+  - Para 'Valorización de Instrumentos' se resuelven las columnas del QUERY
+    (base B:Z). Las columnas FORMULADAS (G, AA:AS) NO se reconstruyen aquí:
+    eso es trabajo del Módulo 10. Si están materializadas se conservan bajo
+    su header original (keep_unmapped=True) para permitir backtesting/comparación.
+  - Módulos 2 (CajaLoader) y 3 (TipoCambioLoader) consumirán estos DataFrames;
+    aquí no se hacen lookups de negocio, solo lectura + tipado.
+"""
+
+from __future__ import annotations
+
+import os
+import unicodedata
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+
+try:
+    from config import Config
+except ImportError:  # permite importar el módulo aunque config no esté en path
+    Config = object  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# Nombres de hoja (se resuelven de forma tolerante a acentos)
+# ---------------------------------------------------------------------------
+SHEET_VALORIZACION = "Valorización de Instrumentos"
+SHEET_CAJA = "Cálculo Caja"
+SHEET_TIPO_CAMBIO = "Tipo de Cambio"
+
+HEADER_ROW_DEFAULT = 3  # las tres hojas tienen headers en la fila 3
+
+
+# ---------------------------------------------------------------------------
+# Utilidades de normalización / matching de headers
+# ---------------------------------------------------------------------------
+def _normalize(text) -> str:
+    """Normaliza un header/nombre: sin acentos, minúsculas, solo alfanumérico."""
+    if text is None:
+        return ""
+    s = str(text).strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    return "".join(c for c in s if c.isalnum())
+
+
+# Cada schema: canonical -> lista de alias (se normalizan al vuelo).
+# El propio canonical se agrega como alias implícito.
+VALORIZACION_SCHEMA: Dict[str, List[str]] = {
+    "FechaValoracion":            ["fechavaloracion", "fecha valoracion"],
+    "TIPO_TITULO":                ["tipo_titulo", "tipo titulo"],
+    "PORTAFOLIO":                 ["portafolio"],
+    "GRUPO":                      ["grupo"],
+    "CODIGO_SBS":                 ["codigo_sbs", "codigo sbs", "cod sbs"],
+    "CODIGO_ISIN":                ["codigo_isin", "isin"],
+    "TITULO":                     ["titulo"],
+    "EMISOR":                     ["emisor"],
+    "Moneda":                     ["moneda"],
+    "VALOR_UNITARIO":             ["valor_unitario", "valor unitario"],
+    "VALOR_VECTOR_LOCAL":         ["valor_vector_local"],
+    "VALOR_VECTOR_ORIGEN":        ["valor_vector_origen"],
+    "CANTIDAD":                   ["cantidad"],
+    "FECHA_VENCIMIENTO":          ["fecha_vencimiento", "fecha vencimiento"],
+    "DIAS_VENCIMIENTO":           ["dias_ventimiento", "dias_vencimiento",
+                                   "dias vencimiento"],  # spec: typo VENTIMIENTO
+    "TIPO_CAMBIO":                ["tipo_cambio", "tipo cambio"],
+    "TIPO_RENTA":                 ["tipo_renta", "tipo renta"],
+    "VALOR_VECTOR_LOCAL_T-1":     ["valor_vector_local_t-1", "valor_vector_local_t1"],
+    "VALOR_VECTOR_ORIGEN_T-1":    ["valor_vector_origen_t-1", "valor_vector_origen_t1"],
+    "GRUPO_ECONOMICO":            ["grupo_economico", "grupo economico"],
+    "ACTIVO_DEL_EMISOR":          ["activo_del_emisor", "activo del emisor"],
+    "PASIVO_DEL_EMISOR":          ["pasivo_del_emisor", "pasivo del emisor"],
+    "PATRIMONIO_DEL_EMISOR":      ["pastrimonio_del_emisor", "patrimonio_del_emisor",
+                                   "patrimonio del emisor"],  # spec: typo PASTRIMONIO
+    "DIFERENCIA":                 ["diferencia"],
+}
+
+CAJA_SCHEMA: Dict[str, List[str]] = {
+    "PORTAFOLIO":       ["portafolio"],
+    "FECHA_OPERACION":  ["fecha_operacion", "fecha operacion"],
+    "CAJA":             ["caja"],
+    "CXC":              ["cxc"],
+    "CXP":              ["cxp"],
+    "PATRIMONIO":       ["patrimonio"],
+    "INVERSIONES":      ["inversiones"],
+    "Multifondos":      ["multifondos"],
+}
+
+TIPO_CAMBIO_SCHEMA: Dict[str, List[str]] = {
+    "CODIGO_MONEDA":         ["codigo_moneda"],
+    "NOMBRE_MONEDA":         ["nombre_moneda", "nombre moneda"],
+    "FECHA":                 ["fecha"],
+    "VALOR":                 ["valor"],
+    "CODIGO_MONEDA_SBS":     ["codigo_moneda_sbs", "codigo moneda sbs"],
+    "MONEDA_INTERNACIONAL":  ["moneda_internacional", "moneda internacional"],
+}
+
+# Columnas clave por hoja (para descartar filas basura).
+KEY_COL = {
+    "valorizacion": "CODIGO_SBS",
+    "caja": "PORTAFOLIO",
+    "tipo_cambio": "CODIGO_MONEDA",
+}
+
+# Columnas a tipar. Se usan nombres canónicos.
+NUMERIC_COLS = {
+    "VALOR_UNITARIO", "VALOR_VECTOR_LOCAL", "VALOR_VECTOR_ORIGEN", "CANTIDAD",
+    "VALOR_VECTOR_LOCAL_T-1", "VALOR_VECTOR_ORIGEN_T-1", "ACTIVO_DEL_EMISOR",
+    "PASIVO_DEL_EMISOR", "PATRIMONIO_DEL_EMISOR", "DIFERENCIA", "TIPO_CAMBIO",
+    "DIAS_VENCIMIENTO",  # Caja
+    "CAJA", "CXC", "CXP", "PATRIMONIO", "INVERSIONES",
+    # Tipo de cambio
+    "VALOR",
+}
+DATE_COLS = {"FechaValoracion", "FECHA_VENCIMIENTO", "FECHA_OPERACION", "FECHA"}
+# Se fuerzan a texto (llaves de match): evita 2 -> 2.0, ISIN, códigos.
+STRING_COLS = {
+    "CODIGO_SBS", "CODIGO_ISIN", "PORTAFOLIO", "CODIGO_MONEDA",
+    "CODIGO_MONEDA_SBS", "GRUPO_ECONOMICO", "EMISOR",
+}
+
+
+def _resolve_headers(
+    actual_headers: List[Optional[str]],
+    schema: Dict[str, List[str]],
+) -> Tuple[Dict[int, str], List[str]]:
+    """Mapea índice_de_columna -> nombre canónico según el schema.
+
+    Estrategia: exact-first sobre alias normalizados; luego contains como
+    fallback, respetando el orden del schema y sin reasignar un canónico ya
+    tomado. Devuelve (mapping, no_resueltos_canonicos).
+    """
+    # Alias normalizados por canónico (incluye el propio canónico).
+    norm_aliases: Dict[str, set] = {}
+    for canon, aliases in schema.items():
+        s = {_normalize(canon)}
+        s.update(_normalize(a) for a in aliases)
+        norm_aliases[canon] = {a for a in s if a}
+
+    norm_actual = {
+        i: _normalize(h) for i, h in enumerate(actual_headers) if _normalize(h)
+    }
+
+    mapping: Dict[int, str] = {}
+    used_canon: set = set()
+
+    # Pass 1: exact.
+    for i, na in norm_actual.items():
+        for canon in schema:
+            if canon in used_canon:
+                continue
+            if na in norm_aliases[canon]:
+                mapping[i] = canon
+                used_canon.add(canon)
+                break
+
+    # Pass 2: contains (solo para canónicos aún no resueltos y cols aún libres).
+    for i, na in norm_actual.items():
+        if i in mapping:
+            continue
+        for canon in schema:
+            if canon in used_canon:
+                continue
+            if any(alias in na or na in alias for alias in norm_aliases[canon]):
+                mapping[i] = canon
+                used_canon.add(canon)
+                break
+
+    no_resueltos = [c for c in schema if c not in used_canon]
+    return mapping, no_resueltos
+
+
+# ---------------------------------------------------------------------------
+# Coerción de tipos
+# ---------------------------------------------------------------------------
+def _to_number(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(" ", "")
+    # Formatos con separador de miles/decimal mixtos.
+    if s.count(",") and s.count("."):
+        s = s.replace(",", "")          # coma = miles
+    elif s.count(","):
+        s = s.replace(",", ".")         # coma = decimal
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _to_date(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    for fmt in ("%Y%m%d", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return v  # se deja tal cual si no matchea
+
+
+def _to_string(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if col in STRING_COLS:
+            df[col] = df[col].map(_to_string)
+        elif col in DATE_COLS:
+            df[col] = df[col].map(_to_date)
+        elif col in NUMERIC_COLS:
+            df[col] = df[col].map(_to_number)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Bundle de retorno
+# ---------------------------------------------------------------------------
+@dataclass
+class QueryData:
+    """Resultado del Módulo 1: los tres DataFrames-query ya tipados."""
+    valorizacion: pd.DataFrame
+    caja: pd.DataFrame
+    tipo_cambio: pd.DataFrame
+
+    def summary(self) -> str:
+        return (
+            f"QueryData(valorizacion={self.valorizacion.shape}, "
+            f"caja={self.caja.shape}, tipo_cambio={self.tipo_cambio.shape})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Lector principal
+# ---------------------------------------------------------------------------
+class QueryReader:
+    """Lee pasivamente (openpyxl) las tres hojas-query del workbook refrescado."""
+
+    def __init__(self, config, header_row: int = HEADER_ROW_DEFAULT,
+                 verbose: bool = True):
+        self.config = config
+        self.header_row = header_row
+        self.verbose = verbose
+        self.workbook_path = getattr(config, "path_workbook", None)
+
+    # ---- API pública -------------------------------------------------------
+    def read_all(self) -> QueryData:
+        """Lee las tres hojas y devuelve el bundle QueryData."""
+        val = self.read_sheet(SHEET_VALORIZACION, VALORIZACION_SCHEMA,
+                              KEY_COL["valorizacion"], keep_unmapped=True)
+        caja = self.read_sheet(SHEET_CAJA, CAJA_SCHEMA,
+                               KEY_COL["caja"], keep_unmapped=False)
+        tc = self.read_sheet(SHEET_TIPO_CAMBIO, TIPO_CAMBIO_SCHEMA,
+                             KEY_COL["tipo_cambio"], keep_unmapped=False)
+        data = QueryData(valorizacion=val, caja=caja, tipo_cambio=tc)
+        if self.verbose:
+            print(f"  [Módulo 1] {data.summary()}")
+        return data
+
+    def read_valorizacion(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_VALORIZACION, VALORIZACION_SCHEMA,
+                               KEY_COL["valorizacion"], keep_unmapped=True)
+
+    def read_calculo_caja(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_CAJA, CAJA_SCHEMA,
+                               KEY_COL["caja"], keep_unmapped=False)
+
+    def read_tipo_cambio(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_TIPO_CAMBIO, TIPO_CAMBIO_SCHEMA,
+                               KEY_COL["tipo_cambio"], keep_unmapped=False)
+
+    # ---- Motor de lectura --------------------------------------------------
+    def read_sheet(
+        self,
+        sheet_name: str,
+        schema: Dict[str, List[str]],
+        key_col: str,
+        keep_unmapped: bool,
+    ) -> pd.DataFrame:
+        """Lee una hoja-query y devuelve un DataFrame tipado con nombres canónicos."""
+        self._guard_workbook()
+
+        import openpyxl  # import perezoso
+
+        wb = openpyxl.load_workbook(self.workbook_path, read_only=True, data_only=True)
+        try:
+            real_sheet = self._resolve_sheet_name(wb.sheetnames, sheet_name)
+            if real_sheet is None:
+                wb.close()
+                raise ValueError(
+                    f"El workbook no contiene la hoja '{sheet_name}'. "
+                    f"Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[real_sheet]
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+        if len(rows) < self.header_row:
+            raise ValueError(
+                f"Hoja '{sheet_name}': tiene {len(rows)} filas, menos que la fila "
+                f"de headers ({self.header_row}). ¿Se refrescó el query?"
+            )
+
+        header = list(rows[self.header_row - 1])
+        data_rows = rows[self.header_row:]
+
+        mapping, no_resueltos = _resolve_headers(header, schema)
+        if self.verbose and no_resueltos:
+            print(f"  [AVISO] Hoja '{sheet_name}': headers no encontrados -> "
+                  f"{no_resueltos}. Revisa si cambiaron de nombre.")
+
+        # Determinar columnas a conservar.
+        if keep_unmapped:
+            col_names, col_idx = [], []
+            for i, h in enumerate(header):
+                if i in mapping:
+                    col_names.append(mapping[i]); col_idx.append(i)
+                elif _normalize(h):  # columna con header pero no en schema
+                    col_names.append(str(h).strip()); col_idx.append(i)
+        else:
+            col_idx = sorted(mapping.keys())
+            col_names = [mapping[i] for i in col_idx]
+
+        # Construir registros.
+        records = [[row[i] if i < len(row) else None for i in col_idx]
+                   for row in data_rows]
+        df = pd.DataFrame(records, columns=col_names)
+
+        # Descartar filas basura por columna clave (o filas totalmente vacías).
+        if key_col in df.columns:
+            df = df[df[key_col].map(lambda v: _to_string(v) not in (None, ""))]
+        else:
+            df = df.dropna(how="all")
+        df = df.reset_index(drop=True)
+
+        df = _coerce_types(df)
+
+        if self.verbose:
+            print(f"  [Módulo 1] '{sheet_name}' -> {df.shape[0]} filas x "
+                  f"{df.shape[1]} cols (mapeadas: {len(mapping)}).")
+        return df
+
+    # ---- Blindaje / helpers ------------------------------------------------
+    def _guard_workbook(self) -> None:
+        if not self.workbook_path:
+            raise ValueError(
+                "Config no define path_workbook. Construye la Config con "
+                "Config.from_semestre(...) antes de leer."
+            )
+        if not os.path.exists(self.workbook_path):
+            raise FileNotFoundError(
+                "No encuentro el workbook del query. Recuerda el CAMINO 3:\n"
+                "  1) Abre el .xlsm, 2) fija B1=yyyymmdd, 3) RefreshAll, "
+                "4) guarda y cierra.\n"
+                f"  Ruta esperada: {self.workbook_path}"
+            )
+
+    @staticmethod
+    def _resolve_sheet_name(available: List[str], wanted: str) -> Optional[str]:
+        """Match de hoja tolerante a acentos/espacios."""
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Ejecución directa: demo de lectura para el semestre elegido.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    from config import Config
+
+    SEMESTRE = "202606"
+    cfg = Config.from_semestre(SEMESTRE)
+    cfg.print_refresh_reminder()
+
+    faltantes = cfg.check_paths(verbose=True)
+    if "path_workbook" in faltantes:
+        print("\n>>> Falta el workbook. Deposítalo y vuelve a correr.")
+    else:
+        cfg.validate_workbook_b1(verbose=True)
+        reader = QueryReader(cfg, verbose=True)
+        data = reader.read_all()
+        print("\n", data.summary())
+        print("\nValorización (primeras filas de columnas clave):")
+        cols_muestra = [c for c in
+                        ["PORTAFOLIO", "CODIGO_SBS", "CODIGO_ISIN",
+                         "VALOR_VECTOR_LOCAL", "GRUPO_ECONOMICO"]
+                        if c in data.valorizacion.columns]
+        print(data.valorizacion[cols_muestra].head(10).to_string())
