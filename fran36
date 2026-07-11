@@ -1,0 +1,272 @@
+Gracias, ahora tengo el archivo de proxies. Déjame analizar su estructura para entender cómo se agrega a BD(MSCI).Ahora entiendo la estructura exacta. Confirmo tu explicación:
+
+- **Alts**: bloque tipo BD en **V:AR** (V=Nombre, W=Client_ID, ... AN=CO2/Debt(Intensidad), ... AR=Plus_1) → 23 columnas = misma estructura que BD(MSCI) B:X.
+- **TD**: idéntico, bloque en **V:AR**.
+- **BU**: bloque en **U:AQ** (una columna menos, empieza en U=Nombre).
+
+Estas filas se **agregan** a BD(MSCI) (como pegar V:AR de Alts en B:V de BD(MSCI)), y luego Python calcula A/W/X. Verifiquemos que las columnas coinciden con la estructura de BD(MSCI).Las 21 columnas coinciden exactamente en las tres hojas (Alts/TD desde V, BU desde U). Y hay 149 filas de proxies para agregar (50+10+89). Tengo todo lo necesario.
+
+Ahora te doy los ajustes. Son varios porque tu código quedó a medias (faltaron los ajustes 1-4 del mensaje anterior) y además hay dos cambios nuevos que pediste. Voy a ordenarlos por prioridad.
+
+## AJUSTE A — El que arregla el dashboard vacío (Parametria directa)
+
+Este es el crítico. **Paso A1:** agrega el método al Módulo 5 (dentro de `class ParametriaBuilder`):
+
+```python
+    @staticmethod
+    def leer_parametria_directa(config, verbose: bool = True) -> Dict[str, dict]:
+        """Lee Parametria (input MANUAL) directo del workbook por SBS.
+        {SBS -> {NOMBRE(H), CODIGO(G), RIESGOS(F), RANKEST(J)}}. Datos fila 9+."""
+        path = getattr(config, "path_workbook", None)
+        out: Dict[str, dict] = {}
+        if not path or not os.path.exists(path):
+            if verbose:
+                print("  [Módulo 5] [AVISO] Sin workbook; Parametria directa vacía.")
+            return out
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            if "Parametria" not in wb.sheetnames:
+                return out
+            ws = wb["Parametria"]
+            for row in ws.iter_rows(min_row=9, values_only=True):
+                sbs = _to_string(row[2]) if len(row) > 2 else None   # C
+                if not sbs:
+                    continue
+                out.setdefault(sbs, {
+                    "RIESGOS": _to_string(row[5]) if len(row) > 5 else None,   # F
+                    "CODIGO":  _to_string(row[6]) if len(row) > 6 else None,   # G
+                    "NOMBRE":  row[7] if len(row) > 7 else None,               # H
+                    "RANKEST": _to_string(row[9]) if len(row) > 9 else None,   # J
+                })
+        finally:
+            wb.close()
+        if verbose:
+            print(f"  [Módulo 5] Parametria directa (manual): {len(out)} SBS.")
+        return out
+```
+
+**Paso A2:** en el orquestador, líneas 2167-2170, reemplaza:
+```python
+    gyp = GyPDetalladoLoader(cfg).build()
+    sbs_val = data.valorizacion["CODIGO_SBS"].dropna().unique().tolist()
+    param = ParametriaBuilder(gyp.as_lookup(), sbs_list=sbs_val).build()
+    sector_lookup = ParametriaBuilder.leer_sector_buckets(cfg)
+```
+por:
+```python
+    parametria_lookup = ParametriaBuilder.leer_parametria_directa(cfg)
+    sector_lookup = ParametriaBuilder.leer_sector_buckets(cfg)
+```
+
+**Paso A3:** en la llamada a `ValorizacionBuilder`, línea 2190, reemplaza:
+```python
+        parametria_lookup=param.as_lookup(),
+```
+por:
+```python
+        parametria_lookup=parametria_lookup,
+```
+
+## AJUSTE B — Eliminar del todo las columnas `__xlsx`
+
+**Paso B1:** en el Módulo 10, elimina la llamada a `_preserve_xlsx`. En la línea 1537 borra:
+```python
+        self._preserve_xlsx(df)
+```
+
+**Paso B2:** borra también el método `_preserve_xlsx` completo (líneas ~1688-1692):
+```python
+    @staticmethod
+    def _preserve_xlsx(df):
+        for name in V_FORMULATED_COLS:
+            if name in df.columns:
+                df.rename(columns={name: f"{name}__xlsx"}, inplace=True)
+```
+
+**Paso B3:** como ahora las columnas formuladas del Excel y las de Python tendrían el mismo nombre (colisión), hay que **descartar las formuladas del Excel al leer**. En el Módulo 10, al inicio de `build()`, justo después de `df = self.df.copy()` (o donde tomas el df), agrega:
+
+```python
+        # Descartar columnas formuladas que vengan del Excel (las recalcula Python)
+        _drop = [c for c in V_FORMULATED_COLS if c in df.columns]
+        # OJO: 'Nombre' se recalcula, pero si prefieres conservar el del query, quítalo de _drop
+        df = df.drop(columns=_drop, errors="ignore")
+```
+
+Déjame verificar el orden exacto de tu `build()` para que el drop no rompa nada antes de darte el ajuste C.Perfecto, ahora veo el flujo exacto. Reemplaza la línea 1537 (`self._preserve_xlsx(df)`) por el drop. Concretamente:
+
+**Paso B (unificado):** en la línea 1537, reemplaza:
+```python
+        self._preserve_xlsx(df)
+```
+por:
+```python
+        # Descartar columnas formuladas que vengan materializadas del Excel:
+        # Python las recalcula. (Antes se preservaban como __xlsx; ya no.)
+        df = df.drop(columns=[c for c in V_FORMULATED_COLS if c in df.columns],
+                     errors="ignore")
+```
+Y borra el método `_preserve_xlsx` (líneas ~1688-1692). Con esto no habrá más columnas `__xlsx` ni el problema de reparación de Excel.
+
+## AJUSTE C — BD(MSCI) también se alimenta de Nueva Lista Proxies (Alts/BU/TD)
+
+Este es el cambio estructural nuevo. Las filas de proxies se **agregan** a BD(MSCI). Te doy un método nuevo para el Módulo 6 y su uso.
+
+**Paso C1:** en el Módulo 6, agrega estas constantes antes de `class BDMSCIBuilder`:
+
+```python
+# Proxies -> filas que se AGREGAN a BD(MSCI). Bloque tipo BD, headers fila 3.
+# Alts/TD empiezan en col V; BU empieza en col U. Match por header (robusto).
+PROXY_BD_SHEETS = {"Alts": "V", "TD": "V", "BU": "U"}
+```
+
+**Paso C2:** agrega este método dentro de `class BDMSCIBuilder`:
+
+```python
+    def append_proxies(self, proxies_path: str, verbose: bool = True) -> "BDMSCIBuilder":
+        """Agrega a BD(MSCI) las filas de proxies (hojas Alts/BU/TD, bloque V:AR/U:AQ).
+        Reproduce el pegado manual de esas columnas en B:V de BD(MSCI), luego
+        recalcula A/W/X. Debe llamarse DESPUÉS de build()."""
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de append_proxies().")
+        if not proxies_path or not os.path.exists(proxies_path):
+            if verbose:
+                print(f"  [Módulo 6] [AVISO] Proxies no encontrado; BD sin proxies.")
+            return self
+        import openpyxl
+        wb = openpyxl.load_workbook(proxies_path, read_only=True, data_only=True)
+        nuevas = []
+        try:
+            for sheet, _start in PROXY_BD_SHEETS.items():
+                real = self._resolve_sheet_generic(wb.sheetnames, sheet)
+                if real is None:
+                    continue
+                ws = wb[real]
+                rows = list(ws.iter_rows(min_row=3, values_only=True))
+                if not rows:
+                    continue
+                header = list(rows[0])
+                # Resolver las 21 columnas fuente por NOMBRE (robusto a posición)
+                mapping, _ = _resolve_headers(header, {c: [c] for c in BASE_MSCI_SOURCE_COLS})
+                idx = {canon: i for i, canon in mapping.items()}
+                if "Client_ID" not in idx:
+                    if verbose:
+                        print(f"  [Módulo 6] [AVISO] Hoja proxies '{sheet}' sin Client_ID; omito.")
+                    continue
+                for row in rows[1:]:
+                    cid = _to_string(row[idx["Client_ID"]]) if idx["Client_ID"] < len(row) else None
+                    if cid in (None, ""):
+                        continue
+                    reg = {}
+                    for name in BASE_MSCI_SOURCE_COLS:
+                        i = idx.get(name)
+                        reg[name] = row[i] if (i is not None and i < len(row)) else None
+                    cat = reg.get("CAT")
+                    reg[BD_COL_A] = self._deriv_a(reg.get("client1"))
+                    reg[BD_COL_PLUS] = self._plus(cat)
+                    reg[BD_COL_PLUS_1] = self._plus1(cat, reg[BD_COL_PLUS])
+                    nuevas.append(reg)
+        finally:
+            wb.close()
+        if nuevas:
+            df_new = pd.DataFrame(nuevas, columns=BD_MSCI_COLS)
+            for col in df_new.columns:
+                if col in BD_STRING_COLS:
+                    df_new[col] = df_new[col].map(_to_string)
+                elif col in BD_NUMERIC_COLS:
+                    df_new[col] = df_new[col].map(_to_number)
+            # Agregar; si un Client_ID ya existe en BD, el de proxies MANDA (keep last)
+            self.df = pd.concat([self.df, df_new], ignore_index=True)
+            self.df = self.df.drop_duplicates(BD_COL_CLIENT_ID, keep="last").reset_index(drop=True)
+        if verbose:
+            print(f"  [Módulo 6] Proxies agregados a BD(MSCI): +{len(nuevas)} filas "
+                  f"-> total {len(self.df)}.")
+        return self
+
+    @staticmethod
+    def _resolve_sheet_generic(available, wanted):
+        if wanted in available:
+            return wanted
+        t = _normalize(wanted)
+        for n in available:
+            if _normalize(n) == t:
+                return n
+        return None
+```
+
+**Paso C3:** en el orquestador, cambia la construcción de BD (línea 2173):
+```python
+    bd    = BDMSCIBuilder(cfg).build()
+```
+por:
+```python
+    bd    = BDMSCIBuilder(cfg).build()
+    bd.append_proxies(cfg.path_proxies)      # agrega filas de Alts/BU/TD a BD(MSCI)
+```
+
+Antes de darte los ajustes D (semestre en headers) y el resto, déjame **verificar que C funciona** end-to-end, porque es el cambio más delicado.La lógica funciona: resuelve las 21 columnas en las tres hojas y agrega 149 filas de proxies a BD(MSCI). El Ajuste C es correcto.
+
+Ahora los ajustes finales.
+
+## AJUSTE D — Semestre en headers (lo que pediste)
+
+**Paso D1:** en el Módulo 0 (`class Config`), agrega estas dos propiedades:
+
+```python
+    @property
+    def etiqueta_sem(self) -> str:
+        s = "S1" if self.mm == "06" else "S2"
+        return f"{s}-{self.anio}"
+
+    @property
+    def etiqueta_sem_t1(self) -> str:
+        y = self.semestre_t1[:4]; mm = self.semestre_t1[4:]
+        s = "S1" if mm == "06" else "S2"
+        return f"{s}-{y}"
+```
+
+**Paso D2:** en el orquestador, después de `val = vb.df`, agrega:
+
+```python
+    val = vb.df
+    _sem = cfg.etiqueta_sem
+    _semT1 = cfg.etiqueta_sem_t1
+    val = val.rename(columns={
+        "Huella":     f"Huella {_sem}",
+        "CO2-H":      f"CO2-H {_sem}",
+        "Intensidad": f"Intensidad {_sem}",
+        "CO2 T-1":    f"CO2-H {_semT1}",
+    })
+```
+
+**Importante:** como el Módulo 11 y 12 usan los nombres `"Huella"`, `"CO2-H"`, `"Intensidad"` internamente, este renombrado debe hacerse **DESPUÉS** de construir `final` y `pres`, no antes. Es decir, el renombrado va justo **antes del export (Módulo 13)**, no después de `val = vb.df`. Muévelo así:
+
+```python
+    # ... construyes final y pres con los nombres normales ...
+    final = FinalPivots(val).build()
+    pres = PresentacionBuilder(val, sector_lookup=sector_lookup)
+    pres_bundle = pres.build_all()
+
+    # AHORA sí renombra para el export (solo cosmético, para el Excel/dashboard)
+    _sem, _semT1 = cfg.etiqueta_sem, cfg.etiqueta_sem_t1
+    val = val.rename(columns={
+        "Huella": f"Huella {_sem}", "CO2-H": f"CO2-H {_sem}",
+        "Intensidad": f"Intensidad {_sem}", "CO2 T-1": f"CO2-H {_semT1}",
+    })
+
+    exporter = ExcelExporter(cfg, out_dir=OUT_DIR)
+    # ...
+```
+
+## Resumen de los 4 ajustes a aplicar
+
+Para que no te pierdas, este es el orden:
+
+1. **AJUSTE A** (crítico, arregla dashboard): método `leer_parametria_directa` en M5 + cambiar orquestador para usarlo. Sin esto Estrategia queda vacía y el dashboard vacío.
+2. **AJUSTE B**: quitar `_preserve_xlsx`, reemplazar por drop de columnas formuladas. Elimina las `__xlsx` y la reparación de Excel.
+3. **AJUSTE C**: método `append_proxies` en M6 + llamarlo en el orquestador. BD(MSCI) incorpora las 149 filas de proxies.
+4. **AJUSTE D**: propiedades de semestre en M0 + renombrado antes del export.
+
+El que **desbloquea el dashboard** es el **A**. Los otros tres son mejoras que ya validamos.
+
+Aplica al menos el A y corre — deberías ver el dashboard con datos. Luego aplica B, C, D. Si tras el A el dashboard sigue vacío, mándame el output de la consola (los prints del Módulo 12 `por_sector`) y lo diagnostico al toque.
