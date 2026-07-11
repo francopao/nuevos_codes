@@ -1,0 +1,267 @@
+###############################################################################
+#                                                                             #
+#   MÓDULO 10 — VALORIZACIÓN BUILDER (columnas formuladas G, AA:AS)           #
+#   Corazón del pipeline. Construye en ORDEN DE DEPENDENCIA sobre el query      #
+#   base (Módulo 1), integrando Caja(2), TC(3), Parametria(5), BD(MSCI)         #
+#   post-proxies(6+9), herencia(9), BD MSCI T-1(7) y Perdieron Huella(8).       #
+#                                                                             #
+#   Mapa de fórmulas (spec):                                                   #
+#     G  Nombre       = INDEX(Parametria!H, MATCH(SBS))         [Parametria.NOMBRE]
+#     AA Column1      = MID(SBS,7,1)                                            #
+#     AB Patrimonio   = INDEX(Caja!F, MATCH(PORTAFOLIO))        [Caja]          #
+#     AC Weight       = VALOR_VECTOR_LOCAL / Patrimonio                         #
+#     AD Inv MM$      = (VALOR_VECTOR_LOCAL / usd_rate) / 1e6   [TC "2"=USD]    #
+#     AE..AH F0..F3   = IF(PORTAFOLIO="IN-FONDO{n}", Inv MM$, 0)                #
+#     AI M (MM$)      = SUMIF por SBS de (F1+F2+F3)  [EXCLUYE F0]               #
+#     AJ CO2-H        = intensidad por ISIN->SBS (BD post-proxies) + Perdieron  #
+#                       + herencia por GRUPO_ECONOMICO                          #
+#     AK Huella       = CO2-H * Inv MM$                                         #
+#     AL Intensidad   = CO2-H * Weight                                         #
+#     AM Categoria    = Parametria.CODIGO (G) por SBS                          #
+#     AN Estrategia   = Parametria.RIESGOS (F) por SBS                         #
+#     AO Rank_rt      = Parametria.RANKEST (J) por SBS                         #
+#     AP Intensidad-M = Huella / AU4    (AU4 = SUM(Huella))                     #
+#     AQ Plus         = BD.W por ISIN->SBS ; else IF(Rank_rt="Cash","Cash",     #
+#                       "Cuestionario Integra")                                #
+#     AR Plus_1       = BD.X por ISIN->SBS ; else (mismo fallback que AQ)       #
+#     AS CO2 T-1      = intensidad T-1 por ISIN->SBS                            #
+#                                                                             #
+###############################################################################
+
+# Nombres de salida (headers destino en el objeto Valorización).
+V_G  = "Nombre"
+V_AA = "Column1"
+V_AB = "Patrimonio"
+V_AC = "Weight"
+V_AD = "Inv MM$"
+V_AE, V_AF, V_AG, V_AH = "F0", "F1", "F2", "F3"
+V_AI = "M (MM$)"
+V_AJ = "CO2-H"
+V_AK = "Huella"
+V_AL = "Intensidad"
+V_AM = "Categoria"
+V_AN = "Estrategia"
+V_AO = "Rank_rt"
+V_AP = "Intensidad-M"
+V_AQ = "Plus"
+V_AR = "Plus_1"
+V_AS = "CO2 T-1"
+
+V_FORMULATED_COLS = [V_G, V_AA, V_AB, V_AC, V_AD, V_AE, V_AF, V_AG, V_AH, V_AI,
+                     V_AJ, V_AK, V_AL, V_AM, V_AN, V_AO, V_AP, V_AQ, V_AR, V_AS]
+
+# Portafolios por fondo (para F0..F3). Comparación case-insensitive.
+FONDOS = {V_AE: "IN-FONDO0", V_AF: "IN-FONDO1", V_AG: "IN-FONDO2", V_AH: "IN-FONDO3"}
+
+
+class ValorizacionBuilder:
+    """Construye las columnas formuladas de 'Valorización de Instrumentos'.
+
+    Inputs (todos ya materializados por sus módulos):
+      df_val            : query base (Módulo 1, con keep_unmapped).
+      caja_map          : PORTAFOLIO -> PATRIMONIO      (Módulo 2 .as_map()).
+      usd_rate          : tasa USD (float o None)       (Módulo 3 .usd_rate()).
+      parametria_lookup : SBS -> {CODIGO,NOMBRE,RIESGOS,RANKEST}  (Módulo 5).
+      intensidad_post   : Client_ID -> intensidad (BD post-proxies) (6+9).
+      plus_lookup       : Client_ID -> {Plus,Plus_1}   (Módulo 6 .as_plus_lookup()).
+      intensidad_t1     : Client_ID -> intensidad T-1  (Módulo 7).
+      proxy_engine      : instancia con apply_inheritance() (Módulo 9).
+      perdieron_lookup  : Client_ID -> intensidad (Módulo 8) | None.
+      perdieron_mode    : "fill" (solo rellena nulos) | "override" (fuerza).
+    """
+
+    def __init__(self, df_val: pd.DataFrame, *,
+                 caja_map: Dict[str, float],
+                 usd_rate: Optional[float],
+                 parametria_lookup: Dict[str, dict],
+                 intensidad_post: Dict[str, float],
+                 plus_lookup: Dict[str, dict],
+                 intensidad_t1: Dict[str, float],
+                 proxy_engine=None,
+                 perdieron_lookup: Optional[Dict[str, float]] = None,
+                 perdieron_mode: str = "fill",
+                 isin_col: str = "CODIGO_ISIN",
+                 sbs_col: str = "CODIGO_SBS",
+                 portafolio_col: str = "PORTAFOLIO",
+                 vvl_col: str = "VALOR_VECTOR_LOCAL",
+                 grupo_col: str = "GRUPO_ECONOMICO",
+                 verbose: bool = True):
+        self.df = df_val.copy()
+        self.caja_map = caja_map
+        self.usd_rate = usd_rate
+        self.parametria = parametria_lookup
+        self.intensidad_post = intensidad_post
+        self.plus_lookup = plus_lookup
+        self.intensidad_t1 = intensidad_t1
+        self.proxy_engine = proxy_engine
+        self.perdieron_lookup = perdieron_lookup or {}
+        self.perdieron_mode = perdieron_mode
+        self.isin_col = isin_col
+        self.sbs_col = sbs_col
+        self.portafolio_col = portafolio_col
+        self.vvl_col = vvl_col
+        self.grupo_col = grupo_col
+        self.verbose = verbose
+        self.au4_total_huella: Optional[float] = None
+        self.inherited_history: Optional[pd.DataFrame] = None
+
+    # ======================================================================
+    def build(self) -> pd.DataFrame:
+        df = self.df
+        self._require_cols([self.isin_col, self.sbs_col, self.portafolio_col,
+                            self.vvl_col])
+        self._preserve_xlsx_columns(df)
+
+        # --- G, AM, AN, AO desde Parametria (por SBS) -----------------------
+        sbs = df[self.sbs_col].map(_to_string)
+        df[V_G]  = sbs.map(lambda s: self._param(s, "NOMBRE"))
+        df[V_AM] = sbs.map(lambda s: self._param(s, "CODIGO"))
+        df[V_AN] = sbs.map(lambda s: self._param(s, "RIESGOS"))
+        df[V_AO] = sbs.map(lambda s: self._param(s, "RANKEST"))
+
+        # --- AA = MID(SBS,7,1) ----------------------------------------------
+        df[V_AA] = sbs.map(lambda s: (s[6:7] if isinstance(s, str) and len(s) >= 7 else None))
+
+        # --- AB Patrimonio, AC Weight, AD Inv MM$ ---------------------------
+        df[V_AB] = df[self.portafolio_col].map(lambda p: self.caja_map.get(_to_string(p)))
+        vvl = pd.to_numeric(df[self.vvl_col], errors="coerce")
+        df[V_AC] = self._safe_div(vvl, pd.to_numeric(df[V_AB], errors="coerce"))
+        if self.usd_rate in (None, 0):
+            if self.verbose:
+                print("  [Módulo 10] [AVISO] usd_rate ausente/0: 'Inv MM$' (AD) = NaN.")
+            df[V_AD] = pd.NA
+        else:
+            df[V_AD] = (vvl / float(self.usd_rate)) / 1_000_000.0
+
+        # --- AE..AH F0..F3 ; AI = SUMIF SBS de (F1+F2+F3) -------------------
+        port_up = df[self.portafolio_col].map(lambda p: (_to_string(p) or "").upper())
+        inv = pd.to_numeric(df[V_AD], errors="coerce")
+        for col, fondo in FONDOS.items():
+            df[col] = inv.where(port_up == fondo, other=0.0)
+        f123 = (pd.to_numeric(df[V_AF], errors="coerce").fillna(0)
+                + pd.to_numeric(df[V_AG], errors="coerce").fillna(0)
+                + pd.to_numeric(df[V_AH], errors="coerce").fillna(0))
+        df[V_AI] = f123.groupby(sbs).transform("sum")
+
+        # --- AJ CO2-H : BD post-proxies (ISIN->SBS) + Perdieron + herencia ---
+        isin = df[self.isin_col].map(_to_string)
+        aj = [self._lookup_id(self.intensidad_post, i, s) for i, s in zip(isin, sbs)]
+        df[V_AJ] = aj
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+
+        # --- AK Huella, AL Intensidad ---------------------------------------
+        aj_num = pd.to_numeric(df[V_AJ], errors="coerce")
+        df[V_AK] = aj_num * pd.to_numeric(df[V_AD], errors="coerce")
+        df[V_AL] = aj_num * pd.to_numeric(df[V_AC], errors="coerce")
+
+        # --- AP Intensidad-M = Huella / AU4 (AU4 = SUM Huella) --------------
+        self.au4_total_huella = float(pd.to_numeric(df[V_AK], errors="coerce").sum())
+        if self.au4_total_huella:
+            df[V_AP] = pd.to_numeric(df[V_AK], errors="coerce") / self.au4_total_huella
+        else:
+            df[V_AP] = pd.NA
+        if self.verbose:
+            print(f"  [Módulo 10] AU4 (SUM Huella) = {self.au4_total_huella:,.2f}")
+
+        # --- AQ Plus, AR Plus_1 (BD por ISIN->SBS; fallback por Rank_rt) ----
+        df[V_AQ] = [self._plus(i, s, df[V_AO].iat[k], "Plus")
+                    for k, (i, s) in enumerate(zip(isin, sbs))]
+        df[V_AR] = [self._plus(i, s, df[V_AO].iat[k], "Plus_1")
+                    for k, (i, s) in enumerate(zip(isin, sbs))]
+
+        # --- AS CO2 T-1 (ISIN->SBS) -----------------------------------------
+        df[V_AS] = [self._lookup_id(self.intensidad_t1, i, s)
+                    for i, s in zip(isin, sbs)]
+
+        if self.verbose:
+            print(f"  [Módulo 10] Valorización formulada -> {df.shape[0]} filas x "
+                  f"{df.shape[1]} cols ({len(V_FORMULATED_COLS)} formuladas).")
+        self.df = df
+        return df
+
+    # ======================================================================
+    # Sub-pasos AJ
+    # ======================================================================
+    def _apply_perdieron(self, df: pd.DataFrame, isin: pd.Series, sbs: pd.Series) -> None:
+        if not self.perdieron_lookup:
+            return
+        n = 0
+        aj = df[V_AJ].tolist()
+        for k, (i, s) in enumerate(zip(isin, sbs)):
+            hit = self._lookup_id(self.perdieron_lookup, i, s)
+            if hit is None:
+                continue
+            if self.perdieron_mode == "override":
+                aj[k] = hit; n += 1
+            elif aj[k] is None or (isinstance(aj[k], float) and pd.isna(aj[k])):
+                aj[k] = hit; n += 1
+        df[V_AJ] = aj
+        if self.verbose and n:
+            print(f"  [Módulo 10] Perdieron Huella ({self.perdieron_mode}): "
+                  f"{n} intensidades aplicadas.")
+
+    def _apply_inheritance(self, df: pd.DataFrame) -> None:
+        if self.proxy_engine is None or self.grupo_col not in df.columns:
+            return
+        serie, hist = self.proxy_engine.apply_inheritance(
+            df, intensidad_col=V_AJ, isin_col=self.isin_col,
+            grupo_col=self.grupo_col, nombre_col="TITULO")
+        df[V_AJ] = serie
+        self.inherited_history = hist
+
+    # ======================================================================
+    # Helpers de lookup / fórmula
+    # ======================================================================
+    def _param(self, sbs: Optional[str], field: str):
+        info = self.parametria.get(sbs) if sbs else None
+        return info.get(field) if info else None
+
+    @staticmethod
+    def _lookup_id(d: Dict[str, float], isin: Optional[str], sbs: Optional[str]):
+        """MATCH primero por ISIN contra Client_ID, fallback a SBS."""
+        if isin and isin in d:
+            return d[isin]
+        if sbs and sbs in d:
+            return d[sbs]
+        return None
+
+    def _plus(self, isin, sbs, rank_rt, which: str):
+        info = None
+        if isin and isin in self.plus_lookup:
+            info = self.plus_lookup[isin]
+        elif sbs and sbs in self.plus_lookup:
+            info = self.plus_lookup[sbs]
+        if info is not None and info.get(which) is not None:
+            return info[which]
+        # Fallback: IF(Rank_rt="Cash","Cash","Cuestionario Integra")
+        return "Cash" if (_to_string(rank_rt) == "Cash") else "Cuestionario Integra"
+
+    @staticmethod
+    def _safe_div(num: pd.Series, den: pd.Series) -> pd.Series:
+        den = den.replace({0: pd.NA})
+        return num / den
+
+    def _require_cols(self, cols: List[str]) -> None:
+        faltan = [c for c in cols if c not in self.df.columns]
+        if faltan:
+            raise ValueError(f"ValorizacionBuilder: faltan columnas base {faltan}. "
+                             f"Disponibles: {list(self.df.columns)}")
+
+    @staticmethod
+    def _preserve_xlsx_columns(df: pd.DataFrame) -> None:
+        """Si el query ya trajo columnas formuladas materializadas por Excel,
+        se renombran a '<col>__xlsx' para permitir backtesting sin colisión."""
+        for name in V_FORMULATED_COLS:
+            if name in df.columns:
+                df.rename(columns={name: f"{name}__xlsx"}, inplace=True)
+
+    # ---- accesores ---------------------------------------------------------
+    def get_au4(self) -> Optional[float]:
+        return self.au4_total_huella
+
+    def get_inherited_history(self) -> pd.DataFrame:
+        if self.inherited_history is not None:
+            return self.inherited_history
+        return pd.DataFrame(columns=["GRUPO_ECONOMICO", "ISIN_heredado", "Nombre",
+                                     "ISIN_donante", "Intensidad_heredada"])
