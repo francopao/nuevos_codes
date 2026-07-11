@@ -1,0 +1,95 @@
+Entiendo perfectamente. Dos casos distintos que hoy se ven iguales (ambos 0), pero requieren atención opuesta:
+
+- **Cero legítimo** = no tuviste exposición (Inv MM$ = 0 o casi). No te interesa, es ruido.
+- **Cero problemático** = SÍ tuviste exposición (Inv MM$ > 0) pero no matcheó en ninguna fuente. **Estos sí** quieres resolverlos (revisar por qué ese instrumento con plata invertida no tiene huella).
+
+La solución: dejar ambos en 0 (como pediste), pero **generar un reporte de diagnóstico** que liste solo los problemáticos — los que tienen exposición real pero se quedaron sin huella. Así no pierdes tiempo con los irrelevantes.
+
+## Ajuste 5 — Fallback a 0 + reporte de no-match con exposición (Módulo 10)
+
+En `ValorizacionBuilder.build()`, busca estas líneas (las del mensaje anterior):
+
+```python
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+```
+
+Y **justo debajo** reemplaza el fallback simple por esta versión que diagnostica:
+
+```python
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+
+        # Diagnóstico ANTES de forzar 0: separar "cero legítimo" de "cero problemático".
+        _co2 = pd.to_numeric(df[V_AJ], errors="coerce")
+        _inv = pd.to_numeric(df[V_AD], errors="coerce").fillna(0.0)
+        _sin_match = _co2.isna()
+        _con_exposicion = _inv.abs() > 1e-9
+        _problematicos = _sin_match & _con_exposicion          # SÍ invertido, NO matcheó
+        self.no_match_report = df.loc[_problematicos, [
+            self.sbs_col, self.isin_col, self.portafolio_col, V_AD
+        ]].copy() if _problematicos.any() else df.iloc[0:0][[
+            self.sbs_col, self.isin_col, self.portafolio_col, V_AD]].copy()
+        if "TITULO" in df.columns:
+            self.no_match_report.insert(0, "TITULO", df.loc[_problematicos, "TITULO"])
+
+        # Fallback: TODO lo sin intensidad -> 0.0 (legítimos y problemáticos por igual)
+        df[V_AJ] = _co2.fillna(0.0)
+
+        if self.verbose:
+            n_prob = len(self.no_match_report)
+            n_leg = int((_sin_match & ~_con_exposicion).sum())
+            print(f"  [Módulo 10] CO2-H sin match -> 0. "
+                  f"Legítimos (sin exposición): {n_leg}. "
+                  f"PROBLEMÁTICOS (con exposición, revisar): {n_prob}.")
+            if n_prob:
+                print(f"  [Módulo 10] [ATENCIÓN] {n_prob} instrumentos con inversión "
+                      f"pero sin huella. Ver reporte 'NoMatch_conExposicion'.")
+```
+
+Y en el `__init__` de `ValorizacionBuilder`, agrega esta línea junto a los otros atributos (ej. cerca de `self.au4_total_huella = None`):
+
+```python
+        self.no_match_report = None
+```
+
+## Ajuste 6 — Exportar el reporte de diagnóstico (orquestador + Módulo 13)
+
+En el orquestador, en la llamada a `exporter.export_all(...)`, agrega un argumento:
+
+```python
+    rutas = exporter.export_all(
+        valorizacion=val,
+        final_bundle=final.as_dict(),
+        presentacion_bundle=pres_bundle,
+        bd_msci=bd.df,
+        inherited_history=vb.get_inherited_history(),
+        perdieron_huella=perd.df,
+        no_match=vb.no_match_report,          # NUEVO
+    )
+```
+
+Y en el Módulo 13, en la firma de `export_all`, agrega el parámetro y su escritura. Cambia la firma:
+
+```python
+    def export_all(self, *, valorizacion=None, final_bundle=None,
+                   presentacion_bundle=None, bd_msci=None, inherited_history=None,
+                   perdieron_huella=None, no_match=None) -> List[str]:
+```
+
+Y antes del `if self.verbose:` final del método, agrega:
+
+```python
+        if no_match is not None:
+            self._write_single(no_match, "NoMatch_conExposicion", "NoMatch", True)
+```
+
+## Resumen de lo que lograrás
+
+Con los 6 ajustes:
+1. **Estrategia y Rank_rt** se llenan (leídos directo de Parametria) → el dashboard tendrá datos.
+2. **Sin reparación de Excel** (quitadas las `__xlsx`).
+3. **Headers claros** con semestre (`Huella S1-2026`, `CO2-H S2-2025`).
+4. **Ceros bien entendidos**: los no-match quedan en 0, pero tienes un Excel `NoMatch_conExposicion_202606.xlsx` con solo los instrumentos que valen la pena investigar.
+
+Aplica los ajustes y corre. El dashboard debería llenarse porque el filtro de Estrategia (TD+BU+Alts) ya encontrará valores. Si algo más sale raro, mándame el nuevo output y lo afinamos.
