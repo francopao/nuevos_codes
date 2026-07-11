@@ -1,0 +1,763 @@
+# -*- coding: utf-8 -*-
+r"""
+huella_pipeline.py — Pipeline Huella de Carbono ESG (AFP Integra)
+=================================================================
+TODO EN UN SOLO SCRIPT. Cada etapa es un bloque separado por banners "####".
+No hay imports cruzados entre archivos: todas las clases viven aquí.
+
+Fuente de verdad estructural: SPEC_workbook.md (proyecto).
+Decisiones cerradas:
+  R2  -> refresco MANUAL + lectura PASIVA (openpyxl). Sin COM/xlwings.
+  R1  -> Proxies y G&P comparten el MISMO MMYYYY del semestre (062026).
+  R11 -> hojas de Base MSCI = yyyymm literal (202606 / 202512). Match exacto.
+  T-1 -> semestre anterior alternando 06<->12.
+
+Bloques incluidos hasta ahora:
+  [MÓDULO 0] Config        -> deriva rutas Z:\ + fechas, blindaje, validación B1.
+  [MÓDULO 1] QueryReader   -> lectura pasiva de Valorización/Cálculo Caja/Tipo de Cambio.
+  (los módulos 2..14 se irán agregando como bloques debajo)
+"""
+
+from __future__ import annotations
+
+import os
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import PureWindowsPath as Path
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 0 — CONFIG                                                          #
+#   Deriva SEMESTRE -> rutas Z:\ + fechas embebidas. Blindaje + validación B1. #
+#                                                                             #
+###############################################################################
+
+# ---------------------------------------------------------------------------
+# Raíces reales en el drive de red (verificadas con el usuario).
+#   MSCI_MANAGER_ROOT  = carpeta madre "9. ESG Manager - MSCI"
+#   DATASET_ROOT       = inputs de datos (Base MSCI, G&P, Market Cap)
+#   REPORTES_ROOT      = insumos de reporte (workbook, proxies)
+# Ambas raíces son sobrescribibles en from_semestre().
+# ---------------------------------------------------------------------------
+MSCI_MANAGER_ROOT = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+)
+DATASET_ROOT_DEFAULT = MSCI_MANAGER_ROOT + r"\1.Data Histórica\Dataset"
+REPORTES_ROOT_DEFAULT = MSCI_MANAGER_ROOT + r"\2. Reportes\Medición Huella de Carbono"
+
+# Subcarpetas dentro de DATASET_ROOT (inputs de datos).
+SUBDIR_MSCI = "MSCI"                 # Base MSCI (Sob+ETF+BU).xlsx
+SUBDIR_GYP = "G&P input"             # G&P_MLab_MMYYYY.xlsm
+SUBDIR_COMPARABLES = "Comparables"   # Market Cap.xlsx
+
+# Subcarpeta dentro de REPORTES_ROOT (Proxies). El workbook va en la raíz.
+SUBDIR_PROXIES = "Huella Total  (SURA e Integra)"  # Nueva Lista Proxies (corte MMYYYY).xlsx
+
+# Nombres de archivo (con placeholders de fecha donde aplique).
+FNAME_BASE_MSCI = "Base MSCI (Sob+ETF+BU).xlsx"
+FNAME_MARKET_CAP = "Market Cap.xlsx"
+FNAME_GYP = "G&P_MLab_{mmyyyy}.xlsm"
+FNAME_PROXIES = "Nueva Lista Proxies (corte {mmyyyy}).xlsx"
+FNAME_WORKBOOK = "Reporte de la Huella(Región) con Proxies - {semestre}.xlsm"
+
+# Hoja del workbook donde vive el parámetro B1 (query Valorización).
+WORKBOOK_QUERY_SHEET = "Valorización de Instrumentos"
+WORKBOOK_B1_CELL = "B1"
+
+
+@dataclass(frozen=True)
+class Config:
+    """Configuración inmutable del pipeline para un semestre dado.
+
+    Construir SIEMPRE con Config.from_semestre(); no instanciar a mano.
+    Al ser frozen, dos corridas con el mismo SEMESTRE producen la misma
+    configuración -> reproducibilidad para backtesting.
+    """
+
+    # --- Identidad temporal -------------------------------------------------
+    semestre: str          # "yyyymm" del semestre en revisión (p.ej. "202606")
+    anio: int              # 2026
+    mm: str                # "06" | "12"
+    b1_yyyymmdd: str       # parámetro esperado en workbook!B1 (p.ej. "20260630")
+    mmyyyy: str            # MMYYYY compartido por Proxies y G&P (p.ej. "062026")
+    semestre_t1: str       # semestre anterior "yyyymm" (p.ej. "202512")
+
+    # --- Hojas de Base MSCI (match exacto, R11) -----------------------------
+    base_msci_sheet: str       # = semestre     (p.ej. "202606")
+    base_msci_sheet_t1: str    # = semestre_t1  (p.ej. "202512")
+
+    # --- Rutas absolutas de cada input --------------------------------------
+    dataset_root: str
+    reportes_root: str         # raíz de "2. Reportes\Medición Huella de Carbono"
+    path_base_msci: str        # Base MSCI (Sob+ETF+BU).xlsx
+    path_gyp: str              # G&P_MLab_MMYYYY.xlsm
+    path_market_cap: str       # Market Cap.xlsx
+    path_proxies: str          # Nueva Lista Proxies (corte MMYYYY).xlsx
+    path_workbook: str         # Reporte de la Huella ... .xlsm (query base)
+
+    # Etiquetas humanas por input, para mensajes de blindaje.
+    _labels: Dict[str, str] = field(default_factory=dict, compare=False, repr=False)
+
+    # =========================================================================
+    # Fábrica principal
+    # =========================================================================
+    @classmethod
+    def from_semestre(
+        cls,
+        semestre: str,
+        dataset_root: str = DATASET_ROOT_DEFAULT,
+        reportes_root: str = REPORTES_ROOT_DEFAULT,
+        *,
+        path_workbook: Optional[str] = None,
+        path_proxies: Optional[str] = None,
+    ) -> "Config":
+        r"""Deriva toda la configuración a partir de SEMESTRE='yyyymm'.
+
+        Parámetros
+        ----------
+        semestre : str
+            Cierre del semestre en formato 'yyyymm'. Solo mm en {'06','12'}.
+        dataset_root : str
+            Raíz Z:\...\1.Data Histórica\Dataset (Base MSCI, G&P, Market Cap).
+        reportes_root : str
+            Raíz Z:\...\2. Reportes\Medición Huella de Carbono (workbook, proxies).
+        path_workbook, path_proxies : str, opcional
+            Overrides explícitos de esas rutas (ganan sobre las raíces).
+        """
+        semestre = str(semestre).strip()
+
+        # ---- Validación de formato -----------------------------------------
+        if len(semestre) != 6 or not semestre.isdigit():
+            raise ValueError(
+                f"SEMESTRE inválido: {semestre!r}. Debe ser 'yyyymm' (6 dígitos), "
+                f"p.ej. '202606'."
+            )
+        anio = int(semestre[:4])
+        mm = semestre[4:]
+        if mm not in ("06", "12"):
+            raise ValueError(
+                f"SEMESTRE inválido: {semestre!r}. El proceso es SEMESTRAL: "
+                f"mm debe ser '06' (S1) o '12' (S2), no {mm!r}."
+            )
+        if not (2000 <= anio <= 2099):
+            raise ValueError(f"Año fuera de rango razonable: {anio}.")
+
+        # ---- Fechas derivadas ----------------------------------------------
+        # B1 = último día del mes de cierre del semestre.
+        b1_yyyymmdd = f"{anio}0630" if mm == "06" else f"{anio}1231"
+
+        # MMYYYY compartido por Proxies y G&P (R1).
+        mmyyyy = f"{mm}{anio}"
+
+        # T-1: semestre anterior alternando 06<->12.
+        if mm == "06":
+            semestre_t1 = f"{anio - 1}12"
+        else:  # mm == "12"
+            semestre_t1 = f"{anio}06"
+
+        # ---- Rutas ----------------------------------------------------------
+        root = Path(dataset_root)          # inputs de datos
+        rep = Path(reportes_root)          # workbook + proxies
+
+        p_base_msci = str(root / SUBDIR_MSCI / FNAME_BASE_MSCI)
+        p_gyp = str(root / SUBDIR_GYP / FNAME_GYP.format(mmyyyy=mmyyyy))
+        p_market_cap = str(root / SUBDIR_COMPARABLES / FNAME_MARKET_CAP)
+
+        p_proxies = (
+            path_proxies
+            if path_proxies is not None
+            else str(rep / SUBDIR_PROXIES / FNAME_PROXIES.format(mmyyyy=mmyyyy))
+        )
+        p_workbook = (
+            path_workbook
+            if path_workbook is not None
+            else str(rep / FNAME_WORKBOOK.format(semestre=semestre))
+        )
+
+        labels = {
+            "path_workbook": f"Workbook Huella (query base, B1={b1_yyyymmdd})",
+            "path_base_msci": "Base MSCI (Sob+ETF+BU).xlsx",
+            "path_gyp": f"G&P_MLab_{mmyyyy}.xlsm",
+            "path_proxies": f"Nueva Lista Proxies (corte {mmyyyy}).xlsx",
+            "path_market_cap": "Market Cap.xlsx (AUM benchmarks)",
+        }
+
+        return cls(
+            semestre=semestre,
+            anio=anio,
+            mm=mm,
+            b1_yyyymmdd=b1_yyyymmdd,
+            mmyyyy=mmyyyy,
+            semestre_t1=semestre_t1,
+            base_msci_sheet=semestre,
+            base_msci_sheet_t1=semestre_t1,
+            dataset_root=str(root),
+            reportes_root=str(rep),
+            path_base_msci=p_base_msci,
+            path_gyp=p_gyp,
+            path_market_cap=p_market_cap,
+            path_proxies=p_proxies,
+            path_workbook=p_workbook,
+            _labels=labels,
+        )
+
+    # =========================================================================
+    # Blindaje de inputs
+    # =========================================================================
+    def required_inputs(self) -> Dict[str, str]:
+        """Mapa {atributo_ruta: ruta} de los archivos que deben existir."""
+        return {
+            "path_workbook": self.path_workbook,
+            "path_base_msci": self.path_base_msci,
+            "path_gyp": self.path_gyp,
+            "path_proxies": self.path_proxies,
+            "path_market_cap": self.path_market_cap,
+        }
+
+    def check_paths(self, verbose: bool = True) -> List[str]:
+        """Verifica os.path.exists de cada input y avisa qué falta.
+
+        Devuelve la lista de claves faltantes ([] si todo OK). No lanza
+        excepción: deja que el orquestador decida abortar. Para Base MSCI
+        también valida que exista la hoja del periodo (match exacto, R11).
+        """
+        faltantes: List[str] = []
+        if verbose:
+            print("=" * 72)
+            print(f"  BLINDAJE DE INPUTS — SEMESTRE {self.semestre} "
+                  f"(B1={self.b1_yyyymmdd}, MMYYYY={self.mmyyyy}, T-1={self.semestre_t1})")
+            print("=" * 72)
+
+        for key, path in self.required_inputs().items():
+            label = self._labels.get(key, key)
+            existe = os.path.exists(path)
+            if existe:
+                if verbose:
+                    print(f"  [OK ] {label}\n         {path}")
+            else:
+                faltantes.append(key)
+                if verbose:
+                    print(f"  [FALTA] {label}")
+                    print(f"          Crea/deposita el archivo en:")
+                    print(f"          {path}")
+
+        # Validación fina de hojas dentro de Base MSCI (solo si el archivo existe).
+        if os.path.exists(self.path_base_msci):
+            self._check_base_msci_sheets(verbose=verbose, faltantes=faltantes)
+
+        if verbose:
+            print("-" * 72)
+            if faltantes:
+                print(f"  RESULTADO: faltan {len(faltantes)} input(s). "
+                      f"Corrige antes de continuar.")
+            else:
+                print("  RESULTADO: todos los inputs presentes. OK")
+            print("=" * 72)
+        return faltantes
+
+    def _check_base_msci_sheets(self, verbose: bool, faltantes: List[str]) -> None:
+        """Confirma que existan las hojas yyyymm y yyyymm(T-1) en Base MSCI."""
+        try:
+            import openpyxl
+        except ImportError:
+            if verbose:
+                print("  [AVISO] openpyxl no instalado; omito verificación de hojas "
+                      "de Base MSCI. Instala con: pip install openpyxl")
+            return
+        try:
+            wb = openpyxl.load_workbook(self.path_base_msci, read_only=True)
+            hojas = set(wb.sheetnames)
+            wb.close()
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  [AVISO] No pude inspeccionar hojas de Base MSCI: {exc}")
+            return
+
+        for etiqueta, hoja in (
+            ("periodo", self.base_msci_sheet),
+            ("T-1", self.base_msci_sheet_t1),
+        ):
+            if hoja in hojas:
+                if verbose:
+                    print(f"  [OK ] Base MSCI hoja {etiqueta}: '{hoja}'")
+            else:
+                faltantes.append(f"base_msci_sheet_{etiqueta}")
+                if verbose:
+                    print(f"  [FALTA] Base MSCI NO contiene la hoja {etiqueta} '{hoja}'.")
+                    print(f"          Hojas disponibles: {sorted(hojas)}")
+
+    # =========================================================================
+    # Recordatorio de refresco manual (CAMINO 3 / R2)
+    # =========================================================================
+    def print_refresh_reminder(self) -> None:
+        """Aviso obligatorio antes de leer los queries (no hay COM/xlwings)."""
+        print("*" * 72)
+        print("  ANTES DE CORRER EL PIPELINE (refresco MANUAL de queries):")
+        print(f"    1) Abre el workbook:")
+        print(f"       {self.path_workbook}")
+        print(f"    2) En la hoja '{WORKBOOK_QUERY_SHEET}', fija "
+              f"{WORKBOOK_B1_CELL} = {self.b1_yyyymmdd}")
+        print("    3) Datos -> Actualizar todo (RefreshAll).")
+        print("    4) Guarda y CIERRA el archivo.")
+        print("  Python solo LEE la data ya materializada (openpyxl, sin bloqueo).")
+        print("*" * 72)
+
+    # =========================================================================
+    # Validación de B1 ya materializado en el workbook (read_only, sin bloqueo)
+    # =========================================================================
+    def validate_workbook_b1(self, verbose: bool = True) -> Optional[bool]:
+        """Lee workbook!B1 y compara con b1_yyyymmdd configurado.
+
+        Devuelve True si coincide, False si difiere, None si no se pudo leer.
+        No lanza: el orquestador decide si abortar.
+        """
+        if not os.path.exists(self.path_workbook):
+            if verbose:
+                print(f"  [AVISO] No puedo validar B1: workbook ausente en\n"
+                      f"          {self.path_workbook}")
+            return None
+        try:
+            import openpyxl
+        except ImportError:
+            if verbose:
+                print("  [AVISO] openpyxl no instalado; omito validación de B1.")
+            return None
+
+        try:
+            wb = openpyxl.load_workbook(
+                self.path_workbook, read_only=True, data_only=True
+            )
+            if WORKBOOK_QUERY_SHEET not in wb.sheetnames:
+                wb.close()
+                if verbose:
+                    print(f"  [AVISO] El workbook no tiene la hoja "
+                          f"'{WORKBOOK_QUERY_SHEET}'.")
+                return None
+            ws = wb[WORKBOOK_QUERY_SHEET]
+            raw = ws[WORKBOOK_B1_CELL].value
+            wb.close()
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  [AVISO] No pude leer B1: {exc}")
+            return None
+
+        b1_leido = self._normalize_b1(raw)
+        coincide = (b1_leido == self.b1_yyyymmdd)
+        if verbose:
+            if coincide:
+                print(f"  [OK ] B1 del workbook = {b1_leido} coincide con SEMESTRE.")
+            else:
+                print(f"  [DESAJUSTE] B1 del workbook = {b1_leido!r} pero se esperaba "
+                      f"{self.b1_yyyymmdd!r}.")
+                print(f"              Revisa el refresco manual antes de leer.")
+        return coincide
+
+    @staticmethod
+    def _normalize_b1(raw) -> str:
+        """Normaliza el valor de B1 a 'yyyymmdd' venga como texto, número o fecha."""
+        if raw is None:
+            return ""
+        if isinstance(raw, (datetime, date)):
+            return raw.strftime("%Y%m%d")
+        s = str(raw).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s
+
+    # =========================================================================
+    # Utilidades
+    # =========================================================================
+    def summary(self) -> str:
+        return (
+            f"Config(semestre={self.semestre}, B1={self.b1_yyyymmdd}, "
+            f"MMYYYY={self.mmyyyy}, T-1={self.semestre_t1}, "
+            f"base_msci_sheet='{self.base_msci_sheet}', "
+            f"base_msci_sheet_t1='{self.base_msci_sheet_t1}')"
+        )
+
+
+###############################################################################
+#                                                                             #
+#   HELPERS COMPARTIDOS — normalización de headers y coerción de tipos        #
+#   (usados por Módulo 1 en adelante)                                         #
+#                                                                             #
+###############################################################################
+
+def _normalize(text) -> str:
+    """Normaliza un header/nombre: sin acentos, minúsculas, solo alfanumérico."""
+    if text is None:
+        return ""
+    s = str(text).strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    return "".join(c for c in s if c.isalnum())
+
+
+def _resolve_headers(
+    actual_headers: List[Optional[str]],
+    schema: Dict[str, List[str]],
+) -> Tuple[Dict[int, str], List[str]]:
+    """Mapea índice_de_columna -> nombre canónico según el schema.
+
+    Estrategia: exact-first sobre alias normalizados; luego contains como
+    fallback, respetando el orden del schema y sin reasignar un canónico ya
+    tomado. Devuelve (mapping, no_resueltos_canonicos).
+    """
+    norm_aliases: Dict[str, set] = {}
+    for canon, aliases in schema.items():
+        s = {_normalize(canon)}
+        s.update(_normalize(a) for a in aliases)
+        norm_aliases[canon] = {a for a in s if a}
+
+    norm_actual = {
+        i: _normalize(h) for i, h in enumerate(actual_headers) if _normalize(h)
+    }
+
+    mapping: Dict[int, str] = {}
+    used_canon: set = set()
+
+    # Pass 1: exact.
+    for i, na in norm_actual.items():
+        for canon in schema:
+            if canon in used_canon:
+                continue
+            if na in norm_aliases[canon]:
+                mapping[i] = canon
+                used_canon.add(canon)
+                break
+
+    # Pass 2: contains (solo para canónicos aún no resueltos y cols libres).
+    for i, na in norm_actual.items():
+        if i in mapping:
+            continue
+        for canon in schema:
+            if canon in used_canon:
+                continue
+            if any(alias in na or na in alias for alias in norm_aliases[canon]):
+                mapping[i] = canon
+                used_canon.add(canon)
+                break
+
+    no_resueltos = [c for c in schema if c not in used_canon]
+    return mapping, no_resueltos
+
+
+def _to_number(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(" ", "")
+    if s.count(",") and s.count("."):
+        s = s.replace(",", "")          # coma = miles
+    elif s.count(","):
+        s = s.replace(",", ".")         # coma = decimal
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _to_date(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    for fmt in ("%Y%m%d", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return v
+
+
+def _to_string(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 1 — QUERY READER                                                    #
+#   Lectura PASIVA (openpyxl) de Valorización / Cálculo Caja / Tipo de Cambio. #
+#   Matching por NOMBRE de header (nunca por letra).                          #
+#                                                                             #
+###############################################################################
+
+SHEET_VALORIZACION = "Valorización de Instrumentos"
+SHEET_CAJA = "Cálculo Caja"
+SHEET_TIPO_CAMBIO = "Tipo de Cambio"
+HEADER_ROW_DEFAULT = 3  # las tres hojas tienen headers en la fila 3
+
+# Schemas: canonical -> alias (se normalizan al vuelo; el canónico es alias implícito).
+VALORIZACION_SCHEMA: Dict[str, List[str]] = {
+    "FechaValoracion":            ["fechavaloracion", "fecha valoracion"],
+    "TIPO_TITULO":                ["tipo_titulo", "tipo titulo"],
+    "PORTAFOLIO":                 ["portafolio"],
+    "GRUPO":                      ["grupo"],
+    "CODIGO_SBS":                 ["codigo_sbs", "codigo sbs", "cod sbs"],
+    "CODIGO_ISIN":                ["codigo_isin", "isin"],
+    "TITULO":                     ["titulo"],
+    "EMISOR":                     ["emisor"],
+    "Moneda":                     ["moneda"],
+    "VALOR_UNITARIO":             ["valor_unitario", "valor unitario"],
+    "VALOR_VECTOR_LOCAL":         ["valor_vector_local"],
+    "VALOR_VECTOR_ORIGEN":        ["valor_vector_origen"],
+    "CANTIDAD":                   ["cantidad"],
+    "FECHA_VENCIMIENTO":          ["fecha_vencimiento", "fecha vencimiento"],
+    "DIAS_VENCIMIENTO":           ["dias_ventimiento", "dias_vencimiento",
+                                   "dias vencimiento"],  # spec: typo VENTIMIENTO
+    "TIPO_CAMBIO":                ["tipo_cambio", "tipo cambio"],
+    "TIPO_RENTA":                 ["tipo_renta", "tipo renta"],
+    "VALOR_VECTOR_LOCAL_T-1":     ["valor_vector_local_t-1", "valor_vector_local_t1"],
+    "VALOR_VECTOR_ORIGEN_T-1":    ["valor_vector_origen_t-1", "valor_vector_origen_t1"],
+    "GRUPO_ECONOMICO":            ["grupo_economico", "grupo economico"],
+    "ACTIVO_DEL_EMISOR":          ["activo_del_emisor", "activo del emisor"],
+    "PASIVO_DEL_EMISOR":          ["pasivo_del_emisor", "pasivo del emisor"],
+    "PATRIMONIO_DEL_EMISOR":      ["pastrimonio_del_emisor", "patrimonio_del_emisor",
+                                   "patrimonio del emisor"],  # spec: typo PASTRIMONIO
+    "DIFERENCIA":                 ["diferencia"],
+}
+
+CAJA_SCHEMA: Dict[str, List[str]] = {
+    "PORTAFOLIO":       ["portafolio"],
+    "FECHA_OPERACION":  ["fecha_operacion", "fecha operacion"],
+    "CAJA":             ["caja"],
+    "CXC":              ["cxc"],
+    "CXP":              ["cxp"],
+    "PATRIMONIO":       ["patrimonio"],
+    "INVERSIONES":      ["inversiones"],
+    "Multifondos":      ["multifondos"],
+}
+
+TIPO_CAMBIO_SCHEMA: Dict[str, List[str]] = {
+    "CODIGO_MONEDA":         ["codigo_moneda"],
+    "NOMBRE_MONEDA":         ["nombre_moneda", "nombre moneda"],
+    "FECHA":                 ["fecha"],
+    "VALOR":                 ["valor"],
+    "CODIGO_MONEDA_SBS":     ["codigo_moneda_sbs", "codigo moneda sbs"],
+    "MONEDA_INTERNACIONAL":  ["moneda_internacional", "moneda internacional"],
+}
+
+KEY_COL = {
+    "valorizacion": "CODIGO_SBS",
+    "caja": "PORTAFOLIO",
+    "tipo_cambio": "CODIGO_MONEDA",
+}
+
+NUMERIC_COLS = {
+    "VALOR_UNITARIO", "VALOR_VECTOR_LOCAL", "VALOR_VECTOR_ORIGEN", "CANTIDAD",
+    "VALOR_VECTOR_LOCAL_T-1", "VALOR_VECTOR_ORIGEN_T-1", "ACTIVO_DEL_EMISOR",
+    "PASIVO_DEL_EMISOR", "PATRIMONIO_DEL_EMISOR", "DIFERENCIA", "TIPO_CAMBIO",
+    "DIAS_VENCIMIENTO",
+    "CAJA", "CXC", "CXP", "PATRIMONIO", "INVERSIONES",
+    "VALOR",
+}
+DATE_COLS = {"FechaValoracion", "FECHA_VENCIMIENTO", "FECHA_OPERACION", "FECHA"}
+STRING_COLS = {
+    "CODIGO_SBS", "CODIGO_ISIN", "PORTAFOLIO", "CODIGO_MONEDA",
+    "CODIGO_MONEDA_SBS", "GRUPO_ECONOMICO", "EMISOR",
+}
+
+
+def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if col in STRING_COLS:
+            df[col] = df[col].map(_to_string)
+        elif col in DATE_COLS:
+            df[col] = df[col].map(_to_date)
+        elif col in NUMERIC_COLS:
+            df[col] = df[col].map(_to_number)
+    return df
+
+
+@dataclass
+class QueryData:
+    """Resultado del Módulo 1: los tres DataFrames-query ya tipados."""
+    valorizacion: pd.DataFrame
+    caja: pd.DataFrame
+    tipo_cambio: pd.DataFrame
+
+    def summary(self) -> str:
+        return (
+            f"QueryData(valorizacion={self.valorizacion.shape}, "
+            f"caja={self.caja.shape}, tipo_cambio={self.tipo_cambio.shape})"
+        )
+
+
+class QueryReader:
+    """Lee pasivamente (openpyxl) las tres hojas-query del workbook refrescado."""
+
+    def __init__(self, config: Config, header_row: int = HEADER_ROW_DEFAULT,
+                 verbose: bool = True):
+        self.config = config
+        self.header_row = header_row
+        self.verbose = verbose
+        self.workbook_path = getattr(config, "path_workbook", None)
+
+    # ---- API pública -------------------------------------------------------
+    def read_all(self) -> QueryData:
+        val = self.read_sheet(SHEET_VALORIZACION, VALORIZACION_SCHEMA,
+                              KEY_COL["valorizacion"], keep_unmapped=True)
+        caja = self.read_sheet(SHEET_CAJA, CAJA_SCHEMA,
+                               KEY_COL["caja"], keep_unmapped=False)
+        tc = self.read_sheet(SHEET_TIPO_CAMBIO, TIPO_CAMBIO_SCHEMA,
+                             KEY_COL["tipo_cambio"], keep_unmapped=False)
+        data = QueryData(valorizacion=val, caja=caja, tipo_cambio=tc)
+        if self.verbose:
+            print(f"  [Módulo 1] {data.summary()}")
+        return data
+
+    def read_valorizacion(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_VALORIZACION, VALORIZACION_SCHEMA,
+                               KEY_COL["valorizacion"], keep_unmapped=True)
+
+    def read_calculo_caja(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_CAJA, CAJA_SCHEMA,
+                               KEY_COL["caja"], keep_unmapped=False)
+
+    def read_tipo_cambio(self) -> pd.DataFrame:
+        return self.read_sheet(SHEET_TIPO_CAMBIO, TIPO_CAMBIO_SCHEMA,
+                               KEY_COL["tipo_cambio"], keep_unmapped=False)
+
+    # ---- Motor de lectura --------------------------------------------------
+    def read_sheet(
+        self,
+        sheet_name: str,
+        schema: Dict[str, List[str]],
+        key_col: str,
+        keep_unmapped: bool,
+    ) -> pd.DataFrame:
+        self._guard_workbook()
+
+        import openpyxl
+
+        wb = openpyxl.load_workbook(self.workbook_path, read_only=True, data_only=True)
+        try:
+            real_sheet = self._resolve_sheet_name(wb.sheetnames, sheet_name)
+            if real_sheet is None:
+                wb.close()
+                raise ValueError(
+                    f"El workbook no contiene la hoja '{sheet_name}'. "
+                    f"Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[real_sheet]
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+        if len(rows) < self.header_row:
+            raise ValueError(
+                f"Hoja '{sheet_name}': tiene {len(rows)} filas, menos que la fila "
+                f"de headers ({self.header_row}). ¿Se refrescó el query?"
+            )
+
+        header = list(rows[self.header_row - 1])
+        data_rows = rows[self.header_row:]
+
+        mapping, no_resueltos = _resolve_headers(header, schema)
+        if self.verbose and no_resueltos:
+            print(f"  [AVISO] Hoja '{sheet_name}': headers no encontrados -> "
+                  f"{no_resueltos}. Revisa si cambiaron de nombre.")
+
+        if keep_unmapped:
+            col_names, col_idx = [], []
+            for i, h in enumerate(header):
+                if i in mapping:
+                    col_names.append(mapping[i]); col_idx.append(i)
+                elif _normalize(h):
+                    col_names.append(str(h).strip()); col_idx.append(i)
+        else:
+            col_idx = sorted(mapping.keys())
+            col_names = [mapping[i] for i in col_idx]
+
+        records = [[row[i] if i < len(row) else None for i in col_idx]
+                   for row in data_rows]
+        df = pd.DataFrame(records, columns=col_names)
+
+        if key_col in df.columns:
+            df = df[df[key_col].map(lambda v: _to_string(v) not in (None, ""))]
+        else:
+            df = df.dropna(how="all")
+        df = df.reset_index(drop=True)
+
+        df = _coerce_types(df)
+
+        if self.verbose:
+            print(f"  [Módulo 1] '{sheet_name}' -> {df.shape[0]} filas x "
+                  f"{df.shape[1]} cols (mapeadas: {len(mapping)}).")
+        return df
+
+    # ---- Blindaje / helpers ------------------------------------------------
+    def _guard_workbook(self) -> None:
+        if not self.workbook_path:
+            raise ValueError(
+                "Config no define path_workbook. Construye la Config con "
+                "Config.from_semestre(...) antes de leer."
+            )
+        if not os.path.exists(self.workbook_path):
+            raise FileNotFoundError(
+                "No encuentro el workbook del query. Recuerda el CAMINO 3:\n"
+                "  1) Abre el .xlsm, 2) fija B1=yyyymmdd, 3) RefreshAll, "
+                "4) guarda y cierra.\n"
+                f"  Ruta esperada: {self.workbook_path}"
+            )
+
+    @staticmethod
+    def _resolve_sheet_name(available: List[str], wanted: str) -> Optional[str]:
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+###############################################################################
+#                                                                             #
+#   ORQUESTADOR / DEMO                                                         #
+#   Ajusta SEMESTRE aquí. Corre Módulo 0 (blindaje) y Módulo 1 (lectura).      #
+#                                                                             #
+###############################################################################
+
+if __name__ == "__main__":
+    # >>> AJUSTA AQUÍ EL SEMESTRE EN REVISIÓN <<<
+    SEMESTRE = "202606"   # S1-2026. Usa "202512" para S2-2025, etc.
+
+    cfg = Config.from_semestre(SEMESTRE)
+    print(cfg.summary())
+    print()
+    cfg.print_refresh_reminder()
+    print()
+
+    faltantes = cfg.check_paths(verbose=True)
+    print()
+    cfg.validate_workbook_b1(verbose=True)
+
+    if "path_workbook" in faltantes:
+        print("\n>>> Falta el workbook. Deposítalo (refrescado) y vuelve a correr.")
+    else:
+        reader = QueryReader(cfg, verbose=True)
+        data = reader.read_all()
+        print("\n", data.summary())
+        cols_muestra = [c for c in
+                        ["PORTAFOLIO", "CODIGO_SBS", "CODIGO_ISIN",
+                         "VALOR_VECTOR_LOCAL", "GRUPO_ECONOMICO"]
+                        if c in data.valorizacion.columns]
+        print("\nValorización (muestra de columnas clave):")
+        print(data.valorizacion[cols_muestra].head(10).to_string())
