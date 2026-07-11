@@ -1,0 +1,115 @@
+###############################################################################
+#                                                                             #
+#   MÓDULO 2 — CAJA LOADER                                                     #
+#   Consume QueryData.caja -> lookup PATRIMONIO por PORTAFOLIO.                #
+#   Alimenta Valorización.AB = INDEX('Cálculo Caja'!F, MATCH(PORTAFOLIO, A)). #
+#                                                                             #
+###############################################################################
+
+class CajaLoader:
+    """Construye el lookup PORTAFOLIO -> PATRIMONIO desde la hoja Cálculo Caja.
+
+    Excel usa MATCH(PORTAFOLIO, 'Cálculo Caja'!A, 0), que devuelve la PRIMERA
+    coincidencia. Aquí replicamos esa semántica (keep='first') y avisamos si
+    hay PORTAFOLIOs duplicados con patrimonios distintos.
+    """
+
+    def __init__(self, df_caja: pd.DataFrame, verbose: bool = True):
+        self.df = df_caja
+        self.verbose = verbose
+        self.patrimonio_by_portafolio: Dict[str, float] = {}
+
+    def build(self) -> "CajaLoader":
+        if "PORTAFOLIO" not in self.df.columns or "PATRIMONIO" not in self.df.columns:
+            raise ValueError(
+                "CajaLoader: faltan columnas 'PORTAFOLIO'/'PATRIMONIO' en Cálculo Caja. "
+                f"Columnas disponibles: {list(self.df.columns)}"
+            )
+
+        tmp = self.df[["PORTAFOLIO", "PATRIMONIO"]].copy()
+        tmp["PORTAFOLIO"] = tmp["PORTAFOLIO"].map(_to_string)
+
+        # Detectar duplicados con valores distintos (solo aviso; Excel toma el primero).
+        if self.verbose:
+            dups = tmp[tmp.duplicated("PORTAFOLIO", keep=False)]
+            conflict = (
+                dups.groupby("PORTAFOLIO")["PATRIMONIO"].nunique()
+                if not dups.empty else None
+            )
+            if conflict is not None:
+                conflict = conflict[conflict > 1]
+                if not conflict.empty:
+                    print(f"  [AVISO] CajaLoader: PORTAFOLIOs duplicados con patrimonio "
+                          f"distinto (uso el primero, como MATCH): {list(conflict.index)}")
+
+        tmp = tmp.dropna(subset=["PORTAFOLIO"]).drop_duplicates("PORTAFOLIO", keep="first")
+        self.patrimonio_by_portafolio = dict(zip(tmp["PORTAFOLIO"], tmp["PATRIMONIO"]))
+
+        if self.verbose:
+            print(f"  [Módulo 2] CajaLoader: {len(self.patrimonio_by_portafolio)} "
+                  f"portafolios con patrimonio.")
+        return self
+
+    def get_patrimonio(self, portafolio) -> Optional[float]:
+        """Patrimonio de un PORTAFOLIO (None si no existe -> AB quedará NaN)."""
+        return self.patrimonio_by_portafolio.get(_to_string(portafolio))
+
+    def as_map(self) -> Dict[str, float]:
+        """Dict listo para df['PORTAFOLIO'].map(...) al construir AB en Módulo 10."""
+        return self.patrimonio_by_portafolio
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 3 — TIPO DE CAMBIO LOADER                                          #
+#   Consume QueryData.tipo_cambio -> tasa USD (CODIGO_MONEDA_SBS == "2").      #
+#   Alimenta Valorización.AD = (VALOR_VECTOR_LOCAL / usd_rate) / 1e6.          #
+#                                                                             #
+###############################################################################
+
+SBS_CODE_USD = "2"   # VERIFICADO: "2" = USD (~3.4075); "1" = PEN (=1). Estables (R12).
+SBS_CODE_PEN = "1"
+
+
+class TipoCambioLoader:
+    """Construye el lookup CODIGO_MONEDA_SBS -> VALOR y expone la tasa USD.
+
+    Excel usa INDEX('Tipo de Cambio'!D, MATCH("2", 'Tipo de Cambio'!E, 0)):
+    el VALOR (col D) de la fila cuyo CODIGO_MONEDA_SBS (col E) es "2".
+    """
+
+    def __init__(self, df_tc: pd.DataFrame, verbose: bool = True):
+        self.df = df_tc
+        self.verbose = verbose
+        self.rate_by_sbs: Dict[str, float] = {}
+
+    def build(self) -> "TipoCambioLoader":
+        if "CODIGO_MONEDA_SBS" not in self.df.columns or "VALOR" not in self.df.columns:
+            raise ValueError(
+                "TipoCambioLoader: faltan columnas 'CODIGO_MONEDA_SBS'/'VALOR'. "
+                f"Columnas disponibles: {list(self.df.columns)}"
+            )
+
+        tmp = self.df[["CODIGO_MONEDA_SBS", "VALOR"]].copy()
+        tmp["CODIGO_MONEDA_SBS"] = tmp["CODIGO_MONEDA_SBS"].map(_to_string)
+        tmp = tmp.dropna(subset=["CODIGO_MONEDA_SBS"]).drop_duplicates(
+            "CODIGO_MONEDA_SBS", keep="first"
+        )
+        self.rate_by_sbs = dict(zip(tmp["CODIGO_MONEDA_SBS"], tmp["VALOR"]))
+
+        # Blindaje: la tasa USD ("2") es imprescindible para AD.
+        if SBS_CODE_USD not in self.rate_by_sbs:
+            print(f"  [AVISO] TipoCambioLoader: NO se encontró CODIGO_MONEDA_SBS='2' "
+                  f"(USD). AD no podrá calcularse. Códigos presentes: "
+                  f"{sorted(self.rate_by_sbs)}")
+        elif self.verbose:
+            print(f"  [Módulo 3] TipoCambioLoader: USD (código '2') = "
+                  f"{self.rate_by_sbs[SBS_CODE_USD]}")
+        return self
+
+    def usd_rate(self) -> Optional[float]:
+        """Tasa USD para dividir VALOR_VECTOR_LOCAL en el cálculo de AD."""
+        return self.rate_by_sbs.get(SBS_CODE_USD)
+
+    def get_rate(self, sbs_code) -> Optional[float]:
+        return self.rate_by_sbs.get(_to_string(sbs_code))
