@@ -1,0 +1,1500 @@
+###############################################################################
+#                                                                             #
+#   MÓDULO 4 — G&P DETALLADO LOADER                                           #
+#   Lee G&P_MLab_MMYYYY.xlsm hoja 'Detallado' en read_only, SOLO cols B/D/F/Q. #
+#   Archivo ~120MB, hoja muy ancha: se acota la ventana B:Q para no cargar todo.#
+#   Mapeo (R3, MATCH por SBS = Detallado!B):                                   #
+#     SBS (llave) <- B | NOMBRE <- D | ASSET_CLASS <- F | RANK_RT <- Q         #
+#   Alimenta al Módulo 5 (Parametria): D<-F, E<-Q, H<-D.                        #
+#                                                                             #
+###############################################################################
+
+GYP_SHEET_DETALLADO = "Detallado"
+
+# Letras de columna en 'Detallado' (referencia; sobrescribibles si cambian).
+GYP_COL_SBS = "B"          # llave del MATCH (SBS)
+GYP_COL_NOMBRE = "D"       # -> Parametria H (Nombre)
+GYP_COL_ASSET_CLASS = "F"  # -> Parametria D (Asset Class)
+GYP_COL_RANK_RT = "Q"      # -> Parametria E (Rank Rt)
+
+GYP_HEADER_ROWS = 1        # nº de filas de encabezado a saltar en Detallado
+
+
+def _col_letter_to_idx(letter: str) -> int:
+    """Convierte letra de columna Excel a índice 1-based ('A'->1, 'B'->2, ...)."""
+    letter = str(letter).strip().upper()
+    idx = 0
+    for ch in letter:
+        if not ("A" <= ch <= "Z"):
+            raise ValueError(f"Letra de columna inválida: {letter!r}")
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx
+
+
+class GyPDetalladoLoader:
+    """Extrae de G&P_MLab (hoja Detallado) las 4 columnas que consume Parametria.
+
+    Devuelve un DataFrame con: SBS (str, llave), NOMBRE, ASSET_CLASS, RANK_RT.
+    Deduplicado por SBS (keep='first') para replicar la semántica de MATCH.
+    """
+
+    def __init__(self, config: Config, verbose: bool = True,
+                 col_sbs: str = GYP_COL_SBS,
+                 col_nombre: str = GYP_COL_NOMBRE,
+                 col_asset_class: str = GYP_COL_ASSET_CLASS,
+                 col_rank_rt: str = GYP_COL_RANK_RT,
+                 header_rows: int = GYP_HEADER_ROWS):
+        self.config = config
+        self.verbose = verbose
+        self.path = getattr(config, "path_gyp", None)
+        # Índices 1-based de las columnas requeridas.
+        self._cols = {
+            "SBS": _col_letter_to_idx(col_sbs),
+            "NOMBRE": _col_letter_to_idx(col_nombre),
+            "ASSET_CLASS": _col_letter_to_idx(col_asset_class),
+            "RANK_RT": _col_letter_to_idx(col_rank_rt),
+        }
+        self.header_rows = header_rows
+        self.df: Optional[pd.DataFrame] = None
+
+    def build(self) -> pd.DataFrame:
+        self._guard_file()
+
+        import openpyxl
+
+        # Ventana de lectura: del mínimo al máximo índice requerido (B..Q).
+        min_col = min(self._cols.values())
+        max_col = max(self._cols.values())
+        # Offset dentro de la tupla acotada (0-based).
+        offsets = {name: (idx - min_col) for name, idx in self._cols.items()}
+
+        if self.verbose:
+            print(f"  [Módulo 4] Abriendo G&P (read_only), acotado a columnas "
+                  f"{min_col}..{max_col}. Esto puede tardar por el tamaño (~120MB)...")
+
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            real_sheet = self._resolve_sheet(wb.sheetnames, GYP_SHEET_DETALLADO)
+            if real_sheet is None:
+                wb.close()
+                raise ValueError(
+                    f"G&P: no existe la hoja '{GYP_SHEET_DETALLADO}'. "
+                    f"Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[real_sheet]
+
+            registros = []
+            header_preview = None
+            for i, row in enumerate(
+                ws.iter_rows(min_col=min_col, max_col=max_col, values_only=True)
+            ):
+                if i < self.header_rows:
+                    if i == self.header_rows - 1:
+                        header_preview = {
+                            name: (row[off] if off < len(row) else None)
+                            for name, off in offsets.items()
+                        }
+                    continue
+                sbs = row[offsets["SBS"]] if offsets["SBS"] < len(row) else None
+                sbs = _to_string(sbs)
+                if sbs in (None, ""):
+                    continue  # sin llave -> fila basura
+                registros.append({
+                    "SBS": sbs,
+                    "NOMBRE": row[offsets["NOMBRE"]] if offsets["NOMBRE"] < len(row) else None,
+                    "ASSET_CLASS": row[offsets["ASSET_CLASS"]] if offsets["ASSET_CLASS"] < len(row) else None,
+                    "RANK_RT": row[offsets["RANK_RT"]] if offsets["RANK_RT"] < len(row) else None,
+                })
+        finally:
+            wb.close()
+
+        if self.verbose and header_preview is not None:
+            print(f"  [Módulo 4] Encabezado detectado en fila {self.header_rows} "
+                  f"(verifica que B/D/F/Q alineen): {header_preview}")
+
+        df = pd.DataFrame(registros, columns=["SBS", "NOMBRE", "ASSET_CLASS", "RANK_RT"])
+        antes = len(df)
+        df = df.drop_duplicates("SBS", keep="first").reset_index(drop=True)
+        if self.verbose:
+            dups = antes - len(df)
+            print(f"  [Módulo 4] Detallado -> {len(df)} SBS únicos"
+                  + (f" ({dups} duplicados descartados, se tomó el primero)" if dups else "")
+                  + ".")
+        self.df = df
+        return df
+
+    def as_lookup(self) -> Dict[str, dict]:
+        """Dict SBS -> {NOMBRE, ASSET_CLASS, RANK_RT} para el Módulo 5."""
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de as_lookup().")
+        return self.df.set_index("SBS").to_dict("index")
+
+    # ---- Blindaje / helpers ------------------------------------------------
+    def _guard_file(self) -> None:
+        mmyyyy = getattr(self.config, "mmyyyy", "MMYYYY")
+        if not self.path:
+            raise ValueError("Config no define path_gyp.")
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(
+                f"No encuentro el G&P del semestre. Es tu tarea manual: deposita\n"
+                f"  'G&P_MLab_{mmyyyy}.xlsm'\n"
+                f"en la ruta:\n  {self.path}"
+            )
+
+    @staticmethod
+    def _resolve_sheet(available: List[str], wanted: str) -> Optional[str]:
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 5 — PARAMETRIA BUILDER                                             #
+#   Replica las fórmulas de la hoja Parametria a partir del G&P (Módulo 4).    #
+#   Llave: SBS (col C). MATCH contra Detallado!B (ya resuelto en Módulo 4).    #
+#                                                                             #
+#   Mapeo exacto (R3):                                                         #
+#     H (Nombre)      <- Detallado!D   (NOMBRE)                                #
+#     D (Asset Class) <- Detallado!F   (ASSET_CLASS)                           #
+#     E (Rank Rt)     <- Detallado!Q   (RANK_RT)                              #
+#     G (Codigo)      = LEFT(C,2) & E                                          #
+#     J (RANKEST)     = IF(E="ALT", LEFT(E,3), LEFT(E,3) & F)                  #
+#     F (Riesgos)     = valor manual/lista (NO viene de Detallado)             #
+#                                                                             #
+#   Alimenta Valorización: G(<-H), AM(<-G), AN(<-F), AO(<-J).                  #
+#                                                                             #
+###############################################################################
+
+class ParametriaBuilder:
+    """Construye el DataFrame Parametria (llave SBS) desde el lookup de G&P.
+
+    Nota sobre F (Riesgos): en el Excel es un valor manual/lista que NO proviene
+    de Detallado, pero J (RANKEST) lo usa en su rama else. Se acepta un
+    'riesgos_map' opcional {SBS -> valor}; si no se provee, F queda vacío y J
+    concatena LEFT(E,3) con cadena vacía (documentado abajo).
+    """
+
+    def __init__(self, gyp_lookup: Dict[str, dict],
+                 sbs_list: Optional[List[str]] = None,
+                 riesgos_map: Optional[Dict[str, str]] = None,
+                 verbose: bool = True):
+        """
+        gyp_lookup : dict SBS -> {NOMBRE, ASSET_CLASS, RANK_RT}  (Módulo 4.as_lookup())
+        sbs_list   : universo de SBS a materializar. Si None, usa las llaves del
+                     lookup. (Puedes pasar los CODIGO_SBS de Valorización para
+                     construir solo lo necesario.)
+        riesgos_map: opcional, SBS -> Riesgos (col F). Manual/lista.
+        """
+        self.gyp = gyp_lookup
+        self.sbs_list = sbs_list
+        self.riesgos_map = riesgos_map or {}
+        self.verbose = verbose
+        self.df: Optional[pd.DataFrame] = None
+
+    def build(self) -> pd.DataFrame:
+        sbs_universe = (
+            [_to_string(s) for s in self.sbs_list]
+            if self.sbs_list is not None
+            else list(self.gyp.keys())
+        )
+        # Únicos, preservando orden.
+        seen = set()
+        sbs_universe = [s for s in sbs_universe
+                        if s not in (None, "") and not (s in seen or seen.add(s))]
+
+        registros = []
+        no_encontrados = []
+        for sbs in sbs_universe:
+            info = self.gyp.get(sbs)
+            if info is None:
+                no_encontrados.append(sbs)
+                nombre = asset_class = rank_rt = None
+            else:
+                nombre = info.get("NOMBRE")
+                asset_class = info.get("ASSET_CLASS")
+                rank_rt = info.get("RANK_RT")
+
+            e = _to_string(rank_rt)          # E (Rank Rt)
+            f = self.riesgos_map.get(sbs)    # F (Riesgos), manual
+            g = self._codigo(sbs, e)         # G = LEFT(C,2)&E
+            j = self._rankest(e, f)          # J = IF(E="ALT",LEFT(E,3),LEFT(E,3)&F)
+
+            registros.append({
+                "SBS": sbs,          # C (llave)
+                "ASSET_CLASS": asset_class,  # D
+                "RANK_RT": e,        # E
+                "RIESGOS": f,        # F
+                "CODIGO": g,         # G  -> Valorización.AM
+                "NOMBRE": nombre,    # H  -> Valorización.G
+                "RANKEST": j,        # J  -> Valorización.AO
+            })
+
+        df = pd.DataFrame(
+            registros,
+            columns=["SBS", "ASSET_CLASS", "RANK_RT", "RIESGOS",
+                     "CODIGO", "NOMBRE", "RANKEST"],
+        )
+        self.df = df
+
+        if self.verbose:
+            print(f"  [Módulo 5] Parametria -> {len(df)} filas (SBS).")
+            if no_encontrados:
+                muestra = no_encontrados[:10]
+                print(f"  [AVISO] {len(no_encontrados)} SBS sin match en G&P "
+                      f"(Nombre/Asset/Rank quedan vacíos). Ejemplos: {muestra}")
+        return df
+
+    # ---- Fórmulas Parametria ----------------------------------------------
+    @staticmethod
+    def _codigo(sbs: Optional[str], e: Optional[str]) -> Optional[str]:
+        """G = LEFT(C,2) & E."""
+        c = _to_string(sbs) or ""
+        e = e or ""
+        left2 = c[:2]
+        if not left2 and not e:
+            return None
+        return f"{left2}{e}"
+
+    @staticmethod
+    def _rankest(e: Optional[str], f: Optional[str]) -> Optional[str]:
+        """J = IF(E="ALT", LEFT(E,3), LEFT(E,3) & F).
+
+        Si E está vacío -> None. Si F (Riesgos) no fue provisto, la rama else
+        concatena LEFT(E,3) con cadena vacía (equivale a J = LEFT(E,3)).
+        """
+        e = _to_string(e)
+        if e in (None, ""):
+            return None
+        left3 = e[:3]
+        if e.upper() == "ALT":
+            return left3
+        f = _to_string(f) or ""
+        return f"{left3}{f}"
+
+    def as_lookup(self) -> Dict[str, dict]:
+        """Dict SBS -> {CODIGO, NOMBRE, RIESGOS, RANKEST, ...} para Módulo 10.
+
+        Valorización usará: G<-NOMBRE, AM<-CODIGO, AN<-RIESGOS, AO<-RANKEST.
+        """
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de as_lookup().")
+        return self.df.set_index("SBS").to_dict("index")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 6 — BD(MSCI) BUILDER                                              #
+#   Construye BD(MSCI) desde Base MSCI (Sob+ETF+BU).xlsx, hoja del periodo.    #
+#   Estructura destino (spec):                                                #
+#     A(deriv) | B..V = fuente A..U (Nombre..CAT) | W Plus | X Plus_1          #
+#   Derivaciones:                                                             #
+#     A      = RIGHT(LEFT(client1,6),4)          [client1 = fuente col C]      #
+#     W(Plus)= IF(CAT="ETF_ETY","ETF", IF(CAT="ETF_SOV","ETF",                 #
+#                IF(CAT="RF_SOV","SOV", IF(CAT="-","Cuestionario Integra",     #
+#                "Portafolio"))))                                             #
+#     X(Plus_1)= IF(CAT="ETF_ETY","Otros ETFs", IF(CAT="ETF_SOV","Soberanos", #
+#                  W))                                                        #
+#   Llave: Client_ID (ISIN). Col sobrescrita luego por proxies: Intensidad.   #
+#   REUTILIZABLE por Módulo 7 (T-1): mismo builder, sheet distinta.           #
+#                                                                             #
+###############################################################################
+
+# Orden EXACTO de las 21 columnas de la fuente Base MSCI (A:U), headers FILA 1.
+BASE_MSCI_SOURCE_COLS: List[str] = [
+    "Nombre", "Client_ID", "client1", "client2", "Valor", "País", "Sector",
+    "EVIC", "CO2", "CO2/EVIC", "ESG", "E", "S", "G", "Controversia",
+    "Co2/Sales", "Gov_pctl", "Rating", "CO2/Debt(Intensidad)", "%DebtPub", "CAT",
+]
+
+# Alias para VALIDAR por nombre que la fuente no cambió de orden (solo aviso).
+BASE_MSCI_ALIASES: Dict[str, List[str]] = {
+    "Nombre": ["nombre"], "Client_ID": ["client_id", "clientid", "isin"],
+    "client1": ["client1", "cliente1"], "client2": ["client2", "cliente2"],
+    "Valor": ["valor"], "País": ["pais", "país", "country"], "Sector": ["sector"],
+    "EVIC": ["evic"], "CO2": ["co2"], "CO2/EVIC": ["co2evic", "co2/evic"],
+    "ESG": ["esg"], "E": ["e"], "S": ["s"], "G": ["g"],
+    "Controversia": ["controversia"], "Co2/Sales": ["co2sales", "co2/sales"],
+    "Gov_pctl": ["govpctl", "gov_pctl"], "Rating": ["rating"],
+    "CO2/Debt(Intensidad)": ["co2debtintensidad", "co2/debt", "intensidad"],
+    "%DebtPub": ["debtpub", "%debtpub"], "CAT": ["cat"],
+}
+
+# Nombre de la col A derivada (sin nombre en Excel) y de la col de intensidad.
+BD_COL_A = "A_MSCI"
+BD_COL_INTENSIDAD = "CO2/Debt(Intensidad)"
+BD_COL_CLIENT_ID = "Client_ID"
+BD_COL_CLIENT1 = "client1"
+BD_COL_CAT = "CAT"
+BD_COL_PLUS = "Plus"
+BD_COL_PLUS_1 = "Plus_1"
+
+# Orden final de columnas de BD(MSCI): A(deriv) + fuente + W/X.
+BD_MSCI_COLS: List[str] = [BD_COL_A] + BASE_MSCI_SOURCE_COLS + [BD_COL_PLUS, BD_COL_PLUS_1]
+
+# Coerción mínima en BD (el resto se deja como lo entregó openpyxl).
+BD_STRING_COLS = {BD_COL_A, BD_COL_CLIENT_ID, BD_COL_CLIENT1, "client2",
+                  "Nombre", "País", "Sector", "Rating", BD_COL_CAT,
+                  BD_COL_PLUS, BD_COL_PLUS_1}
+BD_NUMERIC_COLS = {"Valor", BD_COL_INTENSIDAD}
+
+
+class BDMSCIBuilder:
+    """Construye el DataFrame BD(MSCI) desde una hoja de Base MSCI.
+
+    Reutilizable: pásale la hoja del periodo (Módulo 6) o la de T-1 (Módulo 7).
+    Resuelve por POSICIÓN (A:U, orden fijo del export MSCI) pero VALIDA por
+    nombre y avisa fuerte si detecta un reordenamiento entre semestres.
+    """
+
+    def __init__(self, config: Config, sheet: Optional[str] = None,
+                 verbose: bool = True):
+        self.config = config
+        self.path = getattr(config, "path_base_msci", None)
+        self.sheet = sheet if sheet is not None else getattr(config, "base_msci_sheet", None)
+        self.verbose = verbose
+        self.df: Optional[pd.DataFrame] = None
+
+    def build(self) -> pd.DataFrame:
+        self._guard_file()
+
+        import openpyxl
+
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            real_sheet = self._resolve_sheet(wb.sheetnames, self.sheet)
+            if real_sheet is None:
+                wb.close()
+                raise ValueError(
+                    f"Base MSCI: no existe la hoja '{self.sheet}' (match exacto, R11). "
+                    f"Hojas disponibles: {wb.sheetnames}"
+                )
+            ws = wb[real_sheet]
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+        if not rows:
+            raise ValueError(f"Base MSCI hoja '{self.sheet}' está vacía.")
+
+        header = list(rows[0])
+        data_rows = rows[1:]
+
+        n_src = len(BASE_MSCI_SOURCE_COLS)  # 21
+        if len(header) < n_src:
+            raise ValueError(
+                f"Base MSCI hoja '{self.sheet}': tiene {len(header)} columnas, "
+                f"se esperaban al menos {n_src} (A:U). ¿Hoja correcta?"
+            )
+
+        self._validate_header_order(header)
+
+        # Construir registros: fuente A:U por posición + derivadas.
+        registros = []
+        idx_client1 = BASE_MSCI_SOURCE_COLS.index("client1")   # 2
+        idx_cat = BASE_MSCI_SOURCE_COLS.index("CAT")           # 20
+        for row in data_rows:
+            src = [row[i] if i < len(row) else None for i in range(n_src)]
+            client_id = _to_string(src[BASE_MSCI_SOURCE_COLS.index("Client_ID")])
+            if client_id in (None, ""):
+                continue  # sin ISIN -> fila basura
+            cat = src[idx_cat]
+            reg = {BD_COL_A: self._deriv_a(src[idx_client1])}
+            for name, val in zip(BASE_MSCI_SOURCE_COLS, src):
+                reg[name] = val
+            reg[BD_COL_PLUS] = self._plus(cat)
+            reg[BD_COL_PLUS_1] = self._plus1(cat, reg[BD_COL_PLUS])
+            registros.append(reg)
+
+        df = pd.DataFrame(registros, columns=BD_MSCI_COLS)
+
+        # Coerción mínima.
+        for col in df.columns:
+            if col in BD_STRING_COLS:
+                df[col] = df[col].map(_to_string)
+            elif col in BD_NUMERIC_COLS:
+                df[col] = df[col].map(_to_number)
+
+        # Aviso si hay Client_ID duplicados (afecta el MATCH de Valorización).
+        if self.verbose:
+            dup = df[BD_COL_CLIENT_ID].duplicated().sum()
+            if dup:
+                print(f"  [AVISO] BD(MSCI) hoja '{self.sheet}': {dup} Client_ID "
+                      f"duplicados (el MATCH tomará el primero).")
+
+        self.df = df
+        if self.verbose:
+            print(f"  [Módulo 6] BD(MSCI) hoja '{self.sheet}' -> {df.shape[0]} filas "
+                  f"x {df.shape[1]} cols.")
+        return df
+
+    # ---- Derivaciones (fórmulas col A / W / X) -----------------------------
+    @staticmethod
+    def _deriv_a(client1) -> Optional[str]:
+        """A = RIGHT(LEFT(client1,6),4)."""
+        s = _to_string(client1)
+        if s in (None, ""):
+            return None
+        return s[:6][-4:]  # LEFT 6, luego RIGHT 4
+
+    @staticmethod
+    def _plus(cat) -> str:
+        c = (_to_string(cat) or "").upper()
+        if c in ("ETF_ETY", "ETF_SOV"):
+            return "ETF"
+        if c == "RF_SOV":
+            return "SOV"
+        if c == "-":
+            return "Cuestionario Integra"
+        return "Portafolio"
+
+    @staticmethod
+    def _plus1(cat, w: str) -> str:
+        c = (_to_string(cat) or "").upper()
+        if c == "ETF_ETY":
+            return "Otros ETFs"
+        if c == "ETF_SOV":
+            return "Soberanos"
+        return w
+
+    # ---- Lookups para consumidores (Valorización / T-1) --------------------
+    def as_intensidad_lookup(self) -> Dict[str, float]:
+        """Client_ID -> CO2/Debt(Intensidad). Base para Valorización.AJ y para
+        que los proxies sobrescriban por Client_ID (Módulo 9)."""
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de as_intensidad_lookup().")
+        tmp = self.df[[BD_COL_CLIENT_ID, BD_COL_INTENSIDAD]].dropna(
+            subset=[BD_COL_CLIENT_ID]).drop_duplicates(BD_COL_CLIENT_ID, keep="first")
+        return dict(zip(tmp[BD_COL_CLIENT_ID], tmp[BD_COL_INTENSIDAD]))
+
+    def as_plus_lookup(self) -> Dict[str, dict]:
+        """Client_ID -> {Plus, Plus_1}. Para Valorización.AQ/AR."""
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de as_plus_lookup().")
+        tmp = self.df[[BD_COL_CLIENT_ID, BD_COL_PLUS, BD_COL_PLUS_1]].dropna(
+            subset=[BD_COL_CLIENT_ID]).drop_duplicates(BD_COL_CLIENT_ID, keep="first")
+        return tmp.set_index(BD_COL_CLIENT_ID).to_dict("index")
+
+    # ---- Blindaje / validación --------------------------------------------
+    def _validate_header_order(self, header: List) -> None:
+        """Compara los headers detectados vs el orden esperado A:U y avisa."""
+        if not self.verbose:
+            return
+        problemas = []
+        for pos, canon in enumerate(BASE_MSCI_SOURCE_COLS):
+            detectado = _normalize(header[pos]) if pos < len(header) else ""
+            aliases = {_normalize(canon)} | {_normalize(a) for a in BASE_MSCI_ALIASES.get(canon, [])}
+            ok = any(a and (a == detectado or a in detectado or detectado in a) for a in aliases)
+            if not ok:
+                problemas.append(f"pos {pos} (col {chr(65+pos) if pos < 26 else '?'}): "
+                                 f"esperaba '{canon}', encontré '{header[pos]}'")
+        if problemas:
+            print("  [AVISO] BD(MSCI): el orden de columnas de Base MSCI podría haber "
+                  "cambiado. Revisa (construyo por posición A:U):")
+            for p in problemas:
+                print(f"          - {p}")
+
+    def _guard_file(self) -> None:
+        if not self.path:
+            raise ValueError("Config no define path_base_msci.")
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(
+                f"No encuentro Base MSCI (Sob+ETF+BU).xlsx en:\n  {self.path}"
+            )
+
+    @staticmethod
+    def _resolve_sheet(available: List[str], wanted: str) -> Optional[str]:
+        # R11: match EXACTO de hoja (yyyymm). Sin fuzzy para no tomar un semestre erróneo.
+        return wanted if wanted in available else None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 7 — BD MSCI (T-1)                                                  #
+#   Reutiliza BDMSCIBuilder sobre la hoja del semestre ANTERIOR (base_msci_    #
+#   sheet_t1, p.ej. 202512). Lo único que consume Valorización.AS es la        #
+#   intensidad por Client_ID, así que se expone ese lookup.                    #
+#     AS (CO2 T-1) = IFERROR(INDEX('BD MSCI (T-1)'!T, MATCH(CODIGO_ISIN...)),  #
+#                            MATCH(CODIGO_SBS...))                             #
+#   NOTA: los proxies NO se aplican al T-1 (es la foto histórica cerrada).     #
+#                                                                             #
+###############################################################################
+
+class BDMSCITMinus1:
+    """BD(MSCI) del semestre anterior. Fina capa sobre BDMSCIBuilder.
+
+    Devuelve el DataFrame completo (por si se quiere exportar/auditar) pero su
+    salida principal es as_intensidad_lookup(): Client_ID -> Intensidad T-1,
+    que alimenta Valorización.AS. No se le aplican proxies.
+    """
+
+    def __init__(self, config: Config, verbose: bool = True):
+        self.config = config
+        self.sheet_t1 = getattr(config, "base_msci_sheet_t1", None)
+        self.verbose = verbose
+        self._builder: Optional[BDMSCIBuilder] = None
+        self.df: Optional[pd.DataFrame] = None
+
+    def build(self) -> pd.DataFrame:
+        if self.verbose:
+            print(f"  [Módulo 7] BD MSCI (T-1): usando hoja '{self.sheet_t1}' "
+                  f"(semestre anterior).")
+        # Reutiliza el Módulo 6 apuntando a la hoja T-1.
+        self._builder = BDMSCIBuilder(self.config, sheet=self.sheet_t1,
+                                      verbose=self.verbose)
+        self.df = self._builder.build()
+        return self.df
+
+    def as_intensidad_lookup(self) -> Dict[str, float]:
+        """Client_ID -> CO2/Debt(Intensidad) del T-1. Alimenta Valorización.AS."""
+        if self._builder is None:
+            raise RuntimeError("Llama build() antes de as_intensidad_lookup().")
+        return self._builder.as_intensidad_lookup()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 8 — PERDIERON HUELLA (INPUT MANUAL)                                #
+#   Bloque tipo reporte BD(MSCI), SIN header. Orden de columnas FIJO (R7).     #
+#   Vive como hoja 'Perdieron Huella' dentro del workbook (.xlsm).             #
+#   Datos desde FILA 1. Se lee por POSICIÓN, no se infiere por contenido.      #
+#                                                                             #
+#   ORDEN FIJO DOCUMENTADO (23 columnas, igual que el bloque BD(MSCI) fuente): #
+#     0 Nombre | 1 Client_ID(ISIN) | 2 client1 | 3 client2 | 4 Valor |         #
+#     5 País | 6 Sector | 7 EVIC | 8 CO2 | 9 CO2/EVIC | 10 ESG | 11 E |         #
+#     12 S | 13 G | 14 Controversia | 15 Co2/Sales | 16 Gov_pctl | 17 Rating | #
+#     18 CO2/Debt(Intensidad) | 19 %DebtPub | 20 CAT | 21 Plus | 22 Plus_1     #
+#   (ej. fila: 2051 | Cementos Pacasmayo | US15126Q2084 | ... | 2525.98)       #
+#   Llaves de salida: Client_ID (ISIN) -> CO2/Debt(Intensidad).                #
+#   Si la hoja/archivo no existe: DataFrame vacío + aviso (no aborta).         #
+#                                                                             #
+###############################################################################
+
+SHEET_PERDIERON_HUELLA = "Perdieron Huella"
+
+# Orden FIJO documentado (R7). NO se resuelve por nombre: input manual sin header.
+PERDIERON_HUELLA_COLS: List[str] = [
+    "Nombre", "Client_ID", "client1", "client2", "Valor", "País", "Sector",
+    "EVIC", "CO2", "CO2/EVIC", "ESG", "E", "S", "G", "Controversia",
+    "Co2/Sales", "Gov_pctl", "Rating", "CO2/Debt(Intensidad)", "%DebtPub",
+    "CAT", "Plus", "Plus_1",
+]
+PH_COL_CLIENT_ID = "Client_ID"
+PH_COL_INTENSIDAD = "CO2/Debt(Intensidad)"
+
+
+class PerdieronHuellaLoader:
+    """Lee la hoja 'Perdieron Huella' (input manual, sin header, orden fijo).
+
+    Devuelve un DataFrame con las 23 columnas documentadas. Si la hoja no existe
+    o está vacía, devuelve un DataFrame vacío con esas columnas y avisa: el
+    pipeline debe poder correr sin este input (es opcional/manual).
+    """
+
+    def __init__(self, config: Config, verbose: bool = True,
+                 sheet: str = SHEET_PERDIERON_HUELLA,
+                 first_data_row: int = 1):
+        self.config = config
+        self.path = getattr(config, "path_workbook", None)
+        self.sheet = sheet
+        self.first_data_row = first_data_row  # datos desde fila 1 (sin header)
+        self.verbose = verbose
+        self.df: Optional[pd.DataFrame] = None
+
+    def build(self) -> pd.DataFrame:
+        empty = pd.DataFrame(columns=PERDIERON_HUELLA_COLS)
+
+        if not self.path or not os.path.exists(self.path):
+            if self.verbose:
+                print(f"  [Módulo 8] [AVISO] Workbook ausente; 'Perdieron Huella' "
+                      f"se omite (DataFrame vacío).")
+            self.df = empty
+            return self.df
+
+        import openpyxl
+
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            real_sheet = self._resolve_sheet(wb.sheetnames, self.sheet)
+            if real_sheet is None:
+                wb.close()
+                if self.verbose:
+                    print(f"  [Módulo 8] [AVISO] No existe la hoja "
+                          f"'{self.sheet}'. Si tienes instrumentos que perdieron "
+                          f"huella, créala con el orden fijo documentado. "
+                          f"Continúo con DataFrame vacío.")
+                self.df = empty
+                return self.df
+            ws = wb[real_sheet]
+            rows = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+        data_rows = rows[self.first_data_row - 1:]
+        n = len(PERDIERON_HUELLA_COLS)
+        registros = []
+        for row in data_rows:
+            # Recorta/rellena a las 23 posiciones fijas.
+            vals = [row[i] if i < len(row) else None for i in range(n)]
+            client_id = _to_string(vals[PERDIERON_HUELLA_COLS.index(PH_COL_CLIENT_ID)])
+            if client_id in (None, ""):
+                continue  # sin ISIN -> fila vacía/basura
+            registros.append(dict(zip(PERDIERON_HUELLA_COLS, vals)))
+
+        df = pd.DataFrame(registros, columns=PERDIERON_HUELLA_COLS)
+        if not df.empty:
+            df[PH_COL_CLIENT_ID] = df[PH_COL_CLIENT_ID].map(_to_string)
+            df[PH_COL_INTENSIDAD] = df[PH_COL_INTENSIDAD].map(_to_number)
+
+        self.df = df
+        if self.verbose:
+            print(f"  [Módulo 8] 'Perdieron Huella' -> {len(df)} instrumentos "
+                  f"(input manual, orden fijo).")
+        return df
+
+    def as_intensidad_lookup(self) -> Dict[str, float]:
+        """Client_ID -> CO2/Debt(Intensidad). Vacío si no hay input."""
+        if self.df is None:
+            raise RuntimeError("Llama build() antes de as_intensidad_lookup().")
+        if self.df.empty:
+            return {}
+        tmp = self.df[[PH_COL_CLIENT_ID, PH_COL_INTENSIDAD]].dropna(
+            subset=[PH_COL_CLIENT_ID]).drop_duplicates(PH_COL_CLIENT_ID, keep="first")
+        return dict(zip(tmp[PH_COL_CLIENT_ID], tmp[PH_COL_INTENSIDAD]))
+
+    @staticmethod
+    def _resolve_sheet(available: List[str], wanted: str) -> Optional[str]:
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 9 — PROXY ENGINE (proxies + herencia por emisor)                   #
+#   Archivo: Nueva Lista Proxies (corte MMYYYY).xlsx                          #
+#                                                                             #
+#   (A) Hojas TD / Alts / BU: bloque "Formato Reporte huella", headers FILA 3, #
+#       POSICIÓN NO FIJA -> se matchea por NOMBRE de header.                   #
+#       De cada fila se toma: Client_ID (ISIN) y CO2/Debt(Intensidad).         #
+#   (B) Hoja MSCI (headers FILA 1): tabla de referencia ETF-ISIN -> intensidad.#
+#       XLOOKUP (R6): si la intensidad de una fila TD/Alts/BU viene vacía y hay #
+#       una col de ETF-proxy, se resuelve contra MSCI por ISIN del ETF.        #
+#       En CAMINO 3 el XLOOKUP ya está materializado en CO2/Debt, así que esto #
+#       es fallback; la tabla MSCI se carga igual para auditoría.             #
+#   (C) Sobrescritura: reemplaza BD(MSCI).T (Intensidad) por Client_ID.        #
+#   (D) Herencia por emisor (R4, capa Valorización): instrumento sin huella    #
+#       cuyo GRUPO_ECONOMICO ya tiene huella en otro ISIN -> hereda. Registra  #
+#       histórico exportable.                                                  #
+#                                                                             #
+###############################################################################
+
+PROXY_SHEETS_TDALTS = ["TD", "Alts"]   # headers fila 3
+PROXY_SHEET_BU = "BU"                  # headers fila 3
+PROXY_SHEET_MSCI = "MSCI"              # headers fila 1 (tabla ETF de referencia)
+PROXY_HEADER_ROW = 3
+PROXY_MSCI_HEADER_ROW = 1
+
+# Schema mínimo para las hojas TD/Alts/BU (match por nombre; posición no fija).
+PROXY_SCHEMA: Dict[str, List[str]] = {
+    "Client_ID":              ["client_id", "clientid", "isin"],
+    "CO2/Debt(Intensidad)":   ["co2/debt(intensidad)", "co2debtintensidad",
+                               "co2/debt", "co2debt", "intensidad"],
+    "Nombre":                 ["nombre"],  # solo para el histórico de herencia
+}
+
+# Schema para la hoja MSCI de referencia (ETF-ISIN -> intensidad).
+PROXY_MSCI_SCHEMA: Dict[str, List[str]] = {
+    "ISIN":         ["client_id", "isin", "clientid"],
+    "Intensidad":   ["co2/debt(intensidad)", "co2debtintensidad", "co2/debt",
+                     "intensidad"],
+}
+
+
+class ProxyEngine:
+    """Aplica la metodología de proxies y la herencia por emisor.
+
+    Uso:
+        px = ProxyEngine(cfg).load()
+        intensidad_post = px.apply_to_bd(bd.as_intensidad_lookup())
+        # más tarde, en Módulo 10 (sobre Valorización):
+        serie_aj, hist = px.apply_inheritance(df_val, intensidad_col="CO2-H")
+    """
+
+    def __init__(self, config: Config, verbose: bool = True,
+                 etf_ref_col: Optional[str] = None):
+        """
+        etf_ref_col : nombre (canónico o alias) de la columna en TD/Alts/BU que
+                      contiene el ISIN del ETF-proxy para el XLOOKUP contra MSCI.
+                      Si None, se usa solo la intensidad ya materializada.
+        """
+        self.config = config
+        self.path = getattr(config, "path_proxies", None)
+        self.verbose = verbose
+        self.etf_ref_col = etf_ref_col
+        self.proxy_overrides: Dict[str, float] = {}   # Client_ID -> intensidad
+        self.msci_ref: Dict[str, float] = {}          # ETF-ISIN -> intensidad
+        self.df_inherited: Optional[pd.DataFrame] = None
+        self._nombre_by_isin: Dict[str, str] = {}
+
+    # ======================================================================
+    # (A)+(B) Carga del archivo de proxies
+    # ======================================================================
+    def load(self) -> "ProxyEngine":
+        self._guard_file()
+        import openpyxl
+
+        if self.etf_ref_col:
+            PROXY_SCHEMA["_ETF_REF"] = [self.etf_ref_col]
+
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            # (B) tabla MSCI de referencia (para XLOOKUP fallback / auditoría).
+            msci_sheet = self._resolve_sheet(wb.sheetnames, PROXY_SHEET_MSCI)
+            if msci_sheet is not None:
+                self.msci_ref = self._read_msci_ref(wb[msci_sheet])
+                if self.verbose:
+                    print(f"  [Módulo 9] Hoja MSCI (referencia ETF): "
+                          f"{len(self.msci_ref)} ISIN.")
+            elif self.verbose:
+                print("  [Módulo 9] [AVISO] No hay hoja 'MSCI' en el archivo de "
+                      "proxies; XLOOKUP fallback deshabilitado.")
+
+            # (A) hojas TD / Alts / BU.
+            overrides: Dict[str, float] = {}
+            xlookup_hits = 0
+            for sheet_wanted in PROXY_SHEETS_TDALTS + [PROXY_SHEET_BU]:
+                real = self._resolve_sheet(wb.sheetnames, sheet_wanted)
+                if real is None:
+                    if self.verbose:
+                        print(f"  [Módulo 9] [AVISO] Falta la hoja '{sheet_wanted}' "
+                              f"en proxies; se omite.")
+                    continue
+                filas, hits = self._read_proxy_sheet(wb[real], sheet_wanted)
+                xlookup_hits += hits
+                for cid, intens, nombre in filas:
+                    if cid in overrides:
+                        if self.verbose:
+                            print(f"  [AVISO] Client_ID {cid} repetido entre hojas de "
+                                  f"proxies; conservo el primero.")
+                        continue
+                    overrides[cid] = intens
+                    if nombre:
+                        self._nombre_by_isin[cid] = nombre
+            self.proxy_overrides = overrides
+        finally:
+            wb.close()
+
+        if self.verbose:
+            print(f"  [Módulo 9] Overrides de proxies: {len(self.proxy_overrides)} "
+                  f"Client_ID"
+                  + (f" ({xlookup_hits} resueltos por XLOOKUP contra MSCI)."
+                     if xlookup_hits else "."))
+        return self
+
+    def _read_proxy_sheet(self, ws, sheet_name: str) -> Tuple[list, int]:
+        """Devuelve [(client_id, intensidad, nombre), ...] y nº de XLOOKUP usados."""
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < PROXY_HEADER_ROW:
+            return [], 0
+        header = list(rows[PROXY_HEADER_ROW - 1])
+        data_rows = rows[PROXY_HEADER_ROW:]
+
+        mapping, faltan = _resolve_headers(header, PROXY_SCHEMA)
+        # índice -> canónico invertido
+        canon_to_idx = {canon: i for i, canon in mapping.items()}
+        need = ["Client_ID", "CO2/Debt(Intensidad)"]
+        if any(k not in canon_to_idx for k in need):
+            if self.verbose:
+                print(f"  [Módulo 9] [AVISO] Hoja '{sheet_name}': no ubico "
+                      f"{[k for k in need if k not in canon_to_idx]} por header. "
+                      f"Faltantes del schema: {faltan}")
+            return [], 0
+
+        i_cid = canon_to_idx["Client_ID"]
+        i_int = canon_to_idx["CO2/Debt(Intensidad)"]
+        i_nom = canon_to_idx.get("Nombre")
+        i_etf = canon_to_idx.get("_ETF_REF")
+
+        out, hits = [], 0
+        for row in data_rows:
+            cid = _to_string(row[i_cid]) if i_cid < len(row) else None
+            if cid in (None, ""):
+                continue
+            intens = _to_number(row[i_int]) if i_int < len(row) else None
+            # XLOOKUP fallback (R6): intensidad vacía + col ETF-ref + tabla MSCI.
+            if intens is None and i_etf is not None and self.msci_ref:
+                etf_isin = _to_string(row[i_etf]) if i_etf < len(row) else None
+                if etf_isin and etf_isin in self.msci_ref:
+                    intens = self.msci_ref[etf_isin]
+                    hits += 1
+            if intens is None:
+                continue  # sin intensidad resoluble -> no override
+            nombre = _to_string(row[i_nom]) if (i_nom is not None and i_nom < len(row)) else None
+            out.append((cid, intens, nombre))
+        return out, hits
+
+    def _read_msci_ref(self, ws) -> Dict[str, float]:
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < PROXY_MSCI_HEADER_ROW:
+            return {}
+        header = list(rows[PROXY_MSCI_HEADER_ROW - 1])
+        data_rows = rows[PROXY_MSCI_HEADER_ROW:]
+        mapping, _ = _resolve_headers(header, PROXY_MSCI_SCHEMA)
+        canon_to_idx = {canon: i for i, canon in mapping.items()}
+        if "ISIN" not in canon_to_idx or "Intensidad" not in canon_to_idx:
+            return {}
+        i_isin, i_int = canon_to_idx["ISIN"], canon_to_idx["Intensidad"]
+        ref = {}
+        for row in data_rows:
+            isin = _to_string(row[i_isin]) if i_isin < len(row) else None
+            if isin in (None, ""):
+                continue
+            val = _to_number(row[i_int]) if i_int < len(row) else None
+            if val is not None and isin not in ref:
+                ref[isin] = val
+        return ref
+
+    # ======================================================================
+    # (C) Sobrescritura de BD(MSCI).T por Client_ID
+    # ======================================================================
+    def apply_to_bd(self, bd_intensidad_lookup: Dict[str, float]) -> Dict[str, float]:
+        """Devuelve un NUEVO dict = BD(MSCI) base con overrides de proxies aplicados.
+
+        No muta el input (permite backtesting comparando antes/después).
+        """
+        merged = dict(bd_intensidad_lookup)
+        nuevos = sobrescritos = 0
+        for cid, val in self.proxy_overrides.items():
+            if cid in merged:
+                sobrescritos += 1
+            else:
+                nuevos += 1
+            merged[cid] = val
+        if self.verbose:
+            print(f"  [Módulo 9] BD(MSCI).T tras proxies: {sobrescritos} "
+                  f"sobrescritos, {nuevos} nuevos Client_ID. Total: {len(merged)}.")
+        return merged
+
+    # ======================================================================
+    # (D) Herencia por emisor — capa Valorización (R4)
+    # ======================================================================
+    def apply_inheritance(
+        self,
+        df_val: pd.DataFrame,
+        intensidad_col: str = "CO2-H",
+        isin_col: str = "CODIGO_ISIN",
+        grupo_col: str = "GRUPO_ECONOMICO",
+        nombre_col: str = "TITULO",
+    ) -> Tuple[pd.Series, pd.DataFrame]:
+        """Rellena intensidades faltantes heredando de otro ISIN del mismo
+        GRUPO_ECONOMICO que sí tenga huella. Devuelve (serie_intensidad, hist).
+
+        - Donante por grupo = primera intensidad no nula (orden estable).
+        - Solo hereda filas con intensidad nula y grupo con donante.
+        - Grupos vacíos/None no heredan.
+        - Registra histórico exportable (self.df_inherited).
+        """
+        for col in (intensidad_col, isin_col, grupo_col):
+            if col not in df_val.columns:
+                raise ValueError(f"apply_inheritance: falta la columna '{col}'.")
+
+        serie = df_val[intensidad_col].copy()
+
+        # Donante por grupo: primera intensidad no nula.
+        donantes: Dict[str, dict] = {}
+        multi_valor = []
+        for grupo, sub in df_val.groupby(grupo_col, dropna=True):
+            g = _to_string(grupo)
+            if g in (None, ""):
+                continue
+            con_huella = sub[sub[intensidad_col].notna()]
+            if con_huella.empty:
+                continue
+            distintos = con_huella[intensidad_col].nunique()
+            if distintos > 1:
+                multi_valor.append(g)
+            fila0 = con_huella.iloc[0]
+            donantes[g] = {
+                "intensidad": fila0[intensidad_col],
+                "isin_donante": _to_string(fila0.get(isin_col)),
+            }
+
+        registros = []
+        for idx, row in df_val.iterrows():
+            if pd.notna(row[intensidad_col]):
+                continue
+            g = _to_string(row.get(grupo_col))
+            if g in (None, "") or g not in donantes:
+                continue
+            d = donantes[g]
+            serie.at[idx] = d["intensidad"]
+            registros.append({
+                "GRUPO_ECONOMICO": g,
+                "ISIN_heredado": _to_string(row.get(isin_col)),
+                "Nombre": _to_string(row.get(nombre_col)),
+                "ISIN_donante": d["isin_donante"],
+                "Intensidad_heredada": d["intensidad"],
+            })
+
+        hist = pd.DataFrame(
+            registros,
+            columns=["GRUPO_ECONOMICO", "ISIN_heredado", "Nombre",
+                     "ISIN_donante", "Intensidad_heredada"],
+        )
+        self.df_inherited = hist
+
+        if self.verbose:
+            print(f"  [Módulo 9] Herencia por emisor: {len(hist)} instrumentos "
+                  f"heredaron huella de su GRUPO_ECONOMICO.")
+            if multi_valor:
+                print(f"  [AVISO] {len(multi_valor)} grupos tienen intensidades "
+                      f"distintas entre sus ISIN; heredé la primera. Ej: "
+                      f"{multi_valor[:5]}")
+        return serie, hist
+
+    def get_inherited_history(self) -> pd.DataFrame:
+        """Histórico exportable de instrumentos que heredaron huella."""
+        return self.df_inherited if self.df_inherited is not None \
+            else pd.DataFrame(columns=["GRUPO_ECONOMICO", "ISIN_heredado",
+                                       "Nombre", "ISIN_donante",
+                                       "Intensidad_heredada"])
+
+    # ---- Blindaje / helpers ------------------------------------------------
+    def _guard_file(self) -> None:
+        mmyyyy = getattr(self.config, "mmyyyy", "MMYYYY")
+        if not self.path:
+            raise ValueError("Config no define path_proxies.")
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(
+                f"No encuentro el archivo de proxies (tu tarea manual): deposita\n"
+                f"  'Nueva Lista Proxies (corte {mmyyyy}).xlsx'\n"
+                f"en la ruta:\n  {self.path}"
+            )
+
+    @staticmethod
+    def _resolve_sheet(available: List[str], wanted: str) -> Optional[str]:
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 11 — FINAL (pivots sobre Valorización)                             #
+#   Replica las pivot tables de la hoja 'Final'. Campos-valor (R8):            #
+#     'Sum of Inv MM$'        = SUM(Inv MM$ / AD)                              #
+#     'Emisiones Financiadas' = SUM(Huella / AK)      (col existente, renombre)#
+#     ' Intensidad'           = SUM(Intensidad / AL)  (OJO: espacio inicial)   #
+#   Ejes del spec: Plus x Plus_1  y  PORTAFOLIO (IN-FONDO0..3).                #
+#   GETPIVOTDATA del Excel apunta a estos cruces; aquí se materializan como     #
+#   DataFrames independientes para exportar y para el dashboard.              #
+#                                                                             #
+###############################################################################
+
+# Campos-valor (columna origen en Valorización -> nombre en el pivot, R8).
+FINAL_VALUE_FIELDS = {
+    V_AD: "Sum of Inv MM$",          # Inv MM$
+    V_AK: "Emisiones Financiadas",   # Huella   (renombre)
+    V_AL: " Intensidad",             # Intensidad (con ESPACIO inicial, tal cual spec)
+}
+
+
+class FinalPivots:
+    """Construye los pivots de 'Final' a partir del DataFrame Valorización.
+
+    Salidas (todas DataFrames):
+      by_plus         : índice Plus x columnas Plus_1, para cada campo-valor.
+      by_portafolio   : índice PORTAFOLIO, para cada campo-valor.
+      by_plus_flat    : versión long (Plus, Plus_1, campo, valor) para el dashboard.
+      totales         : fila de totales por campo-valor (incluye AU4 = total Huella).
+    """
+
+    def __init__(self, df_val: pd.DataFrame,
+                 plus_col: str = V_AQ, plus1_col: str = V_AR,
+                 portafolio_col: str = "PORTAFOLIO",
+                 verbose: bool = True):
+        self.df = df_val
+        self.plus_col = plus_col
+        self.plus1_col = plus1_col
+        self.portafolio_col = portafolio_col
+        self.verbose = verbose
+        self.by_plus: Dict[str, pd.DataFrame] = {}
+        self.by_portafolio: Optional[pd.DataFrame] = None
+        self.by_plus_flat: Optional[pd.DataFrame] = None
+        self.totales: Optional[pd.DataFrame] = None
+
+    def build(self) -> "FinalPivots":
+        self._require([self.plus_col, self.plus1_col, self.portafolio_col,
+                       V_AD, V_AK, V_AL])
+        df = self.df.copy()
+
+        # Asegurar numéricos en los campos-valor.
+        for src in FINAL_VALUE_FIELDS:
+            df[src] = pd.to_numeric(df[src], errors="coerce")
+
+        # --- Pivot Plus x Plus_1, un DataFrame por campo-valor --------------
+        for src, nombre in FINAL_VALUE_FIELDS.items():
+            piv = pd.pivot_table(
+                df, index=self.plus_col, columns=self.plus1_col,
+                values=src, aggfunc="sum", fill_value=0.0, margins=True,
+                margins_name="Total",
+            )
+            self.by_plus[nombre] = piv
+
+        # --- Pivot por PORTAFOLIO ------------------------------------------
+        self.by_portafolio = pd.pivot_table(
+            df, index=self.portafolio_col,
+            values=list(FINAL_VALUE_FIELDS.keys()),
+            aggfunc="sum", fill_value=0.0, margins=True, margins_name="Total",
+        ).rename(columns=FINAL_VALUE_FIELDS)
+
+        # --- Versión long (para dashboard/exports) -------------------------
+        flats = []
+        for src, nombre in FINAL_VALUE_FIELDS.items():
+            g = (df.groupby([self.plus_col, self.plus1_col], dropna=False)[src]
+                   .sum().reset_index())
+            g["campo"] = nombre
+            g = g.rename(columns={src: "valor"})
+            flats.append(g[[self.plus_col, self.plus1_col, "campo", "valor"]])
+        self.by_plus_flat = pd.concat(flats, ignore_index=True)
+
+        # --- Totales por campo (incluye AU4 = total Huella) ----------------
+        tot = {nombre: float(df[src].sum()) for src, nombre in FINAL_VALUE_FIELDS.items()}
+        self.totales = pd.DataFrame([tot])
+        if self.verbose:
+            print(f"  [Módulo 11] Final: pivots Plus×Plus_1 y por PORTAFOLIO. "
+                  f"Total Huella (AU4) = {tot['Emisiones Financiadas']:,.2f}")
+        return self
+
+    def getpivotdata(self, campo: str, plus: str, plus_1: str) -> float:
+        """Emula GETPIVOTDATA(campo, Plus, Plus_1) del Excel. 0.0 si no existe."""
+        piv = self.by_plus.get(campo)
+        if piv is None:
+            raise ValueError(f"Campo desconocido '{campo}'. Usa: "
+                             f"{list(FINAL_VALUE_FIELDS.values())}")
+        try:
+            return float(piv.loc[plus, plus_1])
+        except (KeyError, TypeError):
+            return 0.0
+
+    def as_dict(self) -> Dict[str, pd.DataFrame]:
+        """Bundle para el Módulo 13 (exports) y Módulo 14 (dashboard)."""
+        out = {f"Final_{k}": v for k, v in self.by_plus.items()}
+        out["Final_by_PORTAFOLIO"] = self.by_portafolio
+        out["Final_flat"] = self.by_plus_flat
+        out["Final_totales"] = self.totales
+        return out
+
+    def _require(self, cols: List[str]) -> None:
+        faltan = [c for c in cols if c not in self.df.columns]
+        if faltan:
+            raise ValueError(f"FinalPivots: faltan columnas {faltan}. "
+                             f"¿Corriste el Módulo 10? Disponibles: {list(self.df.columns)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################################
+#                                                                             #
+#   MÓDULO 12 — PRESENTACIÓN (pivots del comité + Market Cap AUM)             #
+#                                                                             #
+#   (A) MarketCapLoader: lee Market Cap.xlsx (hojas MKT=CUR_MKT_CAP y          #
+#       Assets=FUND_TOTAL_ASSETS). Headers de tickers en FILA 2; col A FECHA = #
+#       EOMONTH(B,-1)+1 pero se usa col B como FECHA EFECTIVA. R10: tomar la    #
+#       fila de CIERRE del semestre (30-jun / 31-dic) por col B.               #
+#       Tickers benchmark: IEMG/CEMB/ILF/ACWI/EEM/EMB/SWDA US Equity.          #
+#                                                                             #
+#   (B) PresentacionBuilder: cortes sobre Valorización para los charts (R9):    #
+#       - Serie temporal Huella/Intensidad (métricas y metas)                 #
+#       - Por SECTOR y por PAÍS (portafolio local)  [COLUMN_STACKED]          #
+#       - Benchmark por PAÍS (usa AUM de Market Cap)                          #
+#       - Rating ASG (LEADER/AVERAGE/LAGGARD/No coberturado) + cobertura IN/EX  #
+#       - Menores contribuyentes al rating por emisor [COLUMN_CLUSTERED]       #
+#       - Controversias e Inversión Temática [PIE]                            #
+#                                                                             #
+###############################################################################
+
+MKT_SHEET_CAP = "MKT"        # CUR_MKT_CAP
+MKT_SHEET_ASSETS = "Assets"  # FUND_TOTAL_ASSETS
+MKT_HEADER_ROW = 2           # tickers en fila 2
+MKT_DATE_COL_EFECTIVA = "B"  # fecha efectiva (col B)
+
+# Benchmarks de interés (se resuelven por contains sobre el header del ticker).
+BENCHMARK_TICKERS = ["IEMG", "CEMB", "ILF", "ACWI", "EEM", "EMB", "SWDA"]
+
+
+class MarketCapLoader:
+    """Extrae el AUM (market cap / total assets) de benchmarks en la fila de
+    cierre del semestre. Devuelve {ticker -> valor} para MKT y para Assets."""
+
+    def __init__(self, config: Config, verbose: bool = True):
+        self.config = config
+        self.path = getattr(config, "path_market_cap", None)
+        self.semestre = getattr(config, "semestre", None)
+        self.b1 = getattr(config, "b1_yyyymmdd", None)   # yyyymmdd del cierre
+        self.verbose = verbose
+        self.mkt_cap: Dict[str, float] = {}
+        self.assets: Dict[str, float] = {}
+
+    def build(self) -> "MarketCapLoader":
+        self._guard_file()
+        import openpyxl
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            s_cap = self._resolve_sheet(wb.sheetnames, MKT_SHEET_CAP)
+            s_ast = self._resolve_sheet(wb.sheetnames, MKT_SHEET_ASSETS)
+            if s_cap is not None:
+                self.mkt_cap = self._read_sheet_closing_row(wb[s_cap], "MKT")
+            elif self.verbose:
+                print(f"  [Módulo 12] [AVISO] No hay hoja '{MKT_SHEET_CAP}'.")
+            if s_ast is not None:
+                self.assets = self._read_sheet_closing_row(wb[s_ast], "Assets")
+            elif self.verbose:
+                print(f"  [Módulo 12] [AVISO] No hay hoja '{MKT_SHEET_ASSETS}'.")
+        finally:
+            wb.close()
+        if self.verbose:
+            print(f"  [Módulo 12] Market Cap: {len(self.mkt_cap)} tickers MKT, "
+                  f"{len(self.assets)} tickers Assets (fila cierre {self.b1}).")
+        return self
+
+    def _read_sheet_closing_row(self, ws, tag: str) -> Dict[str, float]:
+        """Ubica la fila cuyo col B == cierre del semestre y extrae los tickers."""
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) <= MKT_HEADER_ROW:
+            return {}
+        header = list(rows[MKT_HEADER_ROW - 1])
+        data_rows = rows[MKT_HEADER_ROW:]
+
+        # Fecha objetivo (cierre del semestre) desde b1_yyyymmdd.
+        target = None
+        if self.b1 and len(self.b1) == 8:
+            target = date(int(self.b1[:4]), int(self.b1[4:6]), int(self.b1[6:8]))
+
+        # Mapear tickers de interés -> índice de columna (por contains).
+        col_of = {}
+        for i, h in enumerate(header):
+            hn = _normalize(h)
+            for tk in BENCHMARK_TICKERS:
+                if _normalize(tk) in hn and tk not in col_of:
+                    col_of[tk] = i
+        idx_b = _col_letter_to_idx(MKT_DATE_COL_EFECTIVA) - 1  # col B efectiva (0-based)
+
+        # Buscar la fila de cierre; si no hay match exacto, usar la última con datos.
+        chosen = None
+        last_valid = None
+        for row in data_rows:
+            fecha = _to_date(row[idx_b]) if idx_b < len(row) else None
+            if fecha is not None:
+                last_valid = row
+                if target is not None and isinstance(fecha, date) and fecha == target:
+                    chosen = row
+                    break
+        if chosen is None:
+            if self.verbose:
+                print(f"  [Módulo 12] [AVISO] {tag}: no encontré fila con fecha "
+                      f"{target}; uso la última fila con fecha válida.")
+            chosen = last_valid
+        if chosen is None:
+            return {}
+
+        out = {}
+        for tk, i in col_of.items():
+            val = _to_number(chosen[i]) if i < len(chosen) else None
+            if val is not None:
+                out[tk] = val
+        return out
+
+    def get_aum(self, ticker: str, source: str = "MKT") -> Optional[float]:
+        d = self.mkt_cap if source.upper() == "MKT" else self.assets
+        return d.get(ticker.upper())
+
+    def _guard_file(self) -> None:
+        if not self.path:
+            raise ValueError("Config no define path_market_cap.")
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(f"No encuentro Market Cap.xlsx en:\n  {self.path}")
+
+    @staticmethod
+    def _resolve_sheet(available: List[str], wanted: str) -> Optional[str]:
+        if wanted in available:
+            return wanted
+        target = _normalize(wanted)
+        for name in available:
+            if _normalize(name) == target:
+                return name
+        return None
+
+
+class PresentacionBuilder:
+    """Cortes sobre Valorización para los gráficos del comité (R9).
+
+    Cada método devuelve un DataFrame listo para el dashboard (Módulo 14).
+    Los buckets de sector/país/rating se parametrizan para poder ajustarlos
+    sin tocar la lógica.
+    """
+
+    # Buckets del spec (case-insensitive; el resto cae en 'Otros'/'No coberturado').
+    SECTOR_BUCKETS = ["Materials", "Utilities", "RF", "RF Proxies"]
+    PAIS_LOCAL_BUCKETS = ["Perú", "Brasil", "México", "Chile"]
+    PAIS_BENCH_BUCKETS = ["Perú", "EEUU", "Brasil", "Colombia"]
+    RATING_BUCKETS = ["LEADER", "AVERAGE", "LAGGARD", "No coberturado"]
+
+    def __init__(self, df_val: pd.DataFrame,
+                 market_cap: Optional[MarketCapLoader] = None,
+                 verbose: bool = True,
+                 huella_col: str = V_AK, intensidad_col: str = V_AL,
+                 sector_col: str = "Sector", pais_col: str = "País",
+                 rating_col: str = "Rating", emisor_col: str = "GRUPO_ECONOMICO",
+                 controversia_col: str = "Controversia"):
+        self.df = df_val
+        self.mkt = market_cap
+        self.verbose = verbose
+        self.huella_col = huella_col
+        self.intensidad_col = intensidad_col
+        self.sector_col = sector_col
+        self.pais_col = pais_col
+        self.rating_col = rating_col
+        self.emisor_col = emisor_col
+        self.controversia_col = controversia_col
+        self.out: Dict[str, pd.DataFrame] = {}
+
+    # ---- helpers de bucketing ---------------------------------------------
+    @staticmethod
+    def _bucket(value, buckets: List[str], default: str = "Otros") -> str:
+        v = _to_string(value)
+        if v is None:
+            return default
+        vn = _normalize(v)
+        for b in buckets:
+            if _normalize(b) == vn or _normalize(b) in vn:
+                return b
+        return default
+
+    def _stacked_by(self, dim_col: str, buckets: List[str], default="Otros") -> pd.DataFrame:
+        """Huella e Intensidad apiladas por bucket de una dimensión."""
+        if dim_col not in self.df.columns:
+            if self.verbose:
+                print(f"  [Módulo 12] [AVISO] falta '{dim_col}'; corte omitido.")
+            return pd.DataFrame(columns=["bucket", "Huella", "Intensidad"])
+        df = self.df.copy()
+        df["_bucket"] = df[dim_col].map(lambda x: self._bucket(x, buckets, default))
+        g = df.groupby("_bucket").agg(
+            Huella=(self.huella_col, lambda s: pd.to_numeric(s, errors="coerce").sum()),
+            Intensidad=(self.intensidad_col, lambda s: pd.to_numeric(s, errors="coerce").sum()),
+        ).reset_index().rename(columns={"_bucket": "bucket"})
+        # Orden: buckets definidos primero, luego el default.
+        orden = {b: i for i, b in enumerate(buckets + [default])}
+        g["_o"] = g["bucket"].map(lambda b: orden.get(b, 999))
+        return g.sort_values("_o").drop(columns="_o").reset_index(drop=True)
+
+    # ---- cortes del comité -------------------------------------------------
+    def portafolio_por_sector(self) -> pd.DataFrame:
+        d = self._stacked_by(self.sector_col, self.SECTOR_BUCKETS)
+        self.out["local_por_sector"] = d
+        return d
+
+    def portafolio_por_pais(self) -> pd.DataFrame:
+        d = self._stacked_by(self.pais_col, self.PAIS_LOCAL_BUCKETS)
+        self.out["local_por_pais"] = d
+        return d
+
+    def rating_asg(self, cobertura_col: Optional[str] = None) -> pd.DataFrame:
+        """Huella/Intensidad por bucket de Rating + cobertura IN/EX si se indica."""
+        d = self._stacked_by(self.rating_col, self.RATING_BUCKETS,
+                             default="No coberturado")
+        self.out["rating_asg"] = d
+        return d
+
+    def menores_contribuyentes(self, top_n: int = 10) -> pd.DataFrame:
+        """Emisores con menor rating/mayor contribución negativa (clustered)."""
+        if self.emisor_col not in self.df.columns:
+            return pd.DataFrame(columns=["emisor", "Huella", "Intensidad"])
+        df = self.df.copy()
+        g = df.groupby(self.emisor_col).agg(
+            Huella=(self.huella_col, lambda s: pd.to_numeric(s, errors="coerce").sum()),
+            Intensidad=(self.intensidad_col, lambda s: pd.to_numeric(s, errors="coerce").sum()),
+        ).reset_index().rename(columns={self.emisor_col: "emisor"})
+        g = g.sort_values("Huella", ascending=False).head(top_n).reset_index(drop=True)
+        self.out["menores_contribuyentes"] = g
+        return g
+
+    def controversias(self) -> pd.DataFrame:
+        """Distribución para PIE de controversias."""
+        if self.controversia_col not in self.df.columns:
+            return pd.DataFrame(columns=["categoria", "conteo"])
+        s = self.df[self.controversia_col].map(_to_string).fillna("Sin dato")
+        g = s.value_counts().reset_index()
+        g.columns = ["categoria", "conteo"]
+        self.out["controversias"] = g
+        return g
+
+    def benchmark_por_pais(self, ticker: str = "EMB",
+                           pais_pesos: Optional[Dict[str, float]] = None) -> pd.DataFrame:
+        """Vista de benchmark por país escalada por su AUM (Market Cap).
+
+        pais_pesos: composición %país del benchmark (input externo). Si None,
+        solo devuelve el AUM total del ticker para que el dashboard lo use.
+        """
+        aum = self.mkt.get_aum(ticker) if self.mkt else None
+        if aum is None and self.verbose:
+            print(f"  [Módulo 12] [AVISO] Sin AUM para '{ticker}' en Market Cap.")
+        if not pais_pesos:
+            d = pd.DataFrame([{"ticker": ticker, "AUM": aum}])
+        else:
+            d = pd.DataFrame([
+                {"ticker": ticker, "pais": self._bucket(p, self.PAIS_BENCH_BUCKETS),
+                 "peso": w, "AUM_pais": (aum * w if aum is not None else None)}
+                for p, w in pais_pesos.items()
+            ])
+        self.out[f"benchmark_{ticker}_por_pais"] = d
+        return d
+
+    def build_all(self) -> Dict[str, pd.DataFrame]:
+        self.portafolio_por_sector()
+        self.portafolio_por_pais()
+        self.rating_asg()
+        self.menores_contribuyentes()
+        self.controversias()
+        if self.mkt is not None:
+            self.benchmark_por_pais()
+        if self.verbose:
+            print(f"  [Módulo 12] Presentación: {len(self.out)} cortes listos "
+                  f"para el dashboard.")
+        return self.out
+
+    def as_dict(self) -> Dict[str, pd.DataFrame]:
+        return self.out
+
