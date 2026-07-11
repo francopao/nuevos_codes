@@ -1,0 +1,405 @@
+# -*- coding: utf-8 -*-
+r"""
+config.py — MÓDULO 0 del pipeline Huella de Carbono ESG (AFP Integra)
+=====================================================================
+
+Fuente de verdad estructural: SPEC_workbook.md (proyecto).
+Este módulo NO abre los Excel de negocio para transformarlos; solo:
+  - deriva SEMESTRE -> rutas Z:\ + fechas embebidas,
+  - blinda la existencia de cada input (os.path.exists + prints),
+  - recuerda al usuario el refresco MANUAL del query (CAMINO 3 / R2),
+  - valida (read_only, sin bloqueo) que B1 del .xlsm coincida con el SEMESTRE.
+
+Decisiones cerradas incorporadas:
+  R2  -> refresco MANUAL + lectura pasiva (openpyxl). Sin COM/xlwings.
+  R1  -> Proxies y G&P comparten el MISMO MMYYYY del semestre (062026).
+  R11 -> hojas de Base MSCI = yyyymm literal (202606 / 202512). Match exacto.
+  T-1 -> semestre anterior alternando 06<->12.
+
+Reglas de derivación (según SPEC_workbook.md):
+  SEMESTRE = "yyyymm"  (solo semestral: mm ∈ {"06","12"})
+  mm="06" -> B1 = yyyy0630 ; T-1 = (yyyy-1)12
+  mm="12" -> B1 = yyyy1231 ; T-1 = (yyyy)06
+  MMYYYY (Proxies y G&P) = mm + yyyy  (p.ej. 202606 -> "062026")
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import PureWindowsPath as Path
+from typing import Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Raíces reales en el drive de red (verificadas con el usuario).
+#   MSCI_MANAGER_ROOT  = carpeta madre "9. ESG Manager - MSCI"
+#   DATASET_ROOT       = inputs de datos (Base MSCI, G&P, Market Cap)
+#   REPORTES_ROOT      = entregables/insumos de reporte (workbook, proxies)
+# Ambas raíces son sobrescribibles en from_semestre().
+# ---------------------------------------------------------------------------
+MSCI_MANAGER_ROOT = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+)
+DATASET_ROOT_DEFAULT = MSCI_MANAGER_ROOT + r"\1.Data Histórica\Dataset"
+REPORTES_ROOT_DEFAULT = MSCI_MANAGER_ROOT + r"\2. Reportes\Medición Huella de Carbono"
+
+# Subcarpetas dentro de DATASET_ROOT (inputs de datos).
+SUBDIR_MSCI = "MSCI"                 # Base MSCI (Sob+ETF+BU).xlsx
+SUBDIR_GYP = "G&P input"             # G&P_MLab_MMYYYY.xlsm
+SUBDIR_COMPARABLES = "Comparables"   # Market Cap.xlsx
+
+# Subcarpeta dentro de REPORTES_ROOT (Proxies). El workbook va en la raíz.
+SUBDIR_PROXIES = "Huella Total  (SURA e Integra)"  # Nueva Lista Proxies (corte MMYYYY).xlsx
+
+# Nombres de archivo (con placeholders de fecha donde aplique).
+FNAME_BASE_MSCI = "Base MSCI (Sob+ETF+BU).xlsx"
+FNAME_MARKET_CAP = "Market Cap.xlsx"
+FNAME_GYP = "G&P_MLab_{mmyyyy}.xlsm"
+FNAME_PROXIES = "Nueva Lista Proxies (corte {mmyyyy}).xlsx"
+FNAME_WORKBOOK = "Reporte de la Huella(Región) con Proxies - {semestre}.xlsm"
+
+# Hoja del workbook donde vive el parámetro B1 (query Valorización).
+WORKBOOK_QUERY_SHEET = "Valorización de Instrumentos"
+WORKBOOK_B1_CELL = "B1"
+
+
+@dataclass(frozen=True)
+class Config:
+    """Configuración inmutable del pipeline para un semestre dado.
+
+    Construir SIEMPRE con Config.from_semestre(); no instanciar a mano.
+    Al ser frozen, dos corridas con el mismo SEMESTRE producen la misma
+    configuración -> reproducibilidad para backtesting.
+    """
+
+    # --- Identidad temporal -------------------------------------------------
+    semestre: str          # "yyyymm" del semestre en revisión (p.ej. "202606")
+    anio: int              # 2026
+    mm: str                # "06" | "12"
+    b1_yyyymmdd: str       # parámetro esperado en workbook!B1 (p.ej. "20260630")
+    mmyyyy: str            # MMYYYY compartido por Proxies y G&P (p.ej. "062026")
+    semestre_t1: str       # semestre anterior "yyyymm" (p.ej. "202512")
+
+    # --- Hojas de Base MSCI (match exacto, R11) -----------------------------
+    base_msci_sheet: str       # = semestre     (p.ej. "202606")
+    base_msci_sheet_t1: str    # = semestre_t1  (p.ej. "202512")
+
+    # --- Rutas absolutas de cada input --------------------------------------
+    dataset_root: str
+    reportes_root: str         # raíz de "2. Reportes\Medición Huella de Carbono"
+    path_base_msci: str        # Base MSCI (Sob+ETF+BU).xlsx
+    path_gyp: str              # G&P_MLab_MMYYYY.xlsm
+    path_market_cap: str       # Market Cap.xlsx
+    path_proxies: str          # Nueva Lista Proxies (corte MMYYYY).xlsx
+    path_workbook: str         # Reporte de la Huella ... .xlsm (query base)
+
+    # Etiquetas humanas por input, para mensajes de blindaje.
+    _labels: Dict[str, str] = field(default_factory=dict, compare=False, repr=False)
+
+    # =========================================================================
+    # Fábrica principal
+    # =========================================================================
+    @classmethod
+    def from_semestre(
+        cls,
+        semestre: str,
+        dataset_root: str = DATASET_ROOT_DEFAULT,
+        reportes_root: str = REPORTES_ROOT_DEFAULT,
+        *,
+        path_workbook: Optional[str] = None,
+        path_proxies: Optional[str] = None,
+    ) -> "Config":
+        r"""Deriva toda la configuración a partir de SEMESTRE='yyyymm'.
+
+        Parámetros
+        ----------
+        semestre : str
+            Cierre del semestre en formato 'yyyymm'. Solo mm en {'06','12'}.
+        dataset_root : str
+            Raíz Z:\...\1.Data Histórica\Dataset (Base MSCI, G&P, Market Cap).
+        reportes_root : str
+            Raíz Z:\...\2. Reportes\Medición Huella de Carbono (workbook, proxies).
+        path_workbook, path_proxies : str, opcional
+            Overrides explícitos de esas rutas (ganan sobre las raíces).
+        """
+        semestre = str(semestre).strip()
+
+        # ---- Validación de formato -----------------------------------------
+        if len(semestre) != 6 or not semestre.isdigit():
+            raise ValueError(
+                f"SEMESTRE inválido: {semestre!r}. Debe ser 'yyyymm' (6 dígitos), "
+                f"p.ej. '202606'."
+            )
+        anio = int(semestre[:4])
+        mm = semestre[4:]
+        if mm not in ("06", "12"):
+            raise ValueError(
+                f"SEMESTRE inválido: {semestre!r}. El proceso es SEMESTRAL: "
+                f"mm debe ser '06' (S1) o '12' (S2), no {mm!r}."
+            )
+        if not (2000 <= anio <= 2099):
+            raise ValueError(f"Año fuera de rango razonable: {anio}.")
+
+        # ---- Fechas derivadas ----------------------------------------------
+        # B1 = último día del mes de cierre del semestre.
+        b1_yyyymmdd = f"{anio}0630" if mm == "06" else f"{anio}1231"
+
+        # MMYYYY compartido por Proxies y G&P (R1).
+        mmyyyy = f"{mm}{anio}"
+
+        # T-1: semestre anterior alternando 06<->12.
+        if mm == "06":
+            semestre_t1 = f"{anio - 1}12"
+        else:  # mm == "12"
+            semestre_t1 = f"{anio}06"
+
+        # ---- Rutas ----------------------------------------------------------
+        root = Path(dataset_root)          # inputs de datos
+        rep = Path(reportes_root)          # workbook + proxies
+
+        p_base_msci = str(root / SUBDIR_MSCI / FNAME_BASE_MSCI)
+        p_gyp = str(root / SUBDIR_GYP / FNAME_GYP.format(mmyyyy=mmyyyy))
+        p_market_cap = str(root / SUBDIR_COMPARABLES / FNAME_MARKET_CAP)
+
+        p_proxies = (
+            path_proxies
+            if path_proxies is not None
+            else str(rep / SUBDIR_PROXIES / FNAME_PROXIES.format(mmyyyy=mmyyyy))
+        )
+        p_workbook = (
+            path_workbook
+            if path_workbook is not None
+            else str(rep / FNAME_WORKBOOK.format(semestre=semestre))
+        )
+
+        labels = {
+            "path_workbook": f"Workbook Huella (query base, B1={b1_yyyymmdd})",
+            "path_base_msci": "Base MSCI (Sob+ETF+BU).xlsx",
+            "path_gyp": f"G&P_MLab_{mmyyyy}.xlsm",
+            "path_proxies": f"Nueva Lista Proxies (corte {mmyyyy}).xlsx",
+            "path_market_cap": "Market Cap.xlsx (AUM benchmarks)",
+        }
+
+        return cls(
+            semestre=semestre,
+            anio=anio,
+            mm=mm,
+            b1_yyyymmdd=b1_yyyymmdd,
+            mmyyyy=mmyyyy,
+            semestre_t1=semestre_t1,
+            base_msci_sheet=semestre,
+            base_msci_sheet_t1=semestre_t1,
+            dataset_root=str(root),
+            reportes_root=str(rep),
+            path_base_msci=p_base_msci,
+            path_gyp=p_gyp,
+            path_market_cap=p_market_cap,
+            path_proxies=p_proxies,
+            path_workbook=p_workbook,
+            _labels=labels,
+        )
+
+    # =========================================================================
+    # Blindaje de inputs
+    # =========================================================================
+    def required_inputs(self) -> Dict[str, str]:
+        """Mapa {atributo_ruta: ruta} de los archivos que deben existir."""
+        return {
+            "path_workbook": self.path_workbook,
+            "path_base_msci": self.path_base_msci,
+            "path_gyp": self.path_gyp,
+            "path_proxies": self.path_proxies,
+            "path_market_cap": self.path_market_cap,
+        }
+
+    def check_paths(self, verbose: bool = True) -> List[str]:
+        """Verifica os.path.exists de cada input y avisa qué falta.
+
+        Devuelve la lista de claves faltantes ([] si todo OK). No lanza
+        excepción: deja que el orquestador decida abortar. Para Base MSCI
+        también valida que exista la hoja del periodo (match exacto, R11).
+        """
+        faltantes: List[str] = []
+        if verbose:
+            print("=" * 72)
+            print(f"  BLINDAJE DE INPUTS — SEMESTRE {self.semestre} "
+                  f"(B1={self.b1_yyyymmdd}, MMYYYY={self.mmyyyy}, T-1={self.semestre_t1})")
+            print("=" * 72)
+
+        for key, path in self.required_inputs().items():
+            label = self._labels.get(key, key)
+            existe = os.path.exists(path)
+            if existe:
+                if verbose:
+                    print(f"  [OK ] {label}\n         {path}")
+            else:
+                faltantes.append(key)
+                if verbose:
+                    print(f"  [FALTA] {label}")
+                    print(f"          Crea/deposita el archivo en:")
+                    print(f"          {path}")
+
+        # Validación fina de hojas dentro de Base MSCI (solo si el archivo existe).
+        if os.path.exists(self.path_base_msci):
+            self._check_base_msci_sheets(verbose=verbose, faltantes=faltantes)
+
+        if verbose:
+            print("-" * 72)
+            if faltantes:
+                print(f"  RESULTADO: faltan {len(faltantes)} input(s). "
+                      f"Corrige antes de continuar.")
+            else:
+                print("  RESULTADO: todos los inputs presentes. ✔")
+            print("=" * 72)
+        return faltantes
+
+    def _check_base_msci_sheets(self, verbose: bool, faltantes: List[str]) -> None:
+        """Confirma que existan las hojas yyyymm y yyyymm(T-1) en Base MSCI."""
+        try:
+            import openpyxl  # import perezoso: Módulo 0 no depende de openpyxl salvo aquí
+        except ImportError:
+            if verbose:
+                print("  [AVISO] openpyxl no instalado; omito verificación de hojas "
+                      "de Base MSCI. Instala con: pip install openpyxl")
+            return
+        try:
+            wb = openpyxl.load_workbook(self.path_base_msci, read_only=True)
+            hojas = set(wb.sheetnames)
+            wb.close()
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  [AVISO] No pude inspeccionar hojas de Base MSCI: {exc}")
+            return
+
+        for etiqueta, hoja in (
+            ("periodo", self.base_msci_sheet),
+            ("T-1", self.base_msci_sheet_t1),
+        ):
+            if hoja in hojas:
+                if verbose:
+                    print(f"  [OK ] Base MSCI hoja {etiqueta}: '{hoja}'")
+            else:
+                faltantes.append(f"base_msci_sheet_{etiqueta}")
+                if verbose:
+                    print(f"  [FALTA] Base MSCI NO contiene la hoja {etiqueta} '{hoja}'.")
+                    print(f"          Hojas disponibles: {sorted(hojas)}")
+
+    # =========================================================================
+    # Recordatorio de refresco manual (CAMINO 3 / R2)
+    # =========================================================================
+    def print_refresh_reminder(self) -> None:
+        """Aviso obligatorio antes de leer los queries (no hay COM/xlwings)."""
+        print("*" * 72)
+        print("  ANTES DE CORRER EL PIPELINE (refresco MANUAL de queries):")
+        print(f"    1) Abre el workbook:")
+        print(f"       {self.path_workbook}")
+        print(f"    2) En la hoja '{WORKBOOK_QUERY_SHEET}', fija "
+              f"{WORKBOOK_B1_CELL} = {self.b1_yyyymmdd}")
+        print("    3) Datos -> Actualizar todo (RefreshAll).")
+        print("    4) Guarda y CIERRA el archivo.")
+        print("  Python solo LEE la data ya materializada (openpyxl, sin bloqueo).")
+        print("*" * 72)
+
+    # =========================================================================
+    # Validación de B1 ya materializado en el workbook (read_only, sin bloqueo)
+    # =========================================================================
+    def validate_workbook_b1(self, verbose: bool = True) -> Optional[bool]:
+        """Lee workbook!B1 y compara con b1_yyyymmdd configurado.
+
+        Devuelve True si coincide, False si difiere, None si no se pudo leer
+        (archivo ausente, sin openpyxl, hoja/celda inaccesible). No lanza:
+        el orquestador decide si abortar.
+        """
+        if not os.path.exists(self.path_workbook):
+            if verbose:
+                print(f"  [AVISO] No puedo validar B1: workbook ausente en\n"
+                      f"          {self.path_workbook}")
+            return None
+        try:
+            import openpyxl
+        except ImportError:
+            if verbose:
+                print("  [AVISO] openpyxl no instalado; omito validación de B1.")
+            return None
+
+        try:
+            wb = openpyxl.load_workbook(
+                self.path_workbook, read_only=True, data_only=True
+            )
+            if WORKBOOK_QUERY_SHEET not in wb.sheetnames:
+                wb.close()
+                if verbose:
+                    print(f"  [AVISO] El workbook no tiene la hoja "
+                          f"'{WORKBOOK_QUERY_SHEET}'.")
+                return None
+            ws = wb[WORKBOOK_QUERY_SHEET]
+            raw = ws[WORKBOOK_B1_CELL].value
+            wb.close()
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  [AVISO] No pude leer B1: {exc}")
+            return None
+
+        b1_leido = self._normalize_b1(raw)
+        coincide = (b1_leido == self.b1_yyyymmdd)
+        if verbose:
+            if coincide:
+                print(f"  [OK ] B1 del workbook = {b1_leido} coincide con SEMESTRE.")
+            else:
+                print(f"  [DESAJUSTE] B1 del workbook = {b1_leido!r} pero se esperaba "
+                      f"{self.b1_yyyymmdd!r}.")
+                print(f"              Revisa el paso de refresco manual antes de leer.")
+        return coincide
+
+    @staticmethod
+    def _normalize_b1(raw) -> str:
+        """Normaliza el valor de B1 a 'yyyymmdd' venga como texto, número o fecha."""
+        if raw is None:
+            return ""
+        # Fecha real de Excel.
+        try:
+            from datetime import date, datetime
+            if isinstance(raw, (datetime, date)):
+                return raw.strftime("%Y%m%d")
+        except Exception:  # noqa: BLE001
+            pass
+        # Número (20260630.0) o texto ("20260630").
+        s = str(raw).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s
+
+    # =========================================================================
+    # Utilidades
+    # =========================================================================
+    def summary(self) -> str:
+        """Resumen legible de la configuración derivada."""
+        return (
+            f"Config(semestre={self.semestre}, B1={self.b1_yyyymmdd}, "
+            f"MMYYYY={self.mmyyyy}, T-1={self.semestre_t1}, "
+            f"base_msci_sheet='{self.base_msci_sheet}', "
+            f"base_msci_sheet_t1='{self.base_msci_sheet_t1}')"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Ejecución directa: demo de derivación + blindaje para el semestre elegido.
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    # >>> AJUSTA AQUÍ EL SEMESTRE EN REVISIÓN <<<
+    SEMESTRE = "202606"   # S1-2026. Usa "202512" para S2-2025, etc.
+
+    cfg = Config.from_semestre(SEMESTRE)
+    print(cfg.summary())
+    print()
+    cfg.print_refresh_reminder()
+    print()
+    faltantes = cfg.check_paths(verbose=True)
+    print()
+    cfg.validate_workbook_b1(verbose=True)
+
+    if faltantes:
+        print("\n>>> Hay inputs faltantes: deposita los archivos indicados y "
+              "vuelve a correr antes de lanzar los módulos 1..14.")
