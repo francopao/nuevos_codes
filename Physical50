@@ -1,0 +1,192 @@
+He revisado el script. Los cambios son 3 y todos están localizados. Te doy exactamente qué reemplazar.
+
+---
+
+## Cambio 1 — Nuevo sector "Servicios de comunicaciones" (líneas ~344‑372)
+
+Busca el bloque `SECTOR_CONSUMO = "Consumo"` (≈línea 344) y reemplaza **todo el bloque hasta `ORDEN_SECTORES`** por esto:
+
+```python
+SECTOR_CONSUMO = "Consumo"
+SECTOR_SALUD = "Salud"
+SECTOR_INFRA = "Infraestructura"
+SECTOR_EDU = "Educación"
+SECTOR_ENERGIA = "Energía"
+SECTOR_COMUNIC = "Servicios de comunicaciones"   # NUEVO
+_META_PCT = {"peso": "Distribución", "unidad": "%", "activo": "Ubicaciones",
+             "detalle": "ubicación", "pseudo": "Distribución"}
+SECTOR_META = {
+    SECTOR_MINERIA:     {"peso": "Producción", "unidad": "TMF",
+                         "activo": "Unidades mineras", "detalle": "mineral",
+                         "pseudo": None},
+    SECTOR_FINANCIERO:  {"peso": "Créditos colocados", "unidad": "Miles S/",
+                         "activo": "Oficinas/Agencias", "detalle": "colocaciones",
+                         "pseudo": "Créditos"},
+    SECTOR_UTILITIES:   {"peso": "Potencia efectiva", "unidad": "MW",
+                         "activo": "Centrales eléctricas", "detalle": "central",
+                         "pseudo": "Potencia efectiva"},
+    SECTOR_CONSTRUCCION:{"peso": "Despachos de cemento", "unidad": "MT (miles t)",
+                         "activo": "Plantas de cemento", "detalle": "planta",
+                         "pseudo": "Despachos cemento"},
+    SECTOR_CONSUMO:     dict(_META_PCT, activo="Predios / locales"),
+    SECTOR_SALUD:       dict(_META_PCT, activo="Sedes / clínicas"),
+    SECTOR_INFRA:       dict(_META_PCT, activo="Activos / concesiones"),
+    SECTOR_EDU:         dict(_META_PCT, activo="Sedes / colegios"),
+    SECTOR_ENERGIA:     dict(_META_PCT, activo="Activos / operaciones"),
+    SECTOR_COMUNIC:     dict(_META_PCT, activo="Activos / infraestructura de red"),  # NUEVO
+}
+ORDEN_SECTORES = [SECTOR_MINERIA, SECTOR_FINANCIERO, SECTOR_UTILITIES,
+                  SECTOR_CONSTRUCCION, SECTOR_CONSUMO, SECTOR_SALUD,
+                  SECTOR_INFRA, SECTOR_EDU, SECTOR_ENERGIA, SECTOR_COMUNIC]
+```
+
+**Ojo:** `SECTOR_UTILITIES` ya existe arriba (línea 267), no lo redefinas.
+
+### 1b — Reasignar las 3 empresas (líneas 408‑410)
+
+Reemplaza esas tres líneas por:
+
+```python
+    {"hoja": "Integratel",   "empresa": "Integratel",  "sector": SECTOR_COMUNIC,   "exp": ["Integratel"]},
+    {"hoja": "Luz del Sur",  "empresa": "Luz del Sur", "sector": SECTOR_UTILITIES, "exp": ["Luz del Sur"]},
+    {"hoja": "El Comercio",  "empresa": "El Comercio", "sector": SECTOR_COMUNIC,   "exp": ["El Comercio"]},
+```
+
+### 1c — Color del nuevo sector en el mapa (≈línea 4255)
+
+Dentro de `SECTOR_COLOR = { ... }`, agrega antes del cierre `}`:
+
+```python
+    "Servicios de comunicaciones": "#00A0B0",   # cyan AFP
+```
+
+---
+
+## Cambio 2 — Columnas "Score" y "Mitigantes" en las tablas post‑mapa
+
+Estas son las tablas `tbl3` (las que salen debajo del mapa, con el check "Desglosar por empresa"). Busca en el string del HTML el bloque que empieza con:
+
+```js
+// Estado del selector "Desglosar" (exclusivo de chart 3, ...
+const DESGLOSE_TBL3={};
+```
+
+Reemplaza **desde `const DESGLOSE_TBL3={};` hasta el final de la función `buildTbl3` (justo antes de `// ====... ADICIÓN 4`)** por este bloque completo:
+
+```js
+const DESGLOSE_TBL3={};
+// NUEVO: estado del botón que muestra/oculta la columna Mitigantes en tbl3
+let MOSTRAR_MITIG_TBL3=false;
+
+function toggleDesglose(hzkey, checked){
+  DESGLOSE_TBL3[hzkey]=checked;
+  const hz=HZ.find(h=>h.key===hzkey);
+  const m=MAPAS.find(x=>x.hz.key===hzkey);
+  buildTbl3(hz, m?m.filtroEmisor:null, m?m.filtroSector:null);
+}
+// NUEVO: alterna la columna Mitigantes en las 3 tablas a la vez
+function toggleMitigTbl3(){
+  MOSTRAR_MITIG_TBL3=!MOSTRAR_MITIG_TBL3;
+  HZ.forEach(hz=>{ const m=MAPAS.find(x=>x.hz.key===hz.key);
+    buildTbl3(hz, m?m.filtroEmisor:null, m?m.filtroSector:null); });
+}
+
+function buildTbl3(hz, filtroEmisor, filtroSector){
+  const wrap=document.getElementById('tbl3_'+hz.key);
+  if(!wrap) return;
+  const col=hz.col;
+  const niveles=[1,2,3,4,5];
+  const desglosar=!!DESGLOSE_TBL3[hz.key];
+
+  // NUEVO: mismos scores que la sección "Score por empresa" (ADICIÓN 4).
+  // hz.key es 'mm' | 'inu' | 'seq' -> escenario correspondiente.
+  const SC=calcScores();
+  const sKey=hz.key;
+  const scoreEmp=e=>(SC[e]&&typeof SC[e][sKey]==='number')?SC[e][sKey]:null;
+
+  const portCat={}; niveles.forEach(L=>portCat[L]=0);
+  const secCat={}, compCat={};
+  D.forEach(d=>{
+    const L=d[col];
+    if(niveles.indexOf(L)<0) return;          // sin N/D
+    (d.ap||[]).forEach(a=>{
+      const m=a.m*classFrac(a.e); if(m<=0) return;
+      const sec=EMP_SECTOR[a.e]||a.s||'(sin sector)';
+      portCat[L]+=m;
+      (secCat[sec]=secCat[sec]||{})[L]=(secCat[sec][L]||0)+m;
+      const cc=(compCat[sec]=compCat[sec]||{});
+      (cc[a.e]=cc[a.e]||{})[L]=(cc[a.e][L]||0)+m;
+    });
+  });
+
+  const sectoresDisp = filtroSector ? [filtroSector]
+    : [...new Set(Object.values(EMP_SECTOR).filter(Boolean))].sort();
+  const pc=(num,den)=> den>0 ? (num/den*100).toLocaleString('es-PE',{maximumFractionDigits:1})+'%' : '—';
+
+  // NUEVO: score del sector = promedio de los scores de sus empresas ponderado
+  // por la plata de cada empresa con score CENEPRED válido en este peligro.
+  const scoreSector=sec=>{
+    const comps=compCat[sec]||{}; let num=0, den=0;
+    Object.keys(comps).forEach(emp=>{
+      const s=scoreEmp(emp); if(s===null) return;
+      const w=niveles.reduce((t,L)=>t+(comps[emp][L]||0),0);
+      if(w>0){ num+=s*w; den+=w; }
+    });
+    return den>0 ? num/den : null;
+  };
+  const celScore=v=> v===null
+    ? '<td style="text-align:center">—</td>'
+    : '<td class="sc-cell" style="background:'+scoreBg(v)+'">'+v.toFixed(2)+'</td>';
+  const celMit=emp=> MOSTRAR_MITIG_TBL3 ? mitiCell(emp) : '';
+  const celMitVacia=()=> MOSTRAR_MITIG_TBL3 ? '<td style="text-align:center">—</td>' : '';
+
+  let html='<label class="tbl3-chk"><input type="checkbox" '+(desglosar?'checked':'')+
+           ' onchange="toggleDesglose(\''+hz.key+'\',this.checked)"> Desglosar por empresa</label>'+
+           '<button class="lyrbtn" style="margin-left:10px" onclick="toggleMitigTbl3()">'+
+           (MOSTRAR_MITIG_TBL3?'Ocultar Mitigantes':'Mostrar Mitigantes')+'</button>';
+
+  sectoresDisp.forEach(sec=>{
+    const sc=secCat[sec]; if(!sc) return;
+    const secTot=niveles.reduce((s,L)=>s+(sc[L]||0),0);
+    if(secTot<=0) return;
+    html+='<div class="tbl3-titulo">'+sec+'</div>';
+    html+='<table class="tbl3"><thead><tr><th class="idx">Riesgo</th>';
+    niveles.forEach(L=>{ html+='<th>'+L+'</th>'; });
+    html+='<th>Score</th>';                                   // NUEVO
+    if(MOSTRAR_MITIG_TBL3) html+='<th>Mitigantes</th>';       // NUEVO
+    html+='</tr></thead><tbody>';
+    if(!desglosar){
+      html+='<tr><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+celMitVacia()+'</tr>';
+    } else {
+      const comps=compCat[sec]||{};
+      Object.keys(comps).sort().forEach(emp=>{
+        const cc=comps[emp];
+        const compTot=niveles.reduce((s,L)=>s+(cc[L]||0),0);
+        if(compTot<=0) return;
+        html+='<tr><td class="idx">'+emp+'</td>';
+        niveles.forEach(L=>{ html+='<td>'+pc(cc[L]||0, compTot)+'</td>'; });
+        html+=celScore(scoreEmp(emp))+celMit(emp)+'</tr>';
+      });
+      html+='<tr class="tbl3-sector"><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+celMitVacia()+'</tr>';
+    }
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    html+='<td>—</td>'+celMitVacia()+'</tr></tbody></table>';
+  });
+
+  wrap.innerHTML = html || '<p style="font-size:11px;color:var(--plomo)">Sin exposición para este filtro.</p>';
+}
+```
+
+---
+
+## Notas de criterio (para que sepas qué estás mostrando)
+
+- **Score**: es exactamente el mismo `calcScores()` que alimenta la cuarta sección, tomando el peligro del bloque (`mm` / `inu` / `seq`). No dupliqué lógica.
+- En modo **sin desglosar** las filas son sectores, no empresas, así que la columna Score muestra el **promedio ponderado por plata** de las empresas del sector (y Mitigantes queda "—", porque un sector no tiene mitigante). El score por empresa aparece al tildar "Desglosar por empresa".
+- El botón **Mostrar/Ocultar Mitigantes** afecta las 3 tablas (Mov. de Masa, Inundación, Sequías) a la vez. Si lo prefieres independiente por peligro, avísame y lo cambio.
+- No toqué nada más: ni Excel, ni mapas, ni la cuarta sección.
