@@ -1,0 +1,100 @@
+Dos cosas: primero apretar de verdad las celdas, y luego el selector múltiple.
+
+---
+
+## 1) Eliminar el espacio sobrante en las celdas
+
+El problema es el `max-width:150px`: los headers largos ("Movimientos de Masa", "Sequías Severas") caben en esos 150px, así que la columna nunca se encoge y el valor (`2.31`) queda flotando en el medio. Hay que **forzar que el header se parta en varias líneas** con un tope mucho menor.
+
+**Busca** el bloque que pegaste antes y **reemplázalo completo** por este:
+
+```css
+ /* --- NUEVO: tablas de la última sección (Score por empresa / por sector) --- */
+ #secScores table.piv{width:auto;table-layout:auto;margin-bottom:12px;}
+ #secScores table.piv th,
+ #secScores table.piv td{
+   text-align:center;
+   vertical-align:middle;
+   white-space:normal;
+   word-break:break-word;
+   overflow-wrap:anywhere;
+   padding:6px 8px;
+   line-height:1.3;
+   width:1%;                 /* cada columna se encoge a su contenido */
+ }
+ #secScores table.piv th{font-weight:600;max-width:78px;}   /* obliga al header a partirse */
+ #secScores table.piv td{max-width:110px;}
+ #secScores .emp-h4{text-align:left;}
+```
+
+**El número a calibrar es `max-width:78px` del `th`.** Si aún ves hueco, bájalo a `62px`. Si ves que un header se parte feo (ej. "Sequí-as"), súbelo a `90px`.
+
+---
+
+## 2) "Score por sector": selector múltiple + header dinámico
+
+**Busca** la función completa `function buildScoreSector(){` y **reemplázala entera** (hasta su llave `}` de cierre, justo antes del comentario `// ====... CONTROLES`) por esta:
+
+```js
+function buildScoreSector(){
+  let col=document.getElementById('colSector');
+  if(!col){ col=document.createElement('div'); col.className='blk'; col.id='colSector';
+    document.getElementById('secScores').appendChild(col); }
+  const scores=calcScores();
+  const emisores=Object.keys(scores);
+  const sectores=[...new Set(Object.values(EMP_SECTOR).filter(Boolean))].sort();
+
+  // NUEVO: selección múltiple. Si no hay nada elegido, se muestran TODOS.
+  if(!Array.isArray(SECTOR_SEL)) SECTOR_SEL=[];
+  const mostrar = SECTOR_SEL.length ? sectores.filter(s=>SECTOR_SEL.indexOf(s)>=0)
+                                    : sectores;
+
+  const opt=sectores.map(s=>'<option value="'+s.replace(/"/g,'&quot;')+'"'+
+    (SECTOR_SEL.indexOf(s)>=0?' selected':'')+'>'+s+'</option>').join('');
+
+  // NUEVO: una tabla por sector, con el nombre del sector como primer header.
+  const tablas=mostrar.map(sec=>{
+    const filas=emisores.filter(e=>EMP_SECTOR[e]===sec)
+      .sort((a,b)=>scores[b].global-scores[a].global)
+      .map(e=>'<tr><td><b>'+e+'</b></td>'+scCell(scores[e].global)+
+              mitiCell(e)+'</tr>').join('');
+    if(!filas) return '';
+    return '<table class="piv"><thead><tr><th>'+sec+'</th>'+
+           '<th>Score Global</th><th>Mitigantes</th></tr></thead><tbody>'+
+           filas+'</tbody></table>';
+  }).join('');
+
+  col.innerHTML=
+    '<h3><span class="dot" style="background:var(--cyan)"></span>Score por sector</h3>'+
+    '<div class="scorectrls">'+
+      '<label>Sector<select multiple size="5" id="filtSect">'+opt+'</select></label>'+
+      '<button class="lyrbtn" id="btnLimpSec" style="align-self:center">Limpiar filtros</button>'+
+    '</div>'+
+    (tablas||'<p style="color:var(--plomo);font-size:12px">Sin empresas en el sector.</p>');
+
+  document.getElementById('filtSect').onchange=ev=>{
+    SECTOR_SEL=[...ev.target.selectedOptions].map(o=>o.value); buildScoreSector(); };
+  document.getElementById('btnLimpSec').onclick=()=>{
+    SECTOR_SEL=[]; buildScoreSector(); };
+}
+```
+
+### Un cambio más, obligatorio
+
+**Busca** esta línea:
+
+```js
+let EMP_SEC_SEL=[], EMP_NOM_SEL=[], SECTOR_SEL=null;
+```
+
+y cámbiala por:
+
+```js
+let EMP_SEC_SEL=[], EMP_NOM_SEL=[], SECTOR_SEL=[];
+```
+
+(Antes guardaba un solo sector; ahora guarda una lista.)
+
+---
+
+Resultado: en "Score por sector" puedes elegir varios sectores a la vez (`Ctrl+clic` para sumar, o arrastrar), y cada tabla lleva el nombre del sector en el primer header en vez de "Emisor". Sin selección → se muestran todos.
