@@ -1,0 +1,49 @@
+Entendido. Dos ajustes puntuales.
+
+## Ajuste A — Fila "AUM Total" en las tablas de la 3ª sección
+
+En la función `buildTbl3` que pegaste, cambia **solo dos cosas**:
+
+**1.** Justo después de la función `scoreSector` (la que agregamos), añade esta nueva:
+
+```js
+  // NUEVO: score de la fila "AUM Total" = promedio simple de los scores de
+  // TODAS las empresas del sector (sin ponderar por plata).
+  const scorePromedioSector=sec=>{
+    const comps=compCat[sec]||{};
+    const vals=Object.keys(comps).map(scoreEmp).filter(v=>v!==null);
+    if(!vals.length) return null;
+    return vals.reduce((a,b)=>a+b,0)/vals.length;
+  };
+```
+
+**2.** Reemplaza el bloque de la fila total (las 3 últimas líneas antes de `'</tbody></table>'`) por esto:
+
+```js
+    // fila final SIEMPRE: AUM del sector en cat L / AUM de toda la cartera en cat L
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    // NUEVO: Score = promedio de empresas del sector (SIN color: conserva el
+    // formato azul propio de la fila total). Mitigantes: celda vacía.
+    const sp=scorePromedioSector(sec);
+    html+='<td>'+(sp===null?'':sp.toFixed(2))+'</td>';
+    if(MOSTRAR_MITIG_TBL3) html+='<td></td>';
+    html+='</tr></tbody></table>';
+```
+
+Nota: no uso `celScore` ni `celMitVacia` en esta fila precisamente para que **no se le aplique el color de score** y mantenga el fondo azul claro de `tbl3-total`.
+
+---
+
+## Ajuste B — Quitar el scroll vertical del primer chart (Vista resumen)
+
+En el CSS del dashboard (bloque que empieza en `.pivwrap{overflow:auto;max-height:340px;...`, ≈línea 5428), reemplaza esa regla por:
+
+```css
+ .pivwrap{overflow:visible;max-height:none;border:1px solid var(--linea);border-radius:8px;
+   margin-bottom:10px;}
+```
+
+Con eso la Capa 1 (Vista resumen) se extiende verticalmente completa y desaparece la barra de desplazamiento. La **Vista detalle sigue con su scroll propio**, porque `capa2` tiene su propio `<div style="max-height:340px;overflow:auto">` — no lo toques.
+
+Ojo: hay otra regla `.pivwrap` idéntica más arriba (≈línea 2770) que pertenece a **otro dashboard** del script. No la modifiques.
