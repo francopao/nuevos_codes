@@ -1,0 +1,81 @@
+Claro. No necesitas saber Python: solo vas a **buscar un texto y reemplazarlo**. Usa `Ctrl+F` en Spyder dentro del archivo.
+
+Todo esto está dentro de la función `buildTbl3` (la que pegaste en el paso anterior).
+
+---
+
+## Paso 1 — Agregar la función del promedio
+
+**Busca** este texto (es el final de la función `scoreSector` que ya pegaste):
+
+```js
+    return den>0 ? num/den : null;
+  };
+```
+
+**Justo DEBAJO** de esa línea `};`, presiona Enter y **pega** esto:
+
+```js
+  // NUEVO: score de la fila "AUM Total" = promedio simple de los scores de
+  // TODAS las empresas del sector.
+  const scorePromedioSector=sec=>{
+    const comps=compCat[sec]||{};
+    const vals=Object.keys(comps).map(scoreEmp).filter(v=>v!==null);
+    if(!vals.length) return null;
+    return vals.reduce((a,b)=>a+b,0)/vals.length;
+  };
+```
+
+Debe quedar así (para que compares):
+
+```js
+  const scoreSector=sec=>{
+    const comps=compCat[sec]||{}; let num=0, den=0;
+    Object.keys(comps).forEach(emp=>{
+      const s=scoreEmp(emp); if(s===null) return;
+      const w=niveles.reduce((t,L)=>t+(comps[emp][L]||0),0);
+      if(w>0){ num+=s*w; den+=w; }
+    });
+    return den>0 ? num/den : null;
+  };
+  // NUEVO: score de la fila "AUM Total" = promedio simple de los scores de
+  // TODAS las empresas del sector.
+  const scorePromedioSector=sec=>{
+    const comps=compCat[sec]||{};
+    const vals=Object.keys(comps).map(scoreEmp).filter(v=>v!==null);
+    if(!vals.length) return null;
+    return vals.reduce((a,b)=>a+b,0)/vals.length;
+  };
+  const celScore=v=> v===null
+```
+
+---
+
+## Paso 2 — Cambiar la fila "AUM Total"
+
+**Busca** este texto exacto (aparece una sola vez, casi al final de `buildTbl3`):
+
+```js
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    html+='<td>—</td>'+celMitVacia()+'</tr></tbody></table>';
+```
+
+**Selecciona esas 3 líneas y bórralas**, y en su lugar **pega** estas 6:
+
+```js
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    const sp=scorePromedioSector(sec);
+    html+='<td>'+(sp===null?'':sp.toFixed(2))+'</td>';
+    if(MOSTRAR_MITIG_TBL3) html+='<td></td>';
+    html+='</tr></tbody></table>';
+```
+
+---
+
+## Paso 3 — Correr
+
+Guarda (`Ctrl+S`) y ejecuta el script. En las tablas de la 3ª sección, la fila **AUM Total** ahora mostrará un número en "Score" (con el mismo fondo azul de siempre, sin color de semáforo) y la celda de "Mitigantes" quedará totalmente vacía.
+
+**Si algo falla:** el error típico al pegar es dejar una llave `}` o comilla de más. Si Spyder te marca error, avísame y me pasas el mensaje.
