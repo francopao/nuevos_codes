@@ -1,0 +1,42 @@
+Perfecto. Esto es **solo CSS**, no tocas nada de la lógica.
+
+## Dónde
+
+Busca (`Ctrl+F`) esta línea en el bloque de estilos del dashboard (está cerca de `.scorectrls`):
+
+```css
+ .scorectrls label{font-size:11px;color:var(--plomo);display:flex;flex-direction:column;gap:3px;}
+```
+
+**Justo debajo de ella**, presiona Enter y **pega** este bloque:
+
+```css
+ /* --- NUEVO: tablas de la última sección (Score por empresa / por sector) --- */
+ /* Ancho ajustado al contenido (sin espacio sobrante), texto envuelto en varias
+    líneas si es largo, y todo centrado (headers y valores). */
+ #secScores table.piv{width:auto;table-layout:auto;margin-bottom:12px;}
+ #secScores table.piv th,
+ #secScores table.piv td{
+   text-align:center;
+   vertical-align:middle;
+   white-space:normal;
+   word-break:break-word;
+   overflow-wrap:anywhere;
+   padding:7px 12px;
+   line-height:1.35;
+   max-width:150px;
+ }
+ #secScores table.piv th{font-weight:600;}
+ #secScores .emp-h4{text-align:left;}
+```
+
+## Qué hace cada cosa (por si quieres calibrar)
+
+- `width:auto` → la tabla deja de estirarse al 100% del contenedor, que es lo que te generaba la sensación de espacio vacío.
+- `white-space:normal` + `word-break` → **wrap text**: los textos largos bajan de línea en vez de forzar una celda ancha.
+- `padding:7px 12px` → aire suficiente para que no se vea apretado. Si lo quieres **más compacto**, baja a `5px 9px`. Si lo quieres **más holgado**, sube a `9px 14px`.
+- `max-width:150px` → tope de ancho por celda; obliga a que el texto largo se envuelva. Súbelo (ej. `200px`) si ves que algo se parte demasiado.
+- `text-align:center` + `vertical-align:middle` → headers y valores centrados horizontal y verticalmente.
+- La última línea deja el **nombre de la empresa** (el título `<h4>` sobre cada tabla) alineado a la izquierda, que es como se ve mejor. Si lo prefieres centrado, cambia `left` por `center`.
+
+Guarda con `Ctrl+S`, ejecuta y revisa. Esto no afecta las tablas del resto del dashboard, porque todo está limitado a `#secScores`.
