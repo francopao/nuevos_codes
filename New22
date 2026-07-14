@@ -1,0 +1,85 @@
+Van dos cosas: el diagnóstico del score = 0, y el formato.
+
+---
+
+## A) Por qué Hudbay, Cerro Verde y Hochschild dan 0
+
+No es que tengan riesgo cero: es que **sus distritos no tienen dato CENEPRED, y el código convierte "sin dato" en 0**.
+
+Mira `calcScores()`:
+
+```js
+ac.mm += f*((typeof x.mm==='number')?x.mm:0);
+```
+
+Si el distrito no trae score (`null` / no cruzó el UBIGEO), suma **0** pero **sí cuenta su plata en el denominador** `T`. Como esas mineras tienen sus activos concentrados en 1–2 distritos sin dato (típicamente distritos donde el cruce de UBIGEO falló o CENEPRED no publica), el promedio ponderado sale 0.00 en los tres escenarios. Es un sesgo a la baja, no un resultado real.
+
+**Corrección** (renormaliza sobre la plata que sí tiene dato; si no hay ninguna, devuelve `null` = "s/d" en vez de 0). Reemplaza el bloque final de `calcScores()`:
+
+```js
+  const out={};
+  Object.keys(tot).forEach(e=>{
+    // NUEVO: el denominador solo considera la plata en distritos CON score
+    const ac={mm:0,inu:0,seq:0}, den={mm:0,inu:0,seq:0};
+    perDist[e].forEach(x=>{
+      ['mm','inu','seq'].forEach(k=>{
+        if(typeof x[k]==='number'){ ac[k]+=x[k]*x.plata; den[k]+=x.plata; }
+      });
+    });
+    const v=k=> den[k]>0 ? ac[k]/den[k] : null;
+    const mm=v('mm'), inu=v('inu'), seq=v('seq');
+    const vals=[mm,inu,seq].filter(x=>x!==null);
+    const g = vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
+    out[e]={mm: mm===null?null:+mm.toFixed(2),
+            inu:inu===null?null:+inu.toFixed(2),
+            seq:seq===null?null:+seq.toFixed(2),
+            global:g===null?null:+g.toFixed(2)};
+  });
+  return out;
+}
+```
+
+Después de esto, si Hudbay sigue en `s/d` significa que **ninguno** de sus distritos cruzó con la base CENEPRED → es un problema de UBIGEO en el input, no de código, y hay que revisar la hoja de esa empresa.
+
+---
+
+## B) Formato de las tablas
+
+**1.** En `buildTbl3`, marca el header Score. Busca:
+
+```js
+    html+='<th>Score</th>';                                   // NUEVO
+```
+cámbialo por:
+```js
+    html+='<th class="sc-h">Score</th>';
+```
+
+Y en `buildScoreEmpresa` / `buildScoreSector`, cambia `<th>Score Global</th>` por `<th class="sc-h">Score Global</th>` (2 lugares).
+
+**2.** Pega este bloque **antes de cada `</style>` de los 3 dashboards** (junto al que ya pegaste):
+
+```css
+ /* --- NUEVO: tipografía y formato de tablas --- */
+ html, body, table, th, td, select, button, input, h1, h2, h3, h4, .kpi, footer{
+   font-family:"Trebuchet MS", Tahoma, sans-serif !important; }
+
+ /* cuerpo limpio: fondo blanco, sin relleno de categoría */
+ table.piv tbody td, table.tbl3 tbody td{ background:#ffffff; }
+ table.tbl3 tbody td.idx, table.piv tbody td.idx{ background:#ffffff; }
+
+ /* valores en azul AFP */
+ table.piv tbody td, table.tbl3 tbody td{ color:#1E2E6E; }
+
+ /* Score y Mitigantes: negro y negrita, sin relleno de score */
+ table.piv td.sc-cell, table.tbl3 td.sc-cell{
+   background:#ffffff !important; color:#000000 !important; font-weight:700 !important; }
+ table.piv tbody td:last-child, table.tbl3 tbody td:last-child{
+   color:#000000; font-weight:700; }
+
+ /* header "Score" en ámbar */
+ table.piv thead th.sc-h, table.tbl3 th.sc-h{ color:#FFC000 !important; }
+```
+
+> Nota: mantuve el relleno verde/ámbar/rojo de la celda **Mitigantes** (lo pediste hace dos pasos); solo su letra pasa a negro y negrita. Si también la quieres sin relleno, dime y quito ese fondo.
+> Las filas `tbl3-total` / `tbl3-sector` conservan su fondo azul claro porque sus reglas son más específicas — si las quieres blancas también, avísame.
