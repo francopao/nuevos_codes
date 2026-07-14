@@ -1,0 +1,69 @@
+Sí, la culpa fue mía: te di la regla `table.piv tbody td{background:#ffffff}` **sin acotarla**, y `table.piv` también es la tabla principal con mapa de calor (en los 3 dashboards). Eso borró los rellenos de color. Se arregla acotando el alcance.
+
+Hay que corregir el bloque en los **3 dashboards** (líneas ≈2818, ≈3730, ≈5582 de tu archivo actual). Los tres tienen el mismo texto pegado.
+
+---
+
+## Dashboards 1 y 2 (líneas ≈2818 y ≈3730)
+
+Ahí **no hay** tablas `tbl3` ni Score. Selecciona todo el bloque, desde:
+
+```css
+ /* --- NUEVO: tipografía y formato de tablas --- */
+```
+
+hasta:
+
+```css
+ table.piv thead th.sc-h, table.tbl3 th.sc-h{ color:#FFC000 !important; }
+```
+
+y **reemplázalo por solo estas 3 líneas** (queda únicamente la tipografía):
+
+```css
+ /* --- NUEVO: tipografía global --- */
+ html, body, table, th, td, select, button, input, h1, h2, h3, h4, .kpi, footer{
+   font-family:"Trebuchet MS", Tahoma, sans-serif !important; }
+```
+
+Con eso vuelven los colores del mapa de calor de esos dos dashboards.
+
+---
+
+## Dashboard 3 (línea ≈5582, el de activos/score)
+
+Mismo bloque, **reemplázalo entero** por este (acotado a `tbl3` y a `#secScores`, sin tocar la `piv` principal):
+
+```css
+ /* --- NUEVO: tipografía global --- */
+ html, body, table, th, td, select, button, input, h1, h2, h3, h4, .kpi, footer{
+   font-family:"Trebuchet MS", Tahoma, sans-serif !important; }
+
+ /* cuerpo limpio SOLO en tbl3 y en las tablas de Score (no en la piv principal) */
+ table.tbl3 tbody td{ background:#ffffff; color:#1E2E6E; }
+ #secScores table.piv tbody td{ background:#ffffff; color:#1E2E6E; }
+
+ /* Score: negro, negrita, sin relleno */
+ table.tbl3 td.sc-cell, #secScores table.piv td.sc-cell{
+   background:#ffffff !important; color:#000000 !important; font-weight:700 !important; }
+
+ /* Mitigantes (última columna): letra negra y negrita, conserva su relleno */
+ table.tbl3 tbody td:last-child, #secScores table.piv tbody td:last-child{
+   color:#000000; font-weight:700; }
+
+ /* header "Score" en ámbar */
+ table.tbl3 th.sc-h, #secScores table.piv thead th.sc-h{ color:#FFC000 !important; }
+```
+
+---
+
+## Ojo con una consecuencia
+
+`table.tbl3 tbody td{background:#ffffff}` también blanquea las filas **AUM Sector** y **AUM Total** (que tenían fondo azul claro). En tu imagen de referencia el cuerpo es blanco, así que asumo que eso es lo que quieres. **Si prefieres recuperar esas dos franjas**, agrega al final:
+
+```css
+ table.tbl3 tr.tbl3-total td{ background:#eef3ff; }
+ table.tbl3 tr.tbl3-sector td{ background:#f4f7fd; }
+```
+
+Guarda, corre y dime si volvió todo a su sitio. Si algo más quedó roto, pásame captura y lo cierro.
