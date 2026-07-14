@@ -1,0 +1,200 @@
+Son 4 cambios. Todos con buscar‑y‑reemplazar.
+
+---
+
+## 1) Color de los headers de todas las tablas (#4D93D9)
+
+Busca estas líneas y cambia **solo** `var(--azul)` por `#4D93D9` en el `background` (deja el resto igual). Son 5 lugares:
+
+| Busca (inicio de línea) | Qué haces |
+|---|---|
+| `table.piv thead th{position:sticky;top:0;background:var(--azul);` (aparece **2 veces**, ≈línea 2772 y ≈5431) | `background:#4D93D9;` |
+| `table.fen thead th{position:sticky;top:0;background:var(--azul);` (≈3666) | `background:#4D93D9;` |
+| `table.regtbl th{background:var(--azul);` (≈3690) | `background:#4D93D9;` |
+| `table.tbl3 th{background:var(--azul);` (≈5458) | `background:#4D93D9;` |
+
+Ejemplo del resultado en la primera:
+
+```css
+ table.piv thead th{position:sticky;top:0;background:#4D93D9;color:#fff;
+   padding:7px 8px;text-align:left;font-weight:600;white-space:nowrap;z-index:2;}
+```
+
+⚠️ No cambies los `color:var(--azul)` (texto) ni los `th.idx` con fondo gris: solo los `background` de los headers listados arriba.
+
+---
+
+## 2) Mapa: fondo blanco en la vista nacional
+
+Busca dentro de `render()` de `class MapaPeligro`:
+
+```js
+        return {color:'#000000', weight: esPais? 0 : 0.3,
+                fillColor: noScore?'#ffffff':scoreColor(sc),
+                fillOpacity: noScore?0.85:0.9};
+```
+
+Reemplaza por:
+
+```js
+        // NUEVO: en vista nacional el fondo va blanco (los círculos son el protagonista).
+        if(esPais) return {color:'#000000', weight:0, fillColor:'#ffffff', fillOpacity:1};
+        return {color:'#000000', weight:0.3,
+                fillColor: noScore?'#ffffff':scoreColor(sc),
+                fillOpacity: noScore?0.85:0.9};
+```
+
+Y para que los círculos **sí se vean en vista nacional** (hoy solo salen si hay filtro), busca:
+
+```js
+    if(this.level!=='pais' || this.filtroEmisor || this.filtroSector) this.dibujarActivos(feats);
+```
+
+y déjalo así:
+
+```js
+    this.dibujarActivos(feats);   // NUEVO: también en vista nacional
+```
+
+---
+
+## 3) Círculos: tamaño ∝ % del AUM del emisor, color ∝ CENEPRED
+
+**3a.** Busca la función `function iconSVG(tipo, color, px){` y, **justo ENCIMA** de ella, pega este bloque nuevo (no borres `iconSVG`, simplemente dejará de usarse):
+
+```js
+// NUEVO: 5 tonalidades de un mismo color para la categoría CENEPRED 1..5.
+// Naranja/terracota: contrasta con el fondo blanco y con el azul de la coropleta.
+const ACT_COLORS = ['#FBD9B8','#F3B075','#E88431','#C25A11','#8A3A05'];
+function actColor(sc){ return (sc>=1&&sc<=5) ? ACT_COLORS[sc-1] : '#BFC5CC'; }
+
+// NUEVO: círculo simple (reemplaza los íconos por sector).
+function circleSVG(color, px){
+  return '<svg width="'+px+'" height="'+px+'" viewBox="0 0 24 24">'+
+    '<circle cx="12" cy="12" r="10.4" fill="'+color+'" fill-opacity="0.92" '+
+    'stroke="#ffffff" stroke-width="1.6"/></svg>';
+}
+
+// NUEVO: AUM total por emisor (con la clase/pestaña activa). Denominador de la
+// proporción: plata del activo / plata total del emisor.
+function emisorTotales(){
+  const t={};
+  D.forEach(d=>{ (d.ap||[]).forEach(a=>{
+    const m=a.m*classFrac(a.e); if(m>0) t[a.e]=(t[a.e]||0)+m; }); });
+  return t;
+}
+```
+
+**3b.** Ahora reemplaza **toda la función `dibujarActivos(feats){ ... }`** (desde `dibujarActivos(feats){` hasta su llave de cierre, justo antes del comentario `// ---- navegación jerárquica`) por esta:
+
+```js
+  dibujarActivos(feats){
+    const self=this;
+    const TOT=emisorTotales();
+    // NUEVO: anti-saturación. En vistas amplias (país/depto) los activos de un
+    // mismo emisor dentro de un distrito se agregan en UN círculo; al acercar
+    // (provincia/distrito) se abren activo por activo.
+    const agregado=(this.level==='pais'||this.level==='dep');
+    const esc = this.level==='pais'?0.62 : this.level==='dep'?0.80
+              : this.level==='prov'?0.95 : 1.10;
+    const MAXN = this.level==='dist'?14 : this.level==='prov'?8
+               : this.level==='dep'?6 : 4;
+    const baseR = this.level==='dist'?0.012 : this.level==='prov'?0.020
+                : this.level==='dep'?0.035 : 0.060;
+
+    const visU=new Set(feats.map(f=>f.properties.IDDIST));
+    visU.forEach(u=>{
+      const d=byU[u]; if(!d) return;
+      let acts=activosDeDistrito(d);
+      if(self.filtroEmisor) acts=acts.filter(a=>a.emisor===self.filtroEmisor);
+      if(self.filtroSector) acts=acts.filter(a=>a.sector===self.filtroSector);
+      if(!acts.length) return;
+      const c=CENTROID[u]; if(!c) return;
+      const sc=d[self.col];                       // categoría CENEPRED del distrito
+      const color=actColor(sc);
+
+      // items a dibujar (agregados por emisor, o activo por activo)
+      let items;
+      if(agregado){
+        const g={};
+        acts.forEach(a=>{
+          const k=a.emisor;
+          g[k]=g[k]||{emisor:a.emisor, plata:0, n:0, nombres:[]};
+          g[k].plata+=a.plata; g[k].n++;
+          if(g[k].nombres.length<6) g[k].nombres.push(a.activo);
+        });
+        items=Object.values(g).map(x=>({...x,
+          label:x.emisor+' · '+x.n+' activo(s)'}));
+      } else {
+        items=acts.map(a=>({emisor:a.emisor, plata:a.plata, n:1,
+                            nombres:[a.activo], label:a.activo}));
+      }
+      items.sort((a,b)=>b.plata-a.plata);
+      const extra = items.length>MAXN ? items.length-MAXN : 0;
+      const muestra=items.slice(0,MAXN);
+
+      muestra.forEach((it,i)=>{
+        // NUEVO: tamaño = proporción del AUM del emisor (no monto absoluto)
+        const T=TOT[it.emisor]||0;
+        const share = T>0 ? it.plata/T : 0;                 // 0..1
+        const px = Math.max(8, Math.min(46, (8 + 34*Math.sqrt(share)) * esc));
+        const ang=(i/Math.max(1,muestra.length))*2*Math.PI;
+        const rr = muestra.length>1 ? baseR*(0.45+0.55*(i%3)) : 0;
+        const lat=c[0]+rr*Math.sin(ang), lng=c[1]+rr*Math.cos(ang);
+        const ic=L.divIcon({className:'act-ic', html:circleSVG(color,px),
+          iconSize:[px,px], iconAnchor:[px/2,px/2]});
+        const pct=(share*100).toLocaleString('es-PE',{maximumFractionDigits:1})+'%';
+        let tip='<b>'+it.label+'</b><br>'+it.emisor+
+          '<br>'+d.dist+' ('+d.prov+', '+d.dep+')'+
+          '<br>CENEPRED '+self.hz.label+': <b>'+(sc??'s/d')+'</b>'+
+          '<br>Plata estimada: <b>'+fmtMonto(it.plata)+'</b>'+
+          '<br>% del AUM del emisor: <b>'+pct+'</b>';
+        if(agregado && it.nombres.length)
+          tip+='<br><span style="color:#888">'+it.nombres.join(' · ')+
+               (it.n>it.nombres.length?' …':'')+'</span>';
+        L.marker([lat,lng],{icon:ic}).bindTooltip(tip,{className:'tt'})
+          .addTo(self.capaMarkers);
+      });
+
+      if(extra>0){
+        const ic=L.divIcon({className:'act-ic',
+          html:'<div class="act-badge">+'+extra+'</div>', iconSize:[20,20],
+          iconAnchor:[10,10]});
+        L.marker([c[0]-baseR*0.7,c[1]+baseR*0.7],{icon:ic})
+          .bindTooltip('+'+extra+' más en '+d.dist+' — haz clic para acercar',
+                       {className:'tt'})
+          .addTo(self.capaMarkers);
+      }
+    });
+  }
+```
+
+---
+
+## 4) Leyenda (opcional pero recomendado)
+
+Dentro de `construirBloques()`, busca esta línea:
+
+```js
+        '<span style="margin-left:6px">Escala de riesgo · íconos = activos (tamaño ∝ plata)</span>'+
+```
+
+y reemplázala por:
+
+```js
+        '<span style="margin-left:6px">Escala de riesgo del distrito</span>'+
+        '<span style="margin-left:14px">Activos:</span>'+
+        ACT_COLORS.map((c,i)=>'<span class="sw"><i style="background:'+c+
+          ';border-radius:50%"></i>'+(i+1)+'</span>').join('')+
+        '<span style="margin-left:6px">Círculo: color = CENEPRED · tamaño ∝ % del AUM de su emisor</span>'+
+```
+
+---
+
+## Cómo queda la lógica anti‑saturación
+
+- **País / Departamento**: un círculo por **emisor y distrito** (se suman sus activos). Máx. 4–6 círculos por distrito + badge `+N`.
+- **Provincia / Distrito**: se abren **activo por activo**, con círculos más grandes.
+- El `+N` te invita a hacer clic y bajar de nivel, donde ya hay espacio.
+
+**Para calibrar** si lo ves muy grande/chico: el número `34` en `(8 + 34*Math.sqrt(share))` es el tamaño máximo relativo (súbelo/bájalo), y `esc` controla cuánto se encogen los círculos en vista país (`0.62`).
