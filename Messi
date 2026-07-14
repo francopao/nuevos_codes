@@ -1,0 +1,128 @@
+Tomo `cristiano.txt` como base. Aquí van los cambios, acotados y sin tocar nada más.
+
+---
+
+# 1) El score 0 de Hudbay / Cerro Verde / Hochschild
+
+**Es un artefacto de cálculo, no un riesgo real.** En `calcScores()`:
+
+```js
+ac.mm += f*((typeof x.mm==='number')?x.mm:0);
+```
+
+Si el distrito **no tiene score CENEPRED** (`null` porque no hay cobertura o el UBIGEO no cruzó), el código suma **0** pero igual mete esa plata en el denominador. Esas tres mineras tienen sus activos concentrados en pocos distritos sin cobertura → promedio 0.00 en los tres escenarios. Eso **sí distorsiona** (arrastra hacia abajo cualquier promedio sectorial que las incluya).
+
+**Corrección:** el denominador solo considera la plata *con* score; si el emisor no tiene **nada** cubierto, devuelve `null` = **"s/d"**, y queda excluido de promedios.
+
+### Edit 1.1 — `calcScores()`
+Busca el bloque `const out={};` dentro de `calcScores` y reemplaza **desde `const out={};` hasta el `return out;`** por:
+
+```js
+  const out={};
+  Object.keys(tot).forEach(e=>{
+    // NUEVO: renormaliza sobre la plata CON score CENEPRED. Sin cobertura -> null (s/d)
+    const ac={mm:0,inu:0,seq:0}, den={mm:0,inu:0,seq:0};
+    perDist[e].forEach(x=>{
+      ['mm','inu','seq'].forEach(k=>{
+        if(typeof x[k]==='number'){ ac[k]+=x[k]*x.plata; den[k]+=x.plata; }
+      });
+    });
+    const v=k=> den[k]>0 ? ac[k]/den[k] : null;
+    const mm=v('mm'), inu=v('inu'), seq=v('seq');
+    const vv=[mm,inu,seq].filter(z=>z!==null);
+    const g = vv.length ? vv.reduce((a,b)=>a+b,0)/vv.length : null;
+    const r=z=> z===null ? null : +z.toFixed(2);
+    out[e]={mm:r(mm), inu:r(inu), seq:r(seq), global:r(g)};
+  });
+  return out;
+```
+
+### Edit 1.2 — `scCell` tolerante a null
+Busca:
+```js
+function scCell(v){ return '<td class="sc-cell" style="background:'+scoreBg(v)+'">'+v.toFixed(2)+'</td>'; }
+```
+Reemplaza por:
+```js
+function scCell(v){
+  if(v===null||v===undefined) return '<td class="sc-cell" style="background:#f0f0f0">s/d</td>';
+  return '<td class="sc-cell" style="background:'+scoreBg(v)+'">'+v.toFixed(2)+'</td>';
+}
+```
+
+### Edit 1.3 — ordenamiento null-safe (en `buildScoreSector`)
+Busca:
+```js
+      .sort((a,b)=>scores[b].global-scores[a].global)
+```
+Reemplaza por:
+```js
+      .sort((a,b)=>((scores[b].global??-1)-(scores[a].global??-1)))
+```
+
+Las funciones `scoreSector` / `scorePromedioSector` de `buildTbl3` ya filtran no-números, así que quedan correctas automáticamente: **un emisor sin cobertura ya no arrastra el promedio del sector a la baja.**
+
+---
+
+# 2) Formato
+
+### Edit 2.1 — clase en el header "Score" (3 lugares)
+
+| Busca | Reemplaza por |
+|---|---|
+| `html+='<th>Score</th>';` (en `buildTbl3`) | `html+='<th class="sc-h">Score</th>';` |
+| `<th>Score Global</th><th>Mitigantes</th></tr></thead>'+` (en `buildScoreEmpresa`) | `<th class="sc-h">Score Global</th><th>Mitigantes</th></tr></thead>'+` |
+| `'<th>Score Global</th><th>Mitigantes</th></tr></thead><tbody>'+` (en `buildScoreSector`) | `'<th class="sc-h">Score Global</th><th>Mitigantes</th></tr></thead><tbody>'+` |
+
+### Edit 2.2 — CSS del **Dashboard_Activo_Riesgo** (el 3º)
+
+Pega esto **justo antes de su `</style>`** (≈línea 5510, el que contiene `table.tbl3`):
+
+```css
+ /* --- NUEVO: tipografía, headers y cuerpo limpio --- */
+ *{font-family:"Trebuchet MS", Tahoma, sans-serif !important;}
+
+ /* headers en #4D93D9 (excepto índices laterales, que quedan igual) */
+ table.piv thead th, table.tbl3 th{background:#4D93D9 !important;color:#fff !important;}
+ table.tbl3 th.idx{background:var(--grisbg) !important;color:var(--azul) !important;}
+
+ /* cuerpo limpio: fondo blanco, sin bordes interiores, valores en #1E2E6E */
+ table.tbl3 td{border:none !important;background:#ffffff;color:#1E2E6E;}
+ table.tbl3 td.idx{background:#ffffff;}
+ #secScores table.piv td{border:none !important;background:#ffffff;color:#1E2E6E;}
+
+ /* Score y Mitigantes: letra negra, negrita (Score sin relleno) */
+ table.tbl3 td.sc-cell, #secScores table.piv td.sc-cell{
+   background:#ffffff !important;color:#000000 !important;font-weight:700 !important;}
+ table.tbl3 tbody td:last-child, #secScores table.piv tbody td:last-child{
+   color:#000000;font-weight:700;}
+
+ /* header "Score" en ámbar */
+ table.tbl3 th.sc-h, #secScores table.piv thead th.sc-h{color:#FFC000 !important;}
+
+ /* filas especiales: se restauran tal cual estaban (van AL FINAL a propósito) */
+ table.tbl3 tr.tbl3-total td{background:#eef3ff !important;color:var(--azul) !important;font-weight:700 !important;}
+ table.tbl3 tr.tbl3-total td.idx{background:#dde6fb !important;}
+ table.tbl3 tr.tbl3-sector td{background:#f4f7fd !important;color:var(--azul) !important;font-weight:600 !important;}
+ table.tbl3 tr.tbl3-sector td.idx{background:#e7eefb !important;}
+```
+
+⚠️ El orden importa: las reglas de **AUM Total / AUM Sector van al final** para que conserven su fondo azul y su letra, sin que las pisen las reglas nuevas.
+
+### Edit 2.3 — Dashboards 1 y 2 (tipografía + headers)
+
+En **cada uno** de los otros dos `</style>` (≈2820 y ≈3705), pega **solo esto** (nada más — aquí no hay `tbl3` y la `piv` tiene mapa de calor que **no** hay que blanquear):
+
+```css
+ /* --- NUEVO: tipografía y color de headers --- */
+ *{font-family:"Trebuchet MS", Tahoma, sans-serif !important;}
+ table.piv thead th, table.fen thead th:not([style]), table.regtbl th{
+   background:#4D93D9 !important;color:#fff !important;}
+ table.fen thead th.idx-h{background:#eef3ff !important;color:var(--azul) !important;}
+```
+
+El `:not([style])` protege los headers de categoría del FEN, que llevan su color inline.
+
+---
+
+Guarda y corre. Si algo no calza, mándame captura del chart puntual y lo ajusto solo ahí.
