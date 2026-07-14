@@ -1,0 +1,78 @@
+Los 3 cambios:
+
+---
+
+## 1) Headers en #4D93D9 (a prueba de fallos)
+
+Algo de lo que editaste quedó inválido y por eso salió blanco. En vez de perseguirlo, vamos a **forzar** el color con una regla al final del `<style>`.
+
+**Primero**, deja las líneas que editaste como estén (no importa). **Luego**, en **cada uno de los 3 dashboards**, busca el cierre del bloque de estilos, que es la línea:
+
+```html
+</style>
+```
+
+Hay una por dashboard (≈2820, ≈3705, ≈5510). **Justo ANTES de cada `</style>`**, pega este bloque (el mismo texto en las tres):
+
+```css
+ /* --- NUEVO: color único de headers de tablas (#4D93D9) --- */
+ table.piv thead th,
+ table.tbl3 th,
+ table.fen thead th:not([style]),
+ table.regtbl th{ background:#4D93D9 !important; color:#fff !important; }
+ /* excepciones que NO deben pintarse: índices laterales */
+ table.tbl3 th.idx{ background:var(--grisbg) !important; color:var(--azul) !important; }
+ table.fen thead th.idx-h{ background:#eef3ff !important; color:var(--azul) !important; }
+```
+
+El `:not([style])` protege los headers de categoría de riesgo del FEN, que llevan su color inline (rojo/naranja/verde) y deben conservarlo.
+
+---
+
+## 2) FEN — columna "AUM (%)" en la tabla de empresas
+
+Busca `function tablaEmpresasHTML(empresas, titulo){` y reemplaza **toda la función** por esta:
+
+```js
+function tablaEmpresasHTML(empresas, titulo){
+  const rows = Object.entries(empresas).sort((a,b)=> b[1].aum - a[1].aum);
+  // NUEVO: total de AUM de ESTA tabla = denominador del %
+  const totalTbl = rows.reduce((s,[,i])=> s + i.aum, 0);
+  let totN=0, totA=0;
+  let h = (titulo ? '<div class="reg-tbl-title">'+titulo+'</div>' : '') +
+    '<table class="regtbl"><thead><tr><th>Empresa</th><th>Activos Físicos</th>'+
+    '<th>AUM</th><th>AUM (%)</th></tr></thead><tbody>';
+  rows.forEach(([e,info])=>{
+    totN += info.n; totA += info.aum;
+    const pct = totalTbl>0 ? info.aum/totalTbl*100 : 0;
+    h += '<tr><td class="idx">'+e+'</td><td>'+info.n+'</td>'+
+         '<td>'+fmtS(info.aum)+'</td><td>'+fmtP(pct)+'</td></tr>';
+  });
+  h += '<tr class="reg-total"><td class="idx">Total</td><td>'+totN+'</td>'+
+       '<td>'+fmtS(totA)+'</td><td>'+fmtP(totalTbl>0?100:0)+'</td></tr></tbody></table>';
+  return h;
+}
+```
+
+El denominador es el AUM total de esa misma tabla, así que la fila Total siempre da 100%.
+
+---
+
+## 3) Invertir el color de los Mitigantes (Alto = verde, Bajo = rojo)
+
+Busca `function mitiCell(emisor){` y reemplaza sus 3 líneas internas:
+
+```js
+function mitiCell(emisor){
+  const v = getMitigante(emisor);
+  // NUEVO: lógica invertida — mitigante Alto es BUENO (verde); Bajo es MALO (rojo).
+  const bg = v==='Alto'?'#d4edda' : v==='Medio'?'#fff3cd' : v==='Bajo'?'#f8d7da' : '';
+  return '<td style="text-align:center'+(bg?(';background:'+bg):'')+'">'+v+'</td>';
+}
+```
+
+Esto cubre las tablas de la 3ª sección (columna Mitigantes) y las de "Score por empresa" / "Score por sector", porque todas usan la misma función.
+
+---
+
+Guarda, ejecuta y me confirmas. Si algún header siguiera blanco, dime **cuál tabla exactamente** y lo cierro con una regla adicional.
