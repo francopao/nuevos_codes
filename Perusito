@@ -1,0 +1,173 @@
+Dos cosas: te arreglo el `NameError` y agrego la hoja **"Activos sin Ubigeo"** como fuente manual de máxima prioridad. Primero el bug, luego la feature nueva (probada con un archivo sintético que replica tu hoja, ya que no tengo tu Excel de riesgos).
+
+## Fix del `NameError`
+
+El problema: `MACRO_DIR` se define **más abajo** en tu CONFIG (después de donde pegaste `METALICA_DIR`), así que aún no existe. Solución: mueve solo esas dos líneas a después de `MACRO_DIR`.
+
+**1)** En el bloque que pegaste tras `OVERRIDE_UBIGEO`, **borra** estas líneas (y su comentario):
+```python
+# --- FUENTE DE GEOGRAFÍA MINERA... (todo el comentario) ...
+METALICA_DIR = os.path.join(MACRO_DIR, "Complementos BD", "Minería", "BD",
+                            "Producción Minera")
+METALICA_PATTERNS = ["Producci*met*lica*.xls*", "*met*lica*.xls*"]
+```
+Deja intactos `MINERAL_UM_FALLBACK` y `OVERRIDE_UNIDAD_UBIGEO` (no dependen de `MACRO_DIR`).
+
+**2)** Busca la línea que empieza con `MACRO_DIR = r"\\sppeapp00023...` y **pega justo debajo**:
+```python
+# --- FUENTE DE GEOGRAFÍA MINERA: "Producción metálica <año>.xlsx" (MINEM) --------
+# Solo sirve para mapear (TITULAR, UNIDAD) -> DEP/PROV/DIST. Se leen TODOS los años
+# presentes (unión); headers detectados dinámicamente.
+METALICA_DIR = os.path.join(MACRO_DIR, "Complementos BD", "Minería", "BD",
+                            "Producción Minera")
+METALICA_PATTERNS = ["Producci*met*lica*.xls*", "*met*lica*.xls*"]
+```
+
+(Nota: te doy referencias por *ancla de texto* y no por número de línea, porque tus líneas ya se corrieron al aplicar los cambios anteriores.)
+
+Ahora pruebo la hoja manual antes de dártela.
+
+La hoja manual funciona: lee con header dinámico, canoniza el TITULAR venga en nombre corto (`Hochschild`, `Volcan`) o legal (`SOCIEDAD MINERA CERRO VERDE S.A.A.`), avisa si un TITULAR no reconoce, y **pisa a metálica** (Cerro Verde → UCHUMAYO manual en vez del distrito de metálica). Todo sin tocar otros procesos. Aquí va la integración.
+
+## EDIT A — CONFIG: hint de la hoja manual
+
+Busca la línea `SHEET_VALORIZ_HINTS = [...]` y **pega debajo**:
+```python
+# Hoja de mapeo MANUAL de ubicación (prioridad máxima sobre cualquier fuente).
+# Yo lleno TITULAR/UNIDAD/DEPARTAMENTO/PROVINCIA/DISTRITO a mano (memoria, annual
+# report, etc.). Sirve para minería y, a futuro, otros sectores.
+SHEET_ACTIVOS_SIN_UBIGEO_HINTS = ["Activos sin Ubigeo", "Activos sin UBIGEO",
+                                  "Sin Ubigeo", "Activos Manuales"]
+```
+
+## EDIT B — Dos helpers nuevos
+
+Pega estos **dos helpers justo antes de `def load_produccion(`** (junto a `_geo_metalica`):
+
+```python
+def _canon_empresa_todas(tit):
+    """Canoniza un TITULAR venga en nombre corto (BD), legal (metálica) o ya canónico.
+    Devuelve el nombre canónico o None si no se reconoce."""
+    n = norm(tit)
+    for tabla in (EQUIV_MINERAS_MENSUAL, EQUIV_EMPRESAS_PRODUCCION):
+        v = {norm(k): val for k, val in tabla.items()}.get(n)
+        if v:
+            return v
+    return {norm(c): c for c in EMPRESAS_CANONICAS}.get(n)
+
+
+def _load_activos_sin_ubigeo(risk_path):
+    """Hoja de mapeo MANUAL de ubicación (prioridad máxima). La leo del propio archivo
+    de riesgos (RISK_PATTERNS). Headers dinámicos: TITULAR/UNIDAD/DEPARTAMENTO/
+    PROVINCIA/DISTRITO. Devuelve {(canónico, UNIDAD norm): (dep, prov, dist)}.
+    Si la hoja no existe, devuelve {} sin romper nada."""
+    if not risk_path:
+        return {}
+    try:
+        xl = pd.ExcelFile(risk_path)
+    except Exception as e:
+        log(f"Activos sin Ubigeo: no se pudo abrir el archivo de riesgos ({e}); se omite.", "WARN")
+        return {}
+    hoja = next((s for s in xl.sheet_names
+                 if any(norm(h) in norm(s) for h in SHEET_ACTIVOS_SIN_UBIGEO_HINTS)), None)
+    if hoja is None:
+        log("Activos sin Ubigeo: hoja no encontrada; se omite el mapeo manual.")
+        return {}
+    raw = xl.parse(hoja, header=None, dtype=object)
+    hr, sc = detect_header_row(raw, ["TITULAR", "UNIDAD", "DEPARTAMENTO", "DISTRITO"])
+    if sc < 3:
+        log("Activos sin Ubigeo: no se hallaron headers TITULAR/UNIDAD/DEP/DIST; se omite.", "WARN")
+        return {}
+    hdr = [norm(x) for x in raw.iloc[hr].tolist()]
+    idx = lambda nm: next((i for i, h in enumerate(hdr) if h == nm), None)
+    cT, cU, cD, cP, cI = idx("TITULAR"), idx("UNIDAD"), idx("DEPARTAMENTO"), \
+                         idx("PROVINCIA"), idx("DISTRITO")
+    if None in (cT, cU, cD):
+        log("Activos sin Ubigeo: faltan columnas mínimas (TITULAR/UNIDAD/DEPARTAMENTO); se omite.", "WARN")
+        return {}
+    out, nomap = {}, []
+    for r in range(hr + 1, len(raw)):
+        row = raw.iloc[r].tolist()
+        cell = lambda c: row[c] if (c is not None and c < len(row)) else None
+        tit, uni, dep = cell(cT), cell(cU), cell(cD)
+        if not tit or not uni or not dep:
+            continue
+        can = _canon_empresa_todas(tit)
+        if not can:
+            nomap.append(str(tit)); continue
+        out[(can, norm(uni))] = (str(dep).strip(),
+                                 str(cell(cP)).strip() if cell(cP) else "",
+                                 str(cell(cI)).strip() if cell(cI) else "")
+    if nomap:
+        log(f"Activos sin Ubigeo: {len(nomap)} fila(s) con TITULAR no reconocido "
+            f"(ignoradas): {sorted(set(nomap))}", "WARN")
+    if out:
+        log(f"Activos sin Ubigeo: {len(out)} activo(s) con ubicación manual (prioridad alta).")
+    return out
+```
+
+## EDIT C — Enchufar la hoja manual en `load_produccion` (4 cambios pequeños)
+
+Dentro de la `load_produccion` que ya pegaste:
+
+**C1 — firma.** Cambia:
+```python
+def load_produccion(bd_path, geo_idx=None, scores=None):
+```
+por:
+```python
+def load_produccion(bd_path, risk_path=None, geo_idx=None, scores=None):
+```
+
+**C2 — cargar el dict manual.** Busca:
+```python
+    geo = _geo_metalica(met_paths) if met_paths else {}
+```
+y **pega debajo**:
+```python
+    manual = _load_activos_sin_ubigeo(risk_path)   # ubicación manual (prioridad 1)
+```
+
+**C3 — prioridad en el loop de geografía.** Reemplaza este bloque:
+```python
+        key = (r["empresa"], norm(r["unidad_minera"]))
+        if key in geo:
+            d = geo[key]
+        elif key in OVERRIDE_UNIDAD_UBIGEO and OVERRIDE_UNIDAD_UBIGEO[key] in u2name:
+            d = u2name[OVERRIDE_UNIDAD_UBIGEO[key]]
+        else:
+            d = (None, None, None)
+            sin_geo.append((r["empresa"], r["unidad_minera"]))
+```
+por:
+```python
+        key = (r["empresa"], norm(r["unidad_minera"]))
+        if key in manual:                                    # PRIORIDAD 1: hoja manual
+            d = manual[key]
+        elif key in geo:                                     # PRIORIDAD 2: metálica
+            d = geo[key]
+        elif key in OVERRIDE_UNIDAD_UBIGEO and OVERRIDE_UNIDAD_UBIGEO[key] in u2name:
+            d = u2name[OVERRIDE_UNIDAD_UBIGEO[key]]           # PRIORIDAD 3: override CONFIG
+        else:
+            d = (None, None, None)
+            sin_geo.append((r["empresa"], r["unidad_minera"]))
+```
+
+*(Con esto, un activo que llenes en la hoja manual deja de aparecer en el AVISO 1 y, si su distrito sí tiene CENEPRED, también sale del AVISO 2 — que es justo el problema de cobertura que querías resolver.)*
+
+## EDIT D — Pasar `risk_path` en la llamada de `main()`
+
+`risk_path` ya existe en `main()` (se calcula junto a `prod_path`). Busca:
+```python
+    df_prod, _ = load_produccion(prod_path, geo_idx, scores)
+```
+y cámbialo por:
+```python
+    df_prod, _ = load_produccion(prod_path, risk_path, geo_idx, scores)
+```
+
+---
+
+**Qué NO se toca:** nada fuera de esto. El helper devuelve `{}` y sigue de largo si la hoja no está (archivos viejos no rompen). Los dep/prov/dist manuales pasan por tu `geocode()` normal, así que heredan tu lógica de `ALIAS_DISTRITO`/`OVERRIDE_UBIGEO` y, si escribes un distrito que el GeoJSON no reconoce, te lo dirá el aviso de "NO geocodificadas" que ya tienes.
+
+Orden de prioridad final para la ubicación de cada activo minero: **hoja manual → metálica → override CONFIG → sin geografía (AVISO 1)**. Todo lo de datos está probado; el AVISO 2 y el `geocode` de los dep/prov/dist manuales corren con tu GeoJSON/CENEPRED reales al ejecutar.
