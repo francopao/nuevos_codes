@@ -1,0 +1,255 @@
+Perfecto: override + aviso, y ventana = semestre anterior. Antes de escribir el módulo necesito releer los nombres reales de variables/funciones de CONFIG y `load_produccion` para que el código encaje sin fricción (limpié contexto antes).Ahora veo el contrato exacto que `load_produccion` debe cumplir para `build_model` (columnas: `mineral, unidad, unidad_minera, empresa, depto, prov, dist, acum, unidad_norm, factor, tmf`). Reviso el orden de llamadas en `main()` para saber si `geo_idx` está disponible cuando cargo producción.`geo_idx` y `scores` ya existen antes de cargar producción (líneas 6666/6670), así que puedo pasárselos a `load_produccion` para resolver overrides y avisar de cobertura CENEPRED, sin tocar `build_model`. Antes de entregarte el módulo, lo **pruebo contra tus tres archivos reales** para no darte código aspiracional. Primero confirmo hasta qué mes llega BD Prod (afecta la ventana semestral).BD Prod llega a **2026-02**. Con "hoy"=jul-2026 la ventana semestral en curso quedaría sin datos, así que reutilizo el fallback de `_cols_en_ventana` (6 meses más recientes con datos) — misma lógica del pipeline. Ahora construyo y **pruebo el módulo completo** contra tus archivos.Typo (`umap`→`ummap`). Corrijo y reejecuto.Funciona de punta a punta contra tus archivos: `df_prod` sale con todas las columnas que `build_model` espera, 155 filas, los 7 emisores con producción, y el **AVISO 1** lista exactamente las 17 unidades sin geografía por empresa. Ahora endurezco los lectores de metálica (header dinámico + columnas por nombre, porque dijiste que la hoja y las columnas “cambian ligeramente”) y reejecuto para confirmar que sigue igual.Probado end-to-end contra tus 3 archivos reales: `df_prod` sale con las 11 columnas que `build_model` consume, 155 filas, los 7 emisores con geografía, y los dos avisos operativos. Te dejo el módulo con instrucciones de línea exactas. Confirmo primero el ancla de `PROCESOS_VALIDOS`.Confirmado un detalle que simplifica todo: ya existe `EQUIV_MINERAS_MENSUAL` (línea 545), que es justamente el mapa **BD-corto → canónico** que necesitábamos. Solo le faltan 3 llaves. Reutilizarlo evita duplicar tablas.
+
+Aquí va el módulo, **probado contra tus 3 archivos** (155 filas, 7 emisores, avisos operativos). Cuatro ediciones puntuales sobre `ultimate1.txt`.
+
+---
+
+### EDIT 1 — Completar `EQUIV_MINERAS_MENSUAL` (mapa BD-corto→canónico)
+
+Le faltan El Brocal, Marcobre y Hudbay. **Inserta estas 3 líneas después de la línea 554** (`"MINSUR": "Minsur",`), antes del `}`:
+
+```python
+    "EL BROCAL": "Buenaventura",
+    "MARCOBRE": "Minsur",
+    "HUDBAY": "Hudbay",
+```
+
+### EDIT 2 — CONFIG nuevo (rutas, override, fallback de unidad)
+
+**Inserta este bloque después de la línea 146** (cierre de `OVERRIDE_UBIGEO`):
+
+```python
+# --- FUENTE DE GEOGRAFÍA MINERA: "Producción metálica <año>.xlsx" (MINEM) --------
+# Solo sirve para mapear (TITULAR, UNIDAD) -> DEP/PROV/DIST. Se leen TODOS los años
+# presentes (unión); la hoja "INFORMACION GENERAL" puede variar ligeramente de nombre
+# y los headers se detectan dinámicamente (fila con TITULAR/UNIDAD/DEPARTAMENTO).
+METALICA_DIR = os.path.join(MACRO_DIR, "Complementos BD", "Minería", "BD",
+                            "Producción Minera")
+METALICA_PATTERNS = ["Producci*met*lica*.xls*", "*met*lica*.xls*"]
+
+# --- Unidad de medida por MINERAL (BD Prod NO trae columna de unidad). Se deriva
+# del MINERAL. Se autocompleta leyendo metálica (MINERAL->UNIDAD DE MEDIDA); este
+# dict es solo el respaldo si un mineral no estuviera en metálica.
+MINERAL_UM_FALLBACK = {"ORO": "grsf", "PLATA": "kgf"}   # el resto -> "tmf"
+
+# --- Override manual de ubigeo para UNIDADES sin geografía en metálica.
+# Clave = (canónico, UNIDAD normalizada con norm()); valor = UBIGEO 6 díg.
+# Rellena aquí las unidades que el AVISO 1 reporte como "SIN geografía".
+# Ej: ("Volcan", norm("SAN CRISTOBAL")): "120125",
+OVERRIDE_UNIDAD_UBIGEO = {
+}
+```
+
+### EDIT 3 — Reemplazar `load_produccion` completa (líneas 860–944)
+
+**Borra las líneas 860 a 944** (toda la función actual) y pega esto en su lugar:
+
+```python
+def _find_metalica():
+    """Todos los 'Producción metálica *.xlsx' disponibles (unión de años)."""
+    hits = []
+    for pat in METALICA_PATTERNS:
+        hits += glob.glob(os.path.join(METALICA_DIR, pat))
+    hits = sorted(set(h for h in hits if not os.path.basename(h).startswith("~$")))
+    return hits
+
+
+def _read_metalica(path):
+    """Lee 'INFORMACION GENERAL' con header dinámico y columnas por nombre EXACTO.
+    Devuelve (filas, colmap) donde colmap indexa MINERAL/UM/TITULAR/UNIDAD/DEP/PROV/DIST."""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = next((wb[s] for s in wb.sheetnames
+               if "INFORMACION" in norm(s) or "GENERAL" in norm(s)), wb[wb.sheetnames[0]])
+    scan = [[c.value for c in r] for r in ws.iter_rows(min_row=1, max_row=12)]
+    hr, _ = detect_header_row(pd.DataFrame(scan),
+                              ["TITULAR", "UNIDAD", "DEPARTAMENTO", "DISTRITO"])
+    hdr = [norm(x) for x in scan[hr]]
+    filas = list(ws.iter_rows(min_row=hr + 2, values_only=True))
+    wb.close()
+    col = lambda nm: next((i for i, h in enumerate(hdr) if h == nm), None)
+    cm = {"MINERAL": col("MINERAL"), "UM": col("UNIDAD DE MEDIDA"),
+          "TITULAR": col("TITULAR"), "UNIDAD": col("UNIDAD"),
+          "DEP": col("DEPARTAMENTO"), "PROV": col("PROVINCIA"), "DIST": col("DISTRITO")}
+    return filas, cm
+
+
+def _mapa_mineral_um(met_paths):
+    """MINERAL (norm) -> unidad de medida (norm_unidad), leído de metálica. 1:1."""
+    m = {}
+    for p in met_paths:
+        filas, cm = _read_metalica(p)
+        if cm["MINERAL"] is None or cm["UM"] is None:
+            continue
+        for r in filas:
+            mineral, um = r[cm["MINERAL"]], r[cm["UM"]]
+            if mineral and um and norm_unidad(um) in UNIDAD_A_TMF:
+                m[norm(mineral)] = norm_unidad(um)
+    return m
+
+
+def _geo_metalica(met_paths):
+    """(canónico, UNIDAD norm) -> (DEP, PROV, DIST). Canoniza TITULAR legal con
+    EQUIV_EMPRESAS_PRODUCCION. La geografía viene en MAYÚSCULAS (la maneja geocode)."""
+    eq_leg = {norm(k): v for k, v in EQUIV_EMPRESAS_PRODUCCION.items()}
+    geo = {}
+    for p in met_paths:
+        filas, cm = _read_metalica(p)
+        if None in (cm["TITULAR"], cm["UNIDAD"], cm["DEP"]):
+            continue
+        for r in filas:
+            tit, uni, dep = r[cm["TITULAR"]], r[cm["UNIDAD"]], r[cm["DEP"]]
+            can = eq_leg.get(norm(tit))
+            if can and uni and dep:
+                geo.setdefault((can, norm(uni)),
+                               (str(dep).strip(),
+                                str(r[cm["PROV"]]).strip(), str(r[cm["DIST"]]).strip()))
+    return geo
+
+
+def load_produccion(bd_path, geo_idx=None, scores=None):
+    """Producción minera con DOS fuentes:
+      • BD Prod (BD_Mineria.xlsm) -> peso TMF por (TITULAR, UNIDAD) sumando el
+        semestre en curso (misma ventana del pipeline; fallback a 6m recientes).
+      • Producción metálica <año> -> geografía (DEP/PROV/DIST) por (TITULAR, UNIDAD).
+    Devuelve (df_prod, hoja) con las columnas que consume build_model."""
+    import openpyxl, datetime
+    met_paths = _find_metalica()
+    if not met_paths:
+        log(f"No se encontró 'Producción metálica *.xlsx' en {METALICA_DIR}; "
+            f"la minería quedará sin geografía.", "WARN")
+    ummap = _mapa_mineral_um(met_paths) if met_paths else {}
+    geo = _geo_metalica(met_paths) if met_paths else {}
+
+    wb = openpyxl.load_workbook(bd_path, data_only=True)
+    sheet = next((s for s in wb.sheetnames if "BD PROD" in norm(s)), wb.sheetnames[-1])
+    ws = wb[sheet]
+
+    # --- header dinámico (no asumir fila 1) ---
+    scan = pd.DataFrame([[ws.cell(r, c).value for c in range(1, 13)]
+                         for r in range(1, 13)])
+    hrow, sc = detect_header_row(scan, ["MINERAL", "ETAPA", "TITULAR", "UNIDAD"])
+    hrow += 1  # a 1-based
+    hdr = {norm(ws.cell(hrow, c).value): c for c in range(1, ws.max_column + 1)
+           if isinstance(ws.cell(hrow, c).value, str)}
+    cMin, cEt = hdr.get("MINERAL"), hdr.get("ETAPA")
+    cTit, cUni = hdr.get("TITULAR"), hdr.get("UNIDAD")
+    if not all([cMin, cTit, cUni]):
+        fatal(f"BD Prod: no se ubicaron MINERAL/TITULAR/UNIDAD en la fila {hrow} "
+              f"(score={sc}). Revisa la hoja '{sheet}'.")
+
+    # --- ventana de meses = semestre en curso; fallback a 6m recientes con datos ---
+    fcols = [(c, ws.cell(hrow, c).value) for c in range(1, ws.max_column + 1)
+             if isinstance(ws.cell(hrow, c).value, datetime.datetime)]
+    obj = set(_meses_semestre_anterior())
+    def _datos(c):
+        return any(isinstance(ws.cell(rr, c).value, (int, float)) and ws.cell(rr, c).value
+                   for rr in range(hrow + 1, ws.max_row + 1))
+    inwin = [(c, d) for c, d in fcols if (d.year, d.month) in obj and _datos(c)]
+    if not inwin:
+        con = sorted([(c, d) for c, d in fcols if _datos(c)], key=lambda x: x[1])
+        inwin = con[-6:]
+        if inwin:
+            log(f"BD Prod: ventana semestral sin datos; se usan los 6 meses recientes "
+                f"{inwin[0][1].date()}..{inwin[-1][1].date()}.", "WARN")
+    wcols = [c for c, _ in inwin]
+
+    eq_bd = {norm(k): v for k, v in EQUIV_MINERAS_MENSUAL.items()}
+    proc_ok = {norm(p) for p in PROCESOS_VALIDOS}
+    filas = []
+    for r in range(hrow + 1, ws.max_row + 1):
+        tit, uni, mineral = ws.cell(r, cTit).value, ws.cell(r, cUni).value, ws.cell(r, cMin).value
+        if not tit or not uni:
+            continue
+        if cEt and norm(ws.cell(r, cEt).value) not in proc_ok:   # solo CONCENTRACIÓN
+            continue
+        can = eq_bd.get(norm(tit))
+        if not can:                                              # fuera del universo
+            continue
+        mn = EQUIV_MINERAL.get(norm(mineral), norm(mineral))
+        um = ummap.get(mn, MINERAL_UM_FALLBACK.get(mn, "tmf"))
+        acum = sum(v for c in wcols for v in [ws.cell(r, c).value]
+                   if isinstance(v, (int, float)))
+        filas.append({"empresa": can, "unidad_minera": str(uni).strip(),
+                      "mineral": str(mineral).strip(), "unidad_norm": um,
+                      "factor": UNIDAD_A_TMF[um], "acum": float(acum),
+                      "tmf": float(acum) * UNIDAD_A_TMF[um]})
+    wb.close()
+    df = pd.DataFrame(filas)
+    if df.empty:
+        fatal("BD Prod: no se acumuló producción del universo (revisa ETAPA/TITULAR "
+              "y EQUIV_MINERAS_MENSUAL).")
+
+    # --- geografía por (canónico, UNIDAD) con override manual ---
+    u2name = geo_idx[2] if geo_idx else {}
+    deps, provs, dists, sin_geo = [], [], [], []
+    for _, r in df.iterrows():
+        key = (r["empresa"], norm(r["unidad_minera"]))
+        if key in geo:
+            d = geo[key]
+        elif key in OVERRIDE_UNIDAD_UBIGEO and OVERRIDE_UNIDAD_UBIGEO[key] in u2name:
+            d = u2name[OVERRIDE_UNIDAD_UBIGEO[key]]
+        else:
+            d = (None, None, None)
+            sin_geo.append((r["empresa"], r["unidad_minera"]))
+        deps.append(d[0]); provs.append(d[1]); dists.append(d[2])
+    df["depto"], df["prov"], df["dist"] = deps, provs, dists
+    df["unidad"] = df["unidad_norm"].map(lambda u: UNIDAD_LABEL.get(u, u))
+
+    # --- AVISO 1: unidades SIN geografía en metálica (candidatas a override) ---
+    if sin_geo:
+        uu = sorted(set(sin_geo))
+        log(f"Producción: {len(uu)} unidad(es) minera(s) SIN geografía en metálica "
+            f"(se excluyen; agrégalas a OVERRIDE_UNIDAD_UBIGEO):", "WARN")
+        for e, un in uu:
+            log(f"      {e} · {un}", "WARN")
+
+    # --- AVISO 2: unidades con geografía pero SIN cobertura CENEPRED (Score 's/d') ---
+    if geo_idx is not None and scores is not None:
+        sin_cen = []
+        for _, r in df[df["depto"].notna()].iterrows():
+            u, _mot = geocode(r["depto"], r["prov"], r["dist"], geo_idx)
+            if u is None or u not in scores:
+                sin_cen.append((r["empresa"], r["unidad_minera"], u))
+        if sin_cen:
+            uu = sorted(set(sin_cen))
+            log(f"Producción: {len(uu)} unidad(es) con ubigeo pero SIN cobertura "
+                f"CENEPRED (su Score Global saldrá 's/d'):", "WARN")
+            for e, un, u in uu:
+                log(f"      {e} · {un}  [ubigeo={u or 'no geocodificado'}]", "WARN")
+
+    df = df.dropna(subset=["depto"]).copy()
+    log(f"Producción (BD Prod + metálica): {len(df)} fila(s), "
+        f"{df['empresa'].nunique()} empresa(s) del universo con geografía.")
+    return df, sheet
+```
+
+### EDIT 4 — `main()`: cambiar la fuente y la llamada
+
+**Línea 6660**, reemplaza:
+```python
+    prod_path = find_file(PROD_DIR, PROD_PATTERNS, "PRODUCCIÓN MINERA")
+```
+por (ahora BD Prod vive en `MACRO_DIR`):
+```python
+    prod_path = find_file(PROD_MENSUAL_DIR, PROD_MENSUAL_PATTERNS, "BD Minería (BD Prod)")
+```
+
+**Línea 6704**, reemplaza:
+```python
+    df_prod, _ = load_produccion(prod_path)
+```
+por (le pasamos `geo_idx` y `scores` para resolver override + avisar cobertura CENEPRED):
+```python
+    df_prod, _ = load_produccion(prod_path, geo_idx, scores)
+```
+
+---
+
+### Dos cosas que debes saber (no son bugs, son decisiones)
+
+1. **Filtro `ETAPA=CONCENTRACIÓN`** (reusa tu `PROCESOS_VALIDOS`): evita doble conteo concentrado+refinado, pero **excluye refinerías** como Cajamarquilla (Nexa). Si quieres incluirlas, agrega su etapa a `PROCESOS_VALIDOS`.
+
+2. **AVISO 2 (cobertura CENEPRED)** quedó cableado a tu `geocode()` + `scores`, pero **no lo pude ejecutar aquí** (no tengo tu GeoJSON ni la hoja CENEPRED). El AVISO 1 y toda la ruta de datos sí están probados contra tus archivos. Cuando corras, el AVISO 2 te dirá exactamente qué unidades con ubigeo caen fuera de CENEPRED — ahí resolverás lo de Hochschild que te anticipé (con solo Inmaculada geolocalizada, el resto irá a override, y aun así puede faltar cobertura CENEPRED en ese distrito).
+
+Con esto tu Modo A (nombres/geo) queda resuelto para lo mapeable, y el Modo B queda **visible y accionable** vía los dos avisos.
