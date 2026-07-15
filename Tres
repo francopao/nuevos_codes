@@ -1,0 +1,325 @@
+Este es un cambio grande y con varias piezas delicadas (recoloreo de círculos por emisor, leyenda nueva, semestres, "s/d"→"-"). Necesito leer el estado real del dashboard antes de tocar nada. Voy por partes.
+
+El dashboard tiene varios templates. Ubico cuál es exactamente "Dashboard_Activos_Riesgo" y su función/template.
+
+`Dashboard_Activos_Riesgo` = `generar_dashboard_activos` (línea 4622) + su template en 5435. Todas tus mejoras viven ahí. Leo las piezas exactas: primero el lector de Mitigantes y el periodo, que es lo que habilita las columnas por semestre.
+
+Ahora leo las tres tablas de score (empresa/sector) y sus columnas Mitigantes, más los "s/d".
+
+Ahora las definiciones de color, el dibujo de círculos, la leyenda y el selector de emisor del mapa. Localizo en el template de activos (5435+).
+
+Veo el panorama. El mapa tiene un filtro de emisor **single-select** hoy (`this.filtroEmisor`), y `buildTbl3` depende de él. Necesito leer el dibujo de círculos y los controles completos para decidir un diseño que cumpla tu pedido (color por emisor + leyenda) sin romper la tabla tbl3.
+
+Necesito ver `construirBloques` (layout de mapas + leyenda) y los controles para ubicar la leyenda respecto a los mapas y decidir el diseño sin romper tbl3.
+
+Ya tengo el mapa completo del template. Ahora veo dónde se llama `leer_mitigantes` y cómo entra al payload, para las columnas por semestre.
+
+Ahora `_periodo_actual` y la construcción del payload en `generar_dashboard_activos`.
+
+Tengo casi todo. Me falta ver `render()` para saber dónde se llama `dibujarActivos` y colocar bien el cómputo de colores por emisor y la leyenda.
+
+Ya tengo todo el flujo mapeado. Antes de entregarte, pruebo la lógica nueva que puedo verificar fuera del navegador: nombres de semestre y la función de sombreado de color por nivel.
+
+Semestres y sombreado validados. Necesito revisar el bloque final de `dibujarActivos` (el marcador "+N más") para no romper la variable `color` al moverla por-item.
+
+El bloque `+N` no usa `color`, así que mover el color a por-ítem es seguro. Reviso el CSS de `.leg` para que la leyenda nueva envuelva bien con varios emisores.
+
+Todo verificado contra el código real y la lógica nueva probada (semestres + sombreado). El `.leg` ya trae `flex-wrap`, así que la leyenda por emisor envuelve sola. Aquí están las ediciones, todas por ancla de texto (tus líneas ya se corrieron), todas dentro de `generar_dashboard_activos` y su template.
+
+Diseño de color de círculos que implementé: el color base lo da el **emisor** (rango por AUM del conjunto visible: 1º=rojo, 2º=azul, luego paleta), la **intensidad** sigue siendo el nivel CENEPRED, y el **tamaño** sigue siendo % del AUM del emisor (intacto). Filtras a 1 emisor → todo rojo; un conjunto visible de 2 → rojo+azul; más → colores distintos + leyenda. (Si algún día quieres un multi-select explícito de emisores, es un follow-up; el filtro actual + esta lógica ya entrega el comportamiento que describiste.)
+
+---
+
+## PARTE 1 — Python: nombres de semestre + mitigantes del semestre anterior
+
+**1A.** Pega estos 3 helpers **justo después de la función `_periodo_actual`** (después de su `return candidatos[0]`):
+
+```python
+def _sem_hoja_a_nombre(hoja):
+    """'1S26'->'Jun26', '2S25'->'Dic25'."""
+    try:
+        return ("Jun" if str(hoja)[0] == "1" else "Dic") + str(hoja)[2:]
+    except Exception:
+        return str(hoja)
+
+
+def _sem_hoja_anterior(hoja):
+    """Hoja del semestre anterior: '1S26'->'2S25', '2S25'->'1S25'."""
+    try:
+        s, yy = str(hoja)[0], int(str(hoja)[2:])
+        return ("2S%02d" % ((yy - 1) % 100)) if s == "1" else ("1S%02d" % yy)
+    except Exception:
+        return None
+
+
+def _leer_mitigantes_hoja(path, hoja, logfn=print):
+    """Lee UNA hoja específica de Mitigantes.xlsx -> {empresa: 'Bajo'|'Medio'|'Alto'}.
+    Devuelve {} si el archivo o la hoja no existen (no rompe nada)."""
+    MAPA = {1: "Bajo", 2: "Medio", 3: "Alto"}
+    out = {}
+    if not path or not hoja or not os.path.exists(path):
+        return out
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        if hoja not in wb.sheetnames:
+            wb.close(); return out
+        ws = wb[hoja]
+        for row in ws.iter_rows(min_row=2, max_col=2, values_only=True):
+            emp, val = (row[0], row[1]) if len(row) >= 2 else (None, None)
+            if not emp:
+                continue
+            try:
+                out[str(emp).strip()] = MAPA.get(int(round(float(val))), "\u2014")
+            except (TypeError, ValueError):
+                out[str(emp).strip()] = "\u2014"
+        wb.close()
+    except Exception as e:
+        logfn(f"[Activos] Mitigantes hoja '{hoja}': {e}")
+    return out
+```
+
+**1B.** En `generar_dashboard_activos`, busca:
+```python
+    mitigantes = leer_mitigantes(mitigantes_path, logfn=logfn)
+```
+y **reemplaza por**:
+```python
+    mitigantes = leer_mitigantes(mitigantes_path, logfn=logfn)
+    # NUEVO: nombres de semestre (JunYY/DicYY) y mitigantes del semestre anterior.
+    _hoja_act = _periodo_actual(mitigantes_path)
+    _hoja_prev = _sem_hoja_anterior(_hoja_act)
+    _sem_actual = _sem_hoja_a_nombre(_hoja_act)
+    _sem_prev = _sem_hoja_a_nombre(_hoja_prev) if _hoja_prev else ""
+    mitigantes_prev = _leer_mitigantes_hoja(mitigantes_path, _hoja_prev, logfn=logfn)
+```
+
+**1C.** En el `payload`, busca:
+```python
+        "mitigantes": mitigantes,
+        "afp": {"azul": AFP_AZUL, "cyan": AFP_CYAN, "amar": AFP_AMAR,
+```
+y **reemplaza por**:
+```python
+        "mitigantes": mitigantes,
+        "mitigantes_prev": mitigantes_prev,
+        "sem_actual": _sem_actual,
+        "sem_prev": _sem_prev,
+        "afp": {"azul": AFP_AZUL, "cyan": AFP_CYAN, "amar": AFP_AMAR,
+```
+
+## PARTE 2 — JS: constantes nuevas (semestre, mitigantes prev, paleta y sombreado)
+
+Busca:
+```javascript
+const MITIGANTES = PAYLOAD.mitigantes || {};
+```
+y **reemplaza por**:
+```javascript
+const MITIGANTES = PAYLOAD.mitigantes || {};
+const MITIGANTES_PREV = PAYLOAD.mitigantes_prev || {};
+const SEM_ACTUAL = PAYLOAD.sem_actual || '';
+const SEM_PREV = PAYLOAD.sem_prev || '';
+const HAS_MIT_PREV = Object.keys(MITIGANTES_PREV).length > 0;
+// Paleta por emisor: 0=rojo prioritario, 1=azul, luego colores distintos.
+const EMIS_PALETTE = ['#E4002B','#0033A0','#009E49','#F2A900','#7A3FBF',
+                      '#00A3A3','#D45500','#B5006B','#5B6770','#8DB600'];
+function _hex2rgb(h){h=h.replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function _rgb2hex(r,g,b){const t=x=>('0'+Math.round(x).toString(16)).slice(-2);return '#'+t(r)+t(g)+t(b);}
+// Sombrea el color base del emisor según nivel CENEPRED (1 claro .. 5 pleno).
+// Sin score -> plomo (mismo criterio anterior).
+function shadeByNivel(base, sc){
+  if(!(sc>=1&&sc<=5)) return '#BFC5CC';
+  const k=[0.32,0.48,0.64,0.82,1.0][sc-1];
+  const c=_hex2rgb(base);
+  return _rgb2hex(255-(255-c[0])*k, 255-(255-c[1])*k, 255-(255-c[2])*k);
+}
+```
+
+## PARTE 3 — "s/d" → "-" en las tablas
+
+Busca:
+```javascript
+function scCell(v){
+  if(v===null||v===undefined) return '<td class="sc-cell" style="background:#f0f0f0">s/d</td>';
+```
+y cambia solo `s/d` por `-`:
+```javascript
+function scCell(v){
+  if(v===null||v===undefined) return '<td class="sc-cell" style="background:#f0f0f0">-</td>';
+```
+*(Esto cubre Score MM/Inund./Sequía/Global en las tablas Score por empresa y por sector. Los tooltips del mapa siguen mostrando "s/d" en hover — dime si también los quieres en "-".)*
+
+## PARTE 4 — Columnas Mitigantes por semestre
+
+**4A.** Busca el final de `mitiCell` y **pega debajo** las dos funciones nuevas:
+```javascript
+function mitiCell(emisor){
+  const v = getMitigante(emisor);
+  // NUEVO: lógica invertida — mitigante Alto es BUENO (verde); Bajo es MALO (rojo).
+  const bg = v==='Alto'?'#d4edda' : v==='Medio'?'#fff3cd' : v==='Bajo'?'#f8d7da' : '';
+  return '<td style="text-align:center'+(bg?(';background:'+bg):'')+'">'+v+'</td>';
+}
+function getMitigantePrev(emisor){
+  if(MITIGANTES_PREV[emisor]) return MITIGANTES_PREV[emisor];
+  const norm = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  const ne = norm(emisor);
+  const f = Object.keys(MITIGANTES_PREV).find(k => norm(k) === ne);
+  return f ? MITIGANTES_PREV[f] : '\u2014';
+}
+function mitiCellPrev(emisor){
+  const v = getMitigantePrev(emisor);
+  const bg = v==='Alto'?'#d4edda' : v==='Medio'?'#fff3cd' : v==='Bajo'?'#f8d7da' : '';
+  return '<td style="text-align:center'+(bg?(';background:'+bg):'')+'">'+v+'</td>';
+}
+```
+
+**4B — Score por sector.** Busca:
+```javascript
+      .map(e=>'<tr><td><b>'+e+'</b></td>'+scCell(scores[e].global)+
+              mitiCell(e)+'</tr>').join('');
+    if(!filas) return '';
+    return '<table class="piv"><thead><tr><th>'+sec+'</th>'+
+           '<th>Score Global</th><th>Mitigantes</th></tr></thead><tbody>'+
+           filas+'</tbody></table>';
+```
+y **reemplaza por**:
+```javascript
+      .map(e=>'<tr><td><b>'+e+'</b></td>'+scCell(scores[e].global)+
+              mitiCell(e)+(HAS_MIT_PREV?mitiCellPrev(e):'')+'</tr>').join('');
+    if(!filas) return '';
+    return '<table class="piv"><thead><tr><th>'+sec+'</th>'+
+           '<th>Score Global</th><th>Mitigantes '+SEM_ACTUAL+'</th>'+
+           (HAS_MIT_PREV?'<th>Mitigantes '+SEM_PREV+'</th>':'')+'</tr></thead><tbody>'+
+           filas+'</tbody></table>';
+```
+
+**4C — Score por empresa** (misma columna, por consistencia). Busca:
+```javascript
+      '<th>Sequías Severas</th><th>Score Global</th><th>Mitigantes</th></tr></thead>'+
+      '<tbody><tr>'+scCell(s.mm)+scCell(s.inu)+scCell(s.seq)+scCell(s.global)+
+      mitiCell(e)+'</tr></tbody></table>';
+```
+y **reemplaza por**:
+```javascript
+      '<th>Sequías Severas</th><th>Score Global</th>'+
+      '<th>Mitigantes '+SEM_ACTUAL+'</th>'+(HAS_MIT_PREV?'<th>Mitigantes '+SEM_PREV+'</th>':'')+
+      '</tr></thead>'+
+      '<tbody><tr>'+scCell(s.mm)+scCell(s.inu)+scCell(s.seq)+scCell(s.global)+
+      mitiCell(e)+(HAS_MIT_PREV?mitiCellPrev(e):'')+'</tr></tbody></table>';
+```
+*(Dejé la columna Mitigantes de tbl3 —la del botón "Mostrar Mitigantes"— sin tocar. Si la quieres también con el nombre de semestre, avísame y te paso ese one-liner.)*
+
+## PARTE 5 — Mapa: quitar leyenda azul + color por emisor + leyenda nueva
+
+**5A — Quitar la leyenda azul y dejar contenedor dinámico.** Busca:
+```javascript
+      '<div class="mapa" id="mapa_'+hz.key+'"></div>'+
+      '<div class="leg">'+
+        '<span class="sw"><i style="background:'+SCORE_COLORS[0]+'"></i>1</span>'+
+        '<span class="sw"><i style="background:'+SCORE_COLORS[1]+'"></i>2</span>'+
+        '<span class="sw"><i style="background:'+SCORE_COLORS[2]+'"></i>3</span>'+
+        '<span class="sw"><i style="background:'+SCORE_COLORS[3]+'"></i>4</span>'+
+        '<span class="sw"><i style="background:'+SCORE_COLORS[4]+'"></i>5</span>'+
+
+        '<span style="margin-left:6px">Escala de riesgo del distrito</span>'+
+        '<span style="margin-left:14px">Activos:</span>'+
+        ACT_COLORS.map((c,i)=>'<span class="sw"><i style="background:'+c+
+          ';border-radius:50%"></i>'+(i+1)+'</span>').join('')+
+        '<span style="margin-left:6px">Círculo: color = CENEPRED · tamaño ∝ % del AUM de su emisor</span>'+
+      '</div>'+
+```
+y **reemplaza por**:
+```javascript
+      '<div class="mapa" id="mapa_'+hz.key+'"></div>'+
+      '<div class="leg" id="leg_'+hz.key+'"></div>'+
+```
+
+**5B — Color por emisor en los círculos.** Busca:
+```javascript
+    const visU=new Set(feats.map(f=>f.properties.IDDIST));
+    visU.forEach(u=>{
+      const d=byU[u]; if(!d) return;
+      let acts=activosDeDistrito(d);
+      if(self.filtroEmisor) acts=acts.filter(a=>a.emisor===self.filtroEmisor);
+      if(self.filtroSector) acts=acts.filter(a=>a.sector===self.filtroSector);
+      if(!acts.length) return;
+      const c=CENTROID[u]; if(!c) return;
+      const sc=d[self.col];                       // categoría CENEPRED del distrito
+      const color=actColor(sc);
+```
+y **reemplaza por**:
+```javascript
+    const visU=new Set(feats.map(f=>f.properties.IDDIST));
+    // NUEVO: color por EMISOR sobre el conjunto visible (0=rojo,1=azul,…), por AUM desc.
+    const _emisSet=new Set();
+    visU.forEach(u=>{ const d=byU[u]; if(!d) return;
+      let av=activosDeDistrito(d);
+      if(self.filtroEmisor) av=av.filter(a=>a.emisor===self.filtroEmisor);
+      if(self.filtroSector) av=av.filter(a=>a.sector===self.filtroSector);
+      av.forEach(a=>_emisSet.add(a.emisor));
+    });
+    const _order=[..._emisSet].sort((a,b)=>(TOT[b]||0)-(TOT[a]||0));
+    self.emisColorMap={}; _order.forEach((e,i)=>self.emisColorMap[e]=EMIS_PALETTE[i%EMIS_PALETTE.length]);
+    self.emisOrder=_order;
+    self.renderLeyenda();
+    visU.forEach(u=>{
+      const d=byU[u]; if(!d) return;
+      let acts=activosDeDistrito(d);
+      if(self.filtroEmisor) acts=acts.filter(a=>a.emisor===self.filtroEmisor);
+      if(self.filtroSector) acts=acts.filter(a=>a.sector===self.filtroSector);
+      if(!acts.length) return;
+      const c=CENTROID[u]; if(!c) return;
+      const sc=d[self.col];                       // categoría CENEPRED del distrito
+```
+*(Se elimina el `const color=actColor(sc);` a nivel distrito; el color pasa a calcularse por activo.)*
+
+**5C — Aplicar color por-ítem.** Busca:
+```javascript
+        const ic=L.divIcon({className:'act-ic', html:circleSVG(color,px),
+          iconSize:[px,px], iconAnchor:[px/2,px/2]});
+```
+y **reemplaza por**:
+```javascript
+        const _base=self.emisColorMap[it.emisor]||'#888888';
+        const color=shadeByNivel(_base, sc);      // color=emisor · intensidad=CENEPRED
+        const ic=L.divIcon({className:'act-ic', html:circleSVG(color,px),
+          iconSize:[px,px], iconAnchor:[px/2,px/2]});
+```
+
+**5D — Método `renderLeyenda` en la clase del mapa.** Busca:
+```javascript
+    // CAMBIO 3: refrescar la tabla transpuesta con los filtros activos del mapa
+    if(typeof buildTbl3==='function') buildTbl3(this.hz, this.filtroEmisor, this.filtroSector);
+  }
+}
+
+let MAPAS=[];
+```
+y **reemplaza por**:
+```javascript
+    // CAMBIO 3: refrescar la tabla transpuesta con los filtros activos del mapa
+    if(typeof buildTbl3==='function') buildTbl3(this.hz, this.filtroEmisor, this.filtroSector);
+  }
+  // NUEVO: leyenda por emisor debajo del mapa (color = emisor).
+  renderLeyenda(){
+    const el=document.getElementById('leg_'+this.hz.key); if(!el) return;
+    const order=this.emisOrder||[];
+    if(!order.length){
+      el.innerHTML='<span style="color:var(--plomo)">Sin activos para el filtro actual.</span>';
+      return;
+    }
+    let h=order.map(e=>'<span class="sw"><i style="background:'+
+      (this.emisColorMap[e]||'#888')+';border-radius:50%"></i>'+e+'</span>').join('');
+    h+='<span style="margin-left:10px;color:var(--plomo)">'+
+       'Intensidad = nivel CENEPRED · tamaño ∝ % del AUM del emisor</span>';
+    el.innerHTML=h;
+  }
+}
+
+let MAPAS=[];
+```
+
+---
+
+**Qué NO se rompe:** `scoreColor`/`SCORE_COLORS` siguen intactos, así que el sombreado azul del distrito **permanece** en vistas dep/prov/dist (solo quité su *leyenda*). Si además quieres que el fondo del distrito deje de ser azul, es un cambio aparte de 1 línea en `render()` — dímelo. `actColor`/`ACT_COLORS` quedan definidos pero sin uso (inofensivo). Todo lo demás (tamaños, anti-saturación, filtros, tbl3, Excel) queda igual.
