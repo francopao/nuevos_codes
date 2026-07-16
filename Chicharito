@@ -1,0 +1,67 @@
+Progreso confirmado: el mapeo ya está perfecto (8 tickers no mapeados, los correctos) y el WARNING de `TOT_RETURN` desapareció. Pero apareció un `TypeError` nuevo, y la causa es distinta a lo que esperábamos.
+
+El error real es: `Invalid value '...' for dtype 'str'`. Lo que pasa es que **hay columnas con nombres duplicados** (dos columnas llamadas `300009100001`), entonces `Precios_Con_Dividendos_R.iloc[:, _j]` en algunos casos sigue devolviendo algo que al asignarse choca con una columna de tipo `str` de pandas 3. El `.iloc[:, _j] =` con reasignación es lo que falla.
+
+La solución más robusta es **no reasignar in-place columna por columna**, sino reconstruir el DataFrame completo de una vez con `.apply()`. Déjame validarlo:
+
+Funciona perfecto: reconstruye todo el DataFrame de una vez, convierte cada columna por posición a float64, y **preserva los nombres originales aunque haya duplicados**. Sin reasignación in-place, no hay conflicto de dtype.
+
+Aquí está la corrección definitiva. Reemplaza el bloque `to_numeric` que te fallló (el que pusiste con `.iloc[:, _j] =`).
+
+## La corrección
+
+**Bloque "Con dividendos".** Reemplaza esto:
+
+```python
+for _j in range(Precios_Con_Dividendos_R.shape[1]):
+    Precios_Con_Dividendos_R.iloc[:, _j] = pd.to_numeric(
+        Precios_Con_Dividendos_R.iloc[:, _j], errors='coerce'
+    ).fillna(0).astype('float64')
+```
+
+**por:**
+
+```python
+# Conversión a numérico reconstruyendo TODO el DataFrame de una vez (no
+# in-place). Iterar por posición y reasignar con .iloc fallaba en pandas 3
+# cuando hay columnas con NOMBRE DUPLICADO (p.ej. dos tickers que mapean al
+# mismo SBS) o columnas con dtype 'str': la reasignación choca con el dtype.
+# Reconstruir el frame preserva los nombres (incluso duplicados) y fuerza
+# float64 en todo, sin conflictos de dtype.
+_num = {j: pd.to_numeric(Precios_Con_Dividendos_R.iloc[:, j], errors='coerce').fillna(0).astype('float64')
+        for j in range(Precios_Con_Dividendos_R.shape[1])}
+_cols = Precios_Con_Dividendos_R.columns
+_idx = Precios_Con_Dividendos_R.index
+Precios_Con_Dividendos_R = pd.DataFrame(_num)
+Precios_Con_Dividendos_R.index = _idx
+Precios_Con_Dividendos_R.columns = _cols
+```
+
+**Bloque "Sin dividendos".** Reemplaza esto:
+
+```python
+for _j in range(Precios_Sin_Dividendos_R.shape[1]):
+    Precios_Sin_Dividendos_R.iloc[:, _j] = pd.to_numeric(
+        Precios_Sin_Dividendos_R.iloc[:, _j], errors='coerce'
+    ).fillna(0).astype('float64')
+```
+
+**por:**
+
+```python
+# Ídem bloque Con Dividendos: reconstrucción completa para evitar el conflicto
+# de dtype al reasignar columnas con nombre duplicado en pandas 3.
+_num = {j: pd.to_numeric(Precios_Sin_Dividendos_R.iloc[:, j], errors='coerce').fillna(0).astype('float64')
+        for j in range(Precios_Sin_Dividendos_R.shape[1])}
+_cols = Precios_Sin_Dividendos_R.columns
+_idx = Precios_Sin_Dividendos_R.index
+Precios_Sin_Dividendos_R = pd.DataFrame(_num)
+Precios_Sin_Dividendos_R.index = _idx
+Precios_Sin_Dividendos_R.columns = _cols
+```
+
+---
+
+Nota: el error te muestra que la columna `300009100001` (SCOTIAC1) ya viene con datos correctos (`23.445`, `23.817`...) — o sea, la traducción a SBS está funcionando y los precios se están alineando bien. El único obstáculo era la reasignación in-place, que esta versión evita.
+
+Aplica los dos reemplazos y sigue. El siguiente punto probable es que aparezcan nombres de columna duplicados más adelante (por los tickers que mapean al mismo SBS), pero ya tenemos los helpers para eso. Cuéntame hasta dónde llega.
