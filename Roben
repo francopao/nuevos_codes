@@ -1,0 +1,69 @@
+Veo el problema de inmediato. Los WARNING revelan que la traducción tomó la **fila equivocada**: está mapeando valores de precio (`23.445`, `#N/A N/A`, fechas) en vez de tickers. Eso significa que en tu archivo real, los tickers **no están en `iloc[4]`** sino en otra fila.
+
+Déjame verificar la estructura exacta de tu RVL real:
+
+La estructura es correcta: `iloc[4]` **sí** tiene los tickers. Pero el error muestra que el código está tomando `iloc[5]` (la fila de precios). La causa es cómo `polars` lee la hoja: cuando lee con `has_header=False`, puede desplazar los índices respecto a lo que veo con openpyxl.
+
+El problema es un **desfase de una fila** entre cómo openpyxl indexa y cómo lo hace el DataFrame que usa tu código (que viene de polars). El código original usaba `loc[3]` y funcionaba; ahora `iloc[4]` cae en los precios. Verifico cómo quedan los índices vía polars:
+
+Calamine no puede con esa hoja en el sandbox (límite de memoria). Pero no lo necesito — el error que me pasaste ya me dice todo. Analicémoslo:
+
+El WARNING lista como "no mapeados" valores como `'2018-12-31 00:00:00'`, `'23.445'`, `'#N/A N/A'`. Esos son claramente la **fila de precios** (`iloc[5]`), no los tickers (`iloc[4]`). Es decir: en el DataFrame que produce polars en tu entorno, la fila de tickers está en un índice distinto al que veo con openpyxl.
+
+Aquí está la razón, y es importante: el código **original** usaba `.loc[3]`, no `.iloc[3]`. Con polars, cuando lees `TOT_RETURN_INDEX_GROSS_DVDS` y filtras columnas, el DataFrame conserva su índice, y `.loc[3]` accede a la **etiqueta** 3, no a la posición 4. Al cambiar yo a `.iloc[4]` introduje un desalineamiento.
+
+La solución correcta y robusta: en vez de adivinar el número de fila, **localizar dinámicamente la fila que contiene los tickers** (la que tiene "Equity"). Eso es inmune a desfases. Aquí está el reemplazo corregido:
+
+El localizador dinámico funciona. Te doy el reemplazo corregido para los dos bloques. Esto es más robusto que cualquier número fijo porque busca la fila por su contenido.
+
+## Corrección del Cambio 2 (reemplaza lo que pegaste antes)
+
+**Primero**, agrega esta función auxiliar. Ponla **junto a las otras funciones helper** que ya agregaste (por ejemplo, justo después de `_renombrar_columnas_precios_a_sbs`):
+
+```python
+def _fila_tickers_rvl(df_precios):
+    """Localiza dinámicamente la fila de df_precios que contiene los tickers
+    de Bloomberg (la que tiene celdas con 'Equity'). Evita depender de un
+    número de fila fijo, que cambia según cómo el motor de lectura indexe la
+    hoja RVL. Devuelve la ETIQUETA de índice de esa fila."""
+    for idx in df_precios.index:
+        vals = df_precios.loc[idx].astype(str)
+        if vals.str.contains("Equity", na=False).any():
+            return idx
+    raise ValueError(
+        "No se encontró la fila de tickers (con 'Equity') en la hoja RVL. "
+        "Revisa la estructura de la hoja RVL."
+    )
+```
+
+**Luego**, corrige los dos bloques.
+
+**2a — "Con dividendos".** Donde ahora tienes:
+```python
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Con_Dividendos.iloc[4].tolist())
+```
+**Reemplázalo por:**
+```python
+_fila_tk = _fila_tickers_rvl(Precios_Con_Dividendos)
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Con_Dividendos.loc[_fila_tk].tolist())
+```
+
+**2b — "Sin dividendos".** Donde ahora tienes:
+```python
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Sin_Dividendos.iloc[4].tolist())
+```
+**Reemplázalo por:**
+```python
+_fila_tk = _fila_tickers_rvl(Precios_Sin_Dividendos)
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Sin_Dividendos.loc[_fila_tk].tolist())
+```
+
+---
+
+## Cómo confirmar que quedó bien
+
+Cuando corras, el WARNING de tickers no mapeados debe listar **nombres de tickers reales** (como `SMT CN Equity`, `ARA CN Equity`) — unos 8, no 77. Si vuelve a listar números como `23.445` o fechas, significa que el localizador no encontró la fila; avísame y lo revisamos, pero no debería pasar porque ahora busca por el contenido "Equity", no por posición.
+
+El `TypeError` que te salió era una consecuencia directa: al tomar la fila de precios como nombres, quedaron columnas con nombres duplicados (`156.05`, `1.15`, `3.64` aparecían repetidos), y eso hizo que `Precios_Con_Dividendos_R[column]` devolviera un DataFrame en vez de una Serie, rompiendo el `to_numeric`. Con la fila correcta de tickers (traducidos a SBS únicos), desaparece.
+
+¿Lo pruebas y me confirmas qué lista el WARNING ahora?
