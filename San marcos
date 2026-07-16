@@ -1,0 +1,84 @@
+Veo que subiste un archivo llamado `libelula.txt`. Déjame revisar qué contiene.
+
+Buenas noticias: el mapeo de tickers **ya funciona** — el WARNING ahora lista tickers reales (9, no 77), justo lo que esperábamos. El localizador dinámico encontró la fila correcta.
+
+Pero apareció un caso nuevo que hay que manejar. Mira el primer ticker no mapeado: `'TOT_RETURN_INDEX_GROSS_DVDS Equity'`. Ese no es un instrumento — es la **etiqueta de tipo de campo** que se coló como si fuera un ticker. Esto explica el `TypeError` que sigue saliendo.
+
+Déjame verificar la estructura para confirmar:
+
+Confirmado. La fila de tickers (`iloc[4]`) tiene en su primera columna la etiqueta del campo (`Px_last` o `TOT_RETURN_INDEX_GROSS_DVDS`) en lugar de un ticker. Como en el bloque "Con dividendos" esa etiqueta es `TOT_RETURN_INDEX_GROSS_DVDS`, mi función la trató como ticker → no mapeó → quedó como nombre de columna → y al haber varias columnas con nombres no-únicos o problemáticos, el `to_numeric` recibió un DataFrame en vez de una Serie → `TypeError`.
+
+La causa real es más sutil: el `columnas[1:]` del código quita la **primera** columna, pero esa etiqueta de campo no siempre está en la posición que se elimina. La solución robusta: al traducir, si un valor es una etiqueta de campo conocida (`Px_last`, `TOT_RETURN_INDEX_GROSS_DVDS`, etc.), tratarla como no-instrumento. Pero más simple y seguro: **de-duplicar las columnas resultantes** para que `to_numeric` nunca reciba un DataFrame.
+
+Déjame darte la corrección precisa. Hay que ajustar la función de renombrado para que las columnas finales sean únicas y las etiquetas de campo no rompan nada.
+
+Confirmado el mecanismo y la solución. El problema de fondo: nombres de columna duplicados hacen que `df[col]` devuelva un DataFrame. Pero de-duplicar con sufijos rompería el contrato de nombres de BD. La mejor solución es hacer el `to_numeric` **por posición** en vez de por nombre, así nunca importa si hay nombres repetidos.
+
+Aquí está la corrección. Es un cambio pequeño y quirúrgico en los dos bucles `to_numeric` (bloques Con y Sin dividendos).
+
+## La corrección
+
+Busca este bloque (aparece **dos veces**, en "Con dividendos" ~línea 743 y en "Sin dividendos" un poco más abajo):
+
+```python
+for column in Precios_Con_Dividendos_R.select_dtypes(include=['object','string']).columns:
+    Precios_Con_Dividendos_R[column] = pd.to_numeric(Precios_Con_Dividendos_R[column], errors='coerce').fillna(
+        0).astype('float64')
+```
+
+**Reemplázalo por** (versión por posición, inmune a nombres de columna duplicados):
+
+```python
+# Conversión a numérico POR POSICIÓN (no por nombre): si dos columnas de
+# precios tienen el mismo nombre (p.ej. tickers que no se pudieron mapear a
+# SBS y colisionan, o etiquetas de campo tipo 'Px_last'), df[nombre] devolvería
+# un DataFrame y pd.to_numeric fallaría con "arg must be a 1-d array". Iterando
+# por posición con .iloc cada columna es siempre una Serie 1-D.
+for _j in range(Precios_Con_Dividendos_R.shape[1]):
+    Precios_Con_Dividendos_R.iloc[:, _j] = pd.to_numeric(
+        Precios_Con_Dividendos_R.iloc[:, _j], errors='coerce'
+    ).fillna(0).astype('float64')
+```
+
+Y el bloque gemelo en "Sin dividendos":
+
+```python
+for column in Precios_Sin_Dividendos_R.select_dtypes(include=['object','string']).columns:
+    Precios_Sin_Dividendos_R[column] = pd.to_numeric(Precios_Sin_Dividendos_R[column], errors='coerce').fillna(
+        0).astype('float64')
+```
+
+**Reemplázalo por:**
+
+```python
+# Conversión a numérico POR POSICIÓN (ver nota en el bloque Con Dividendos).
+for _j in range(Precios_Sin_Dividendos_R.shape[1]):
+    Precios_Sin_Dividendos_R.iloc[:, _j] = pd.to_numeric(
+        Precios_Sin_Dividendos_R.iloc[:, _j], errors='coerce'
+    ).fillna(0).astype('float64')
+```
+
+---
+
+## Sobre el ticker `TOT_RETURN_INDEX_GROSS_DVDS Equity` en el WARNING
+
+Ese no es un instrumento real, es la etiqueta de campo que se cuela en la primera columna de la fila de tickers. Es inofensivo (su columna de precio simplemente no cruza con nada), pero para que el WARNING no te confunda, puedes filtrarlo. Si quieres, en la función `_renombrar_columnas_precios_a_sbs`, cambia el chequeo del warning para ignorar esas etiquetas:
+
+```python
+        if not ok and c is not None:
+            no_mapeados.append(c)
+```
+
+por:
+
+```python
+        _etiquetas_campo = ("Px_last", "TOT_RETURN_INDEX_GROSS_DVDS")
+        if not ok and c is not None and not str(c).startswith(_etiquetas_campo):
+            no_mapeados.append(c)
+```
+
+Así el WARNING solo listará los 8 instrumentos reales sin mapear (SMT CN, ARA CN, GBVLAC1 PE, FSM US, FSM US2, TAL CN, 1506604D CN, FALAB CI), que son los legítimamente inmapeables.
+
+---
+
+Con el cambio del `to_numeric` por posición, el `TypeError` desaparece y el script sigue de largo. ¿Lo aplicas y me dices hasta dónde avanza ahora?
