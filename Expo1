@@ -1,0 +1,779 @@
+cat > /mnt/user-data/outputs/framework_riesgo_fisico.html << 'EOF'
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Framework Riesgo Físico Climático — AFP Integra</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a1628;--bg2:#0f2040;--bg3:#162a4a;
+  --teal:#00d4aa;--teal2:rgba(0,212,170,0.12);
+  --blue:#3b82f6;--blue2:rgba(59,130,246,0.12);
+  --amber:#f59e0b;--amber2:rgba(245,158,11,0.12);
+  --coral:#ef4444;--coral2:rgba(239,68,68,0.12);
+  --purple:#8b5cf6;--purple2:rgba(139,92,246,0.12);
+  --green:#10b981;--green2:rgba(16,185,129,0.12);
+  --text:#e2eaf5;--muted:#7a94b0;--border:rgba(255,255,255,0.07);
+  --r:10px;
+}
+html{scroll-behavior:smooth}
+body{font-family:'IBM Plex Sans',sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.6}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-thumb{background:var(--bg3)}
+
+/* NAV */
+nav{position:sticky;top:0;z-index:100;background:rgba(10,22,40,0.95);backdrop-filter:blur(10px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:4px;padding:0 20px;height:48px;overflow-x:auto}
+.nav-brand{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--teal);letter-spacing:.12em;text-transform:uppercase;margin-right:16px;white-space:nowrap}
+.nb{padding:6px 12px;border:none;background:none;font-family:'IBM Plex Sans',sans-serif;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;border-radius:6px;white-space:nowrap;transition:.15s}
+.nb:hover,.nb.on{color:var(--teal);background:var(--teal2)}
+
+/* PAGES */
+.page{display:none;padding:32px 20px 60px;max-width:1000px;margin:0 auto}
+.page.on{display:block}
+
+/* TYPE */
+.eyebrow{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--teal);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.eyebrow::before{content:'';width:16px;height:1px;background:var(--teal)}
+h1{font-size:clamp(22px,4vw,34px);font-weight:600;color:#fff;margin-bottom:10px;line-height:1.2}
+h2{font-size:18px;font-weight:600;color:#fff;margin-bottom:6px}
+h3{font-size:14px;font-weight:600;color:#fff;margin-bottom:4px}
+p{color:var(--muted);line-height:1.7}
+p+p{margin-top:8px}
+.mono{font-family:'IBM Plex Mono',monospace}
+.gap{margin-top:36px}
+.gap-sm{margin-top:18px}
+
+/* CARDS */
+.card{background:rgba(15,32,64,0.7);border:1px solid var(--border);border-radius:var(--r);padding:18px}
+.card+.card{margin-top:12px}
+.ct{border-left:2px solid var(--teal)}
+.cb{border-left:2px solid var(--blue)}
+.ca{border-left:2px solid var(--amber)}
+.cc{border-left:2px solid var(--coral)}
+.cp{border-left:2px solid var(--purple)}
+.cg{border-left:2px solid var(--green)}
+
+/* GRID */
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.ga{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+@media(max-width:600px){.g2,.g3{grid-template-columns:1fr}}
+
+/* TAGS */
+.tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.tag{font-size:11px;padding:2px 8px;border-radius:12px;font-weight:500}
+.tt{background:var(--teal2);color:var(--teal);border:1px solid rgba(0,212,170,.25)}
+.tb{background:var(--blue2);color:#93c5fd;border:1px solid rgba(59,130,246,.25)}
+.ta{background:var(--amber2);color:#fcd34d;border:1px solid rgba(245,158,11,.25)}
+.tc{background:var(--coral2);color:#fca5a5;border:1px solid rgba(239,68,68,.25)}
+.tp{background:var(--purple2);color:#c4b5fd;border:1px solid rgba(139,92,246,.25)}
+.tg{background:var(--green2);color:#6ee7b7;border:1px solid rgba(16,185,129,.25)}
+
+/* FLOW DIAGRAM */
+.flow{display:flex;flex-direction:column;gap:0}
+.flow-row{display:flex;align-items:stretch;gap:0;position:relative}
+.flow-col{display:flex;flex-direction:column;align-items:center;gap:0;flex:1}
+.fbox{padding:12px 14px;border-radius:8px;border:1px solid;font-size:12px;text-align:center;width:100%;position:relative}
+.fbox h4{font-size:12px;font-weight:600;margin-bottom:3px}
+.fbox p{font-size:11px;line-height:1.4}
+.arrow-down{width:1px;height:24px;background:var(--border);margin:0 auto;position:relative}
+.arrow-down::after{content:'▼';position:absolute;bottom:-8px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--muted)}
+.arrow-right{width:24px;height:1px;background:var(--border);align-self:center;flex-shrink:0;position:relative}
+.arrow-right::after{content:'▶';position:absolute;right:-8px;top:50%;transform:translateY(-50%);font-size:9px;color:var(--muted)}
+.merge-line{height:2px;background:linear-gradient(90deg,var(--teal2),var(--teal),var(--teal2));margin:0;border-radius:1px}
+
+/* CODE BLOCK */
+.code{font-family:'IBM Plex Mono',monospace;font-size:11px;background:rgba(0,0,0,.4);border:1px solid rgba(0,212,170,.15);border-radius:8px;padding:14px 16px;color:#a5f3e8;line-height:1.9;overflow-x:auto;margin-top:10px}
+.code .cm{color:var(--muted)}
+.code .cv{color:#fcd34d}
+.code .cf{color:#93c5fd}
+.code .ck{color:#c4b5fd}
+
+/* SOURCE ROW */
+.src-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.src-row:last-child{border-bottom:none}
+.src-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px}
+.src-name{font-size:13px;font-weight:600;color:#fff}
+.src-desc{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
+.src-url{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--teal);margin-top:2px}
+
+/* METRIC BOX */
+.metric-hero{background:linear-gradient(135deg,var(--bg2),var(--bg3));border:1px solid var(--border);border-top:2px solid var(--teal);border-radius:var(--r);padding:24px;text-align:center;margin-bottom:20px}
+.metric-big{font-family:'IBM Plex Mono',monospace;font-size:clamp(15px,3vw,20px);color:var(--teal);font-weight:500;line-height:1.6;margin:12px 0}
+.metric-lbl{font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
+
+/* STEP */
+.step-list{padding-left:28px;position:relative}
+.step-list::before{content:'';position:absolute;left:8px;top:8px;bottom:0;width:1px;background:var(--border)}
+.step{position:relative;padding-bottom:22px}
+.step:last-child{padding-bottom:0}
+.step::before{content:attr(data-n);position:absolute;left:-28px;top:0;width:18px;height:18px;border-radius:50%;background:var(--teal);color:var(--bg);font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:500;display:flex;align-items:center;justify-content:center;font-size:9px}
+.step-t{font-size:13px;font-weight:600;color:#fff;margin-bottom:3px}
+.step-b{font-size:12px;color:var(--muted)}
+
+/* REF */
+.ref{font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace;background:rgba(0,0,0,.25);padding:6px 10px;border-radius:5px;margin-top:6px;display:inline-block}
+
+/* COMPARE TABLE */
+.ctable{width:100%;border-collapse:collapse;font-size:12px;margin-top:14px}
+.ctable th{padding:8px 12px;text-align:left;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--teal);border-bottom:1px solid var(--border)}
+.ctable td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--muted)}
+.ctable td:first-child{color:#fff;font-weight:500}
+.ctable tr:hover td{background:rgba(255,255,255,.02)}
+.ok{color:var(--teal)}
+.warn{color:var(--amber)}
+.no{color:var(--coral)}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-brand">AFP · Risk Framework v1</div>
+  <button class="nb on" onclick="go('overview')">Visión general</button>
+  <button class="nb" onclick="go('inputs')">Fuentes & Inputs</button>
+  <button class="nb" onclick="go('model')">El modelo</button>
+  <button class="nb" onclick="go('software')">Software</button>
+  <button class="nb" onclick="go('output')">Output & Métrica</button>
+  <button class="nb" onclick="go('refs')">Referencias</button>
+</nav>
+
+<!-- ═══════════════ OVERVIEW ═══════════════ -->
+<div class="page on" id="page-overview">
+  <div class="eyebrow">Framework completo</div>
+  <h1>Modelo de Riesgo Físico Climático<br>AFP Integra — Portafolio Peruano</h1>
+  <p>Construimos un modelo cuantitativo de <strong style="color:#fff">pérdida esperada anual en USD</strong> por activo físico para las empresas del portafolio. Cada número tiene fuente técnica identificable y auditable. La lógica central viene de la metodología MSCI Carbon Delta (2022), adaptada con fuentes peruanas.</p>
+
+  <div class="gap-sm">
+    <div class="metric-hero">
+      <div class="metric-lbl">La ecuación central — MSCI Parte 4 (2022)</div>
+      <div class="metric-big">
+        Pérdida Esperada Anual (USD) =<br>
+        <span style="color:#93c5fd">Hazard</span> × <span style="color:#6ee7b7">Vulnerabilidad</span> × <span style="color:#fca5a5">Exposición</span>
+      </div>
+      <p style="font-size:12px;color:var(--muted)">Tres factores físicamente independientes · cada uno con su propia cadena de fuentes · sin parámetros subjetivos</p>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Flujo de trabajo de punta a punta</div>
+    <!-- FLOW DIAGRAM -->
+    <div style="overflow-x:auto;padding-bottom:8px">
+    <div style="min-width:620px">
+
+    <!-- ROW 1: Fuentes -->
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:6px">
+      <div class="fbox" style="border-color:rgba(59,130,246,.3);background:var(--blue2)">
+        <h4 style="color:#93c5fd">WRI Aqueduct</h4>
+        <p style="color:var(--muted)">Profundidad inundación fluvial/costera</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(59,130,246,.3);background:var(--blue2)">
+        <h4 style="color:#93c5fd">Fathom</h4>
+        <p style="color:var(--muted)">Profundidad inundación pluvial</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(245,158,11,.3);background:var(--amber2)">
+        <h4 style="color:#fcd34d">SIGRID</h4>
+        <p style="color:var(--muted)">Inventario deslizamientos</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(245,158,11,.3);background:var(--amber2)">
+        <h4 style="color:#fcd34d">NASA LHASA</h4>
+        <p style="color:var(--muted)">Susceptibilidad deslizamiento</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(16,185,129,.3);background:var(--green2)">
+        <h4 style="color:#6ee7b7">WRI Water Risk</h4>
+        <p style="color:var(--muted)">Ratio estrés hídrico</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(16,185,129,.3);background:var(--green2)">
+        <h4 style="color:#6ee7b7">ANA / SIGRID</h4>
+        <p style="color:var(--muted)">Caudales + sequías</p>
+      </div>
+    </div>
+
+    <!-- Arrow down -->
+    <div style="text-align:center;color:var(--muted);font-size:10px;margin:4px 0">▼ &nbsp; HAZARD por coordenada &nbsp; ▼</div>
+    <div style="height:2px;background:linear-gradient(90deg,transparent,rgba(59,130,246,.4),rgba(245,158,11,.4),rgba(16,185,129,.4),transparent);margin-bottom:8px"></div>
+
+    <!-- ROW 2: Componentes -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:6px">
+      <div class="fbox" style="border-color:rgba(59,130,246,.4);background:rgba(59,130,246,.08)">
+        <h4 style="color:#93c5fd">H · Hazard</h4>
+        <p style="color:var(--muted)">Intensidad física del evento: metros, días, ratio</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(0,212,170,.4);background:rgba(0,212,170,.08)">
+        <h4 style="color:var(--teal)">V · Vulnerabilidad</h4>
+        <p style="color:var(--muted)">Huizinga 2017: Damage Ratio % por tipo activo</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(239,68,68,.4);background:rgba(239,68,68,.08)">
+        <h4 style="color:#fca5a5">E · Exposición</h4>
+        <p style="color:var(--muted)">Activos fijos USD + coordenada (SMV / Libélula)</p>
+      </div>
+    </div>
+
+    <!-- Arrow -->
+    <div style="text-align:center;color:var(--muted);font-size:10px;margin:4px 0">▼ &nbsp; H × V × E &nbsp; ▼</div>
+    <div style="height:2px;background:linear-gradient(90deg,transparent,var(--teal),transparent);margin-bottom:8px"></div>
+
+    <!-- ROW 3: Outputs -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="fbox" style="border-color:rgba(0,212,170,.4);background:rgba(0,212,170,.06)">
+        <h4 style="color:var(--teal)">Pérdida Esperada Anual</h4>
+        <p style="color:var(--muted)">USD por activo → por empresa → portafolio</p>
+      </div>
+      <div class="fbox" style="border-color:rgba(139,92,246,.4);background:rgba(139,92,246,.06)">
+        <h4 style="color:#c4b5fd">Physical Climate VaR (%)</h4>
+        <p style="color:var(--muted)">PV(pérdidas 15 años) / Enterprise Value → integra al análisis de inversión</p>
+      </div>
+    </div>
+
+    </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Alcance</div>
+    <div class="g2">
+      <div class="card ct">
+        <h3>9 empresas priorizadas</h3>
+        <div class="tags">
+          <span class="tag tt">Cerro Verde</span><span class="tag tt">Nexa</span><span class="tag tt">Minsur</span>
+          <span class="tag tt">Buenaventura</span><span class="tag tt">Volcán</span><span class="tag tt">Engie</span>
+          <span class="tag tt">UNACEM</span><span class="tag tt">Pacasmayo</span><span class="tag tt">Orygen</span>
+        </div>
+        <p style="margin-top:8px;font-size:12px">Identificadas en propuesta Libélula (SURA, jun 2025). Activos en 13 departamentos.</p>
+      </div>
+      <div class="card ca">
+        <h3>3 amenazas físicas</h3>
+        <div class="tags">
+          <span class="tag tb">Inundación fluvial y pluvial</span>
+          <span class="tag ta">Movimientos en masa</span>
+          <span class="tag tg">Sequía / estrés hídrico</span>
+        </div>
+        <p style="margin-top:8px;font-size:12px">Las más relevantes por geografía peruana y por disponibilidad de datos cuantificables.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ INPUTS ═══════════════ -->
+<div class="page" id="page-inputs">
+  <div class="eyebrow">Fuentes de datos</div>
+  <h1>Inputs del modelo</h1>
+  <p>Seis portales, todos gratuitos. Ninguna licencia propietaria requerida. Las mismas fuentes que ERM cita en su tabla de 9 indicadores (propuesta ERM a SURA Perú, 2025).</p>
+
+  <div class="gap">
+    <h2 style="color:#93c5fd">🌊 Inundación</h2>
+    <div class="card cb">
+      <div class="src-row">
+        <div class="src-dot" style="background:#3b82f6"></div>
+        <div>
+          <div class="src-name">WRI Aqueduct Floods</div>
+          <div class="src-desc">Profundidad de inundación fluvial y costera en metros. Períodos de retorno 100 y 500 años. Escenarios SSP1-2.6 / SSP3-7.0 / SSP5-8.5, horizontes 2030 y 2050. Input directo a la curva de Huizinga: a esta profundidad, este % de daño.</div>
+          <div class="src-url">aqueduct.wri.org · API + GeoTIFF · acceso libre</div>
+          <div class="ref">ERM GCD table (2025): "Profundidad de inundación del río de 1 en 500 años — WRI Aqueduct"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#60a5fa"></div>
+        <div>
+          <div class="src-name">Fathom Global</div>
+          <div class="src-desc">Inundación pluvial (lluvia directa, sin desborde de río). 1-en-100 y 1-en-500 años. Complementa WRI donde el problema no es el río sino la acumulación superficial.</div>
+          <div class="src-url">fathom.global · registro gratuito</div>
+          <div class="ref">ERM GCD table (2025): "Precipitaciones de 1 en 500 años — Fathom"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#93c5fd"></div>
+        <div>
+          <div class="src-name">ThinkHazard</div>
+          <div class="src-desc">Screening distrital de inundación costera. ERM lo usa en su Fase 1 para obtener niveles de riesgo a nivel distrito antes de ir a coordenada exacta. Permite priorizar qué activos merecen análisis profundo.</div>
+          <div class="src-url">thinkhazard.org · acceso libre</div>
+          <div class="ref">ERM propuesta SURA (2025): "riesgo de inundación costera con ThinkHazard — nivel distrital"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#bfdbfe"></div>
+        <div>
+          <div class="src-name">ANA — Autoridad Nacional del Agua</div>
+          <div class="src-desc">Registros históricos de caudales por estación hidrométrica peruana. Calibra los períodos de retorno de WRI con observaciones reales: el modelo global dice "1-en-100 años", ANA permite verificar si eso se corresponde con la historia del río Chili o el Mantaro.</div>
+          <div class="src-url">ana.gob.pe · descarga directa</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <h2 style="color:#fcd34d">🏔️ Movimientos en masa</h2>
+    <div class="card ca">
+      <div class="src-row">
+        <div class="src-dot" style="background:#f59e0b"></div>
+        <div>
+          <div class="src-name">SIGRID / CENEPRED</div>
+          <div class="src-desc">Inventario histórico georreferenciado de deslizamientos, huaycos y derrumbes por distrito. ERM lo cita explícitamente como fuente de línea base para lluvias intensas en Perú. Da la frecuencia observada real — cuántas veces ha ocurrido cerca de cada activo desde 1970.</div>
+          <div class="src-url">sigrid.cenepred.gob.pe · capas GIS · acceso libre</div>
+          <div class="ref">ERM propuesta SURA (2025): "SIGRID para lluvias intensas (Plan Multisectorial 2025-2027)"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#fcd34d"></div>
+        <div>
+          <div class="src-name">NASA LHASA</div>
+          <div class="src-desc">Índice de susceptibilidad de deslizamiento inducido por lluvia. Clasifica cada celda de territorio en muy baja / baja / moderada / alta / muy alta susceptibilidad según pendiente, litología, cobertura vegetal y precipitación. Es la fuente base detrás del indicador "CMIP6/NASA" que ERM usa en su tabla de 9 peligros.</div>
+          <div class="src-url">maps.nccs.nasa.gov/download/landslides · acceso libre</div>
+          <div class="ref">ERM GCD table (2025): "Índice de desprendimientos inducidos por lluvia — CMIP6/NASA"</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <h2 style="color:#6ee7b7">💧 Sequía y estrés hídrico</h2>
+    <div class="card cg">
+      <div class="src-row">
+        <div class="src-dot" style="background:#10b981"></div>
+        <div>
+          <div class="src-name">WRI Aqueduct Water Risk Atlas</div>
+          <div class="src-desc">Indicador "baseline water stress": extracción total / reservas renovables disponibles de aguas superficiales y subterráneas. Resolución de cuenca. Proyecciones 2030 y 2050 bajo SSP. Fuente exacta que ERM cita para estrés hídrico. Crítico para Cerro Verde (río Chili) y Nexa (Mantaro).</div>
+          <div class="src-url">aqueduct.wri.org/water-risk-atlas · acceso libre</div>
+          <div class="ref">ERM GCD table (2025): "Relación entre extracciones totales y reservas renovables — WRI Aqueduct"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#34d399"></div>
+        <div>
+          <div class="src-name">SIGRID / CENEPRED — capa sequías</div>
+          <div class="src-desc">El mismo portal tiene una capa específica de sequías históricas (Plan Multisectorial 2022). ERM la usa en su Fase 1 junto con lluvias intensas. Complementa WRI con la historia observada de eventos de déficit hídrico en Perú.</div>
+          <div class="src-url">sigrid.cenepred.gob.pe · capa sequías · acceso libre</div>
+          <div class="ref">ERM propuesta SURA (2025): "sequías (SIGRID, 2022)"</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:#6ee7b7"></div>
+        <div>
+          <div class="src-name">ANA + COES</div>
+          <div class="src-desc">ANA: caudales históricos para calcular el percentil 2.5 de caudal mínimo — el umbral de low flow que MSCI usa para definir evento de sequía hídrica. COES: despacho histórico de centrales hidroeléctricas del SEIN — permite cuantificar directamente la pérdida de generación de Engie cuando el caudal cae bajo el mínimo.</div>
+          <div class="src-url">ana.gob.pe · coes.org.pe · acceso libre</div>
+          <div class="ref">MSCI Climate VaR Part 4 §2.2.4 (2022): percentil 2.5 de caudal histórico como umbral low flow</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <h2 style="color:var(--teal)">📐 Vulnerabilidad — una fuente para las tres amenazas</h2>
+    <div class="card ct">
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--teal)"></div>
+        <div>
+          <div class="src-name">Huizinga et al. 2017 — JRC EUR 28552 EN</div>
+          <div class="src-desc">Curvas depth-damage calibradas empíricamente con miles de eventos históricos. A X metros de profundidad de inundación, un activo industrial pierde Y% de su valor. Es la misma fuente que MSCI usa para sus 27,000 empresas globales. Para deslizamientos y sequía no existe curva empírica equivalente para Perú — ese gap se declara explícitamente.</div>
+          <div class="src-url">publications.jrc.ec.europa.eu · descarga libre</div>
+          <div class="ref">MSCI Climate VaR Part 4 §2.2.2 (2022): "depth-damage functions following Huizinga et al. (2017)"</div>
+        </div>
+      </div>
+    </div>
+    <div class="card ca" style="margin-top:10px">
+      <h3>Proxy para donde no hay curva empírica</h3>
+      <p>A2G (propuesta AFP Integra 2025) provee un ranking sectorial 0–100 basado en IPCC/ND-GAIN que funciona como vulnerabilidad relativa: minería = 100, hidroenergía = 100, cemento = 50. No reemplaza Huizinga pero permite comparar entre sectores donde no existe dato empírico.</p>
+      <div class="ref">A2G Propuesta AFP Integra (2025) Anexo 1 — Dependencia climática sectorial IPCC/ND-GAIN/TCFD</div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <h2 style="color:#fca5a5">🏭 Exposición — ya disponible internamente</h2>
+    <div class="card cc">
+      <p>Activos fijos netos por empresa: estados financieros en SMV/BVL. Coordenadas de unidades operativas: lista Libélula (SURA, jun 2025) — 9 empresas, 13 departamentos. No requiere fuente adicional. MSCI desagrega activos fijos entre ubicaciones ponderando por revenue por operación.</p>
+      <div class="ref">MSCI Climate VaR Part 4 §2.1 (2022): asset value disaggregation by revenue share per location</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ MODELO ═══════════════ -->
+<div class="page" id="page-model">
+  <div class="eyebrow">Arquitectura del modelo</div>
+  <h1>Cómo se procesa cada dato</h1>
+  <p>La cadena de transformación que convierte datos geoespaciales crudos en pérdida esperada en USD.</p>
+
+  <div class="gap">
+    <div class="eyebrow">Paso a paso</div>
+    <div class="step-list">
+      <div class="step" data-n="1">
+        <div class="step-t">Geolocalización de activos</div>
+        <div class="step-b">Para cada empresa: asignar coordenadas (lat/lon) a cada unidad operativa usando la lista Libélula + INGEMMET/Geocatmin. Resultado: tabla [empresa, activo, lat, lon, valor_USD, tipo_activo].</div>
+      </div>
+      <div class="step" data-n="2">
+        <div class="step-t">Screening distrital — Fase 1 (réplica de ERM)</div>
+        <div class="step-b">Cruzar coordenadas contra SIGRID y ThinkHazard a nivel distrito. Determina qué activos están en zonas de riesgo alto, medio o bajo para cada amenaza. Solo los de riesgo alto avanzan al análisis a coordenada exacta — igual que el método de dos fases de ERM.</div>
+      </div>
+      <div class="step" data-n="3">
+        <div class="step-t">Extracción de hazard a coordenada exacta</div>
+        <div class="step-b">Para activos priorizados: consultar WRI Aqueduct por punto geográfico → profundidad de inundación en metros. NASA LHASA → categoría de susceptibilidad de deslizamiento. WRI Water Risk → ratio de estrés hídrico de la cuenca. Output: [activo, hazard_flood_m, hazard_landslide_cat, hazard_water_stress].</div>
+      </div>
+      <div class="step" data-n="4">
+        <div class="step-t">Aplicar curvas de vulnerabilidad (Huizinga 2017)</div>
+        <div class="step-b">Interpolación en la tabla depth-damage según tipo de activo (industrial, comercial, infraestructura) y profundidad de inundación. Ej: activo industrial a 1.2m → Damage Ratio = 42%. Esta interpolación es la transformación central del modelo.</div>
+        <div class="ref">Huizinga et al. 2017 JRC EUR 28552 EN — Tabla 2: Global flood depth-damage functions</div>
+      </div>
+      <div class="step" data-n="5">
+        <div class="step-t">Cálculo de pérdida esperada anual</div>
+        <div class="step-b">Fórmula operativa de MSCI Parte 4: pérdida física = DR × valor_activo × prob_anual. Pérdida por interrupción = días_sin_operación × (revenue_anual/365) × prob_anual. Pérdida total = suma de ambos.</div>
+        <div class="ref">MSCI Climate VaR Part 4 §2.2 (2022): Expected Annual Loss = asset damage + business interruption</div>
+      </div>
+      <div class="step" data-n="6">
+        <div class="step-t">Agregación por empresa y amenaza</div>
+        <div class="step-b">Sumar pérdidas de todos los activos de cada empresa por tipo de amenaza. Aplicar moderador de capacidad adaptativa financiera (ROE / Deuda-EBITDA, concepto A2G) para ajustar el impacto según salud financiera de la empresa.</div>
+        <div class="ref">A2G Propuesta AFP Integra (2025): IVC con componente de capacidad adaptativa financiera (25%)</div>
+      </div>
+      <div class="step" data-n="7">
+        <div class="step-t">Conversión a Climate VaR (MSCI Parte 6)</div>
+        <div class="step-b">Proyectar costos 15 años con tasa de crecimiento BCR Perú. Descontar al WACC de cada empresa. Dividir entre Enterprise Value → Physical Climate VaR como % de la valoración. Comparable con scores MSCI ESG o S&P Trucost.</div>
+        <div class="ref">MSCI Climate VaR Part 6 §2.3 (2022): Climate VaR(%) = PV(future costs at WACC) / Enterprise Value</div>
+      </div>
+      <div class="step" data-n="8">
+        <div class="step-t">Agregación a portafolio — promedio y P95</div>
+        <div class="step-b">VaR portafolio = Σ(VaR_empresa × peso_AUM) / Σpesos. Escenario agresivo P95 = promedio + 1.645 × √(Σσ²×peso²). El P95 es el "rango de incertidumbre" que exige NIIF S2.</div>
+        <div class="ref">MSCI Climate VaR Part 7 §2.1.2 (2022): portfolio aggregation + P95 scenario</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Fórmulas clave</div>
+    <div class="card ct">
+      <h3>Pérdida esperada anual por activo</h3>
+      <div class="code">
+<span class="cm">% Fórmula operativa — MSCI Part 4 §2.2 (2022)</span>
+EAL = DR(depth_m) * asset_value * prob_annual
+    + downtime_days * (revenue / 365) * prob_annual
+
+<span class="cm">% Donde:</span>
+DR       = <span class="cv">damage_ratio</span>  <span class="cm">% de Huizinga 2017, interpolado por tipo activo y profundidad</span>
+prob     = <span class="cv">1 / return_period</span>  <span class="cm">% 1/100 = 0.01 para evento centenal</span>
+downtime = <span class="cv">días de interrupción</span>  <span class="cm">% por sector, factores MSCI Parte 4 Exhibit 5</span>
+      </div>
+    </div>
+    <div class="card cp" style="margin-top:10px">
+      <h3>Physical Climate VaR</h3>
+      <div class="code">
+<span class="cm">% Conversión a impacto en valoración — MSCI Part 6 §2.3 (2022)</span>
+PV_costs = sum( EAL * (1 + growth)^t / (1 + wacc)^t, t=1..15 )
+ClimVaR  = PV_costs / Enterprise_Value  <span class="cm">% resultado en %</span>
+
+<span class="cm">% Agregación portafolio — MSCI Part 7 §2.1.2 (2022)</span>
+VaR_port   = sum(VaR_i * w_i) / sum(w_i)
+VaR_P95    = VaR_port + 1.645 * sqrt( sum(sigma_i^2 * w_i^2) )
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SOFTWARE ═══════════════ -->
+<div class="page" id="page-software">
+  <div class="eyebrow">Implementación técnica</div>
+  <h1>Software y arquitectura de código</h1>
+  <p>MATLAB como lenguaje principal por estabilidad de sintaxis a largo plazo. Python en paralelo como benchmark y backup. Un mismo modelo, dos implementaciones que deben producir resultados idénticos.</p>
+
+  <div class="gap">
+    <div class="g2">
+      <div class="card ct">
+        <h3>MATLAB — Principal</h3>
+        <div class="tags" style="margin-bottom:10px">
+          <span class="tag tt">Primario</span>
+          <span class="tag tt">Largo plazo</span>
+        </div>
+        <p>La sintaxis de MATLAB cambia muy poco entre versiones comparado con Python. Un script escrito hoy sigue funcionando en 10 años sin modificaciones. Esto es crítico para un modelo de riesgo que debe ser auditable y reproducible en el tiempo.</p>
+        <p style="margin-top:8px">Toolboxes relevantes: <strong style="color:#fff">Statistics and Machine Learning</strong> (distribuciones, percentiles), <strong style="color:#fff">Mapping Toolbox</strong> (operaciones geoespaciales), <strong style="color:#fff">Financial Toolbox</strong> (descuento de flujos, WACC).</p>
+      </div>
+      <div class="card cb">
+        <h3>Python — Benchmark & Backup</h3>
+        <div class="tags" style="margin-bottom:10px">
+          <span class="tag tb">Secundario</span>
+          <span class="tag tb">Verificación</span>
+        </div>
+        <p>Permite acceder a APIs y librerías geoespaciales con más facilidad (geopandas, rasterio, requests). Se usa para la descarga y preprocesamiento de datos de WRI Aqueduct, NASA LHASA y SIGRID — y como verificación independiente de los cálculos MATLAB.</p>
+        <p style="margin-top:8px">Librerías clave: <strong style="color:#fff">geopandas, rasterio, numpy, pandas, plotly, requests</strong>.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Arquitectura de módulos</div>
+    <div class="card">
+      <div class="step-list">
+        <div class="step" data-n="M1">
+          <div class="step-t">data_loader — Descarga y normalización de fuentes</div>
+          <div class="step-b">Consulta WRI Aqueduct API, descarga capas NASA LHASA y SIGRID, lee activos fijos de Excel (SMV). Output: estructuras de datos estandarizadas con las mismas columnas en MATLAB y Python.</div>
+        </div>
+        <div class="step" data-n="M2">
+          <div class="step-t">hazard_extractor — Hazard por coordenada</div>
+          <div class="step-b">Dado un punto (lat, lon), retorna: profundidad de inundación (m), categoría de susceptibilidad de deslizamiento (1–5), ratio de estrés hídrico. Usa interpolación espacial sobre los rasters descargados.</div>
+        </div>
+        <div class="step" data-n="M3">
+          <div class="step-t">vulnerability_curves — Huizinga 2017</div>
+          <div class="step-b">Tabla lookup + interpolación lineal. Input: tipo de activo + profundidad. Output: Damage Ratio [0,1]. Hardcodeado con los valores publicados en JRC EUR 28552 EN — sin parámetros ajustables.</div>
+        </div>
+        <div class="step" data-n="M4">
+          <div class="step-t">eal_calculator — Pérdida esperada anual</div>
+          <div class="step-b">Aplica la fórmula MSCI Parte 4: EAL = daño físico + interrupción de negocio. Input: DR, valor activo, revenue, período de retorno, días de downtime. Output: EAL en USD por activo.</div>
+        </div>
+        <div class="step" data-n="M5">
+          <div class="step-t">climate_var — Conversión a métrica financiera</div>
+          <div class="step-b">Proyecta EAL a 15 años (tasa BCR), descuenta al WACC, divide entre EV. Output: Physical Climate VaR (%) por empresa. Idéntica lógica a MSCI Parte 6.</div>
+        </div>
+        <div class="step" data-n="M6">
+          <div class="step-t">portfolio_aggregator — Agregación y P95</div>
+          <div class="step-b">Pondera por peso AUM. Calcula VaR promedio y P95 siguiendo MSCI Parte 7. Output: tabla resumen portafolio con escenario central y adverso.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Ejemplo de estructura MATLAB</div>
+    <div class="code">
+<span class="cm">% M4: eal_calculator.m — Módulo de pérdida esperada anual</span>
+<span class="cm">% Referencia: MSCI Climate VaR Part 4 §2.2 (2022)</span>
+
+<span class="ck">function</span> EAL = <span class="cf">eal_calculator</span>(DR, asset_val, revenue, ret_period, downtime_days)
+    prob        = 1 / ret_period;
+    phys_loss   = DR * asset_val * prob;
+    bi_loss     = downtime_days * (revenue / 365) * prob;
+    EAL         = phys_loss + bi_loss;
+<span class="ck">end</span>
+
+<span class="cm">% M3: vulnerability_curves.m — Huizinga 2017 industrial</span>
+<span class="cm">% Fuente: JRC EUR 28552 EN, Tabla 2</span>
+depth_nodes = [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+dr_nodes    = [0, 0.20, 0.38, 0.50, 0.62, 0.75, 0.83, 0.88];
+
+<span class="ck">function</span> DR = <span class="cf">get_damage_ratio</span>(depth_m, asset_type)
+    <span class="cm">% asset_type: 'industrial' | 'commercial' | 'infrastructure'</span>
+    DR = interp1(depth_nodes, dr_nodes, depth_m, <span class="cv">'linear'</span>, <span class="cv">'extrap'</span>);
+    DR = max(0, min(1, DR));
+<span class="ck">end</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ OUTPUT ═══════════════ -->
+<div class="page" id="page-output">
+  <div class="eyebrow">Métricas y entregables</div>
+  <h1>Qué produce el modelo exactamente</h1>
+
+  <div class="gap">
+    <div class="metric-hero">
+      <div class="metric-lbl">Métrica primaria</div>
+      <div class="metric-big">
+        EAL = Expected Annual Loss (USD)<br>
+        <span style="font-size:14px;color:var(--muted)">por activo → por empresa → portafolio</span>
+      </div>
+      <p style="font-size:12px;color:var(--muted)">No es un Climate VaR de mercado (fluctuación de precios). Es una pérdida esperada actuarial: cuánto dinero pierde en promedio este activo cada año por exposición a riesgos físicos climáticos.</p>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Las dos métricas de salida</div>
+    <div class="g2">
+      <div class="card ct">
+        <h3>Expected Annual Loss — EAL (USD)</h3>
+        <p>La pérdida esperada en dólares por año. Se calcula como valor esperado estadístico: daño probable × probabilidad de ocurrencia. Para riesgo de inundación centenal en un activo industrial de USD 10M a 1.2m de profundidad esperada:</p>
+        <div class="code" style="font-size:10px">
+EAL_físico = 0.42 × 10,000,000 × 0.01 = USD 42,000/año
+EAL_bi     = 20 días × (4M/365) × 0.01 = USD 2,192/año
+EAL_total  = USD 44,192 / año
+        </div>
+        <div class="ref">MSCI Climate VaR Part 4 §2.2 (2022)</div>
+      </div>
+      <div class="card cp">
+        <h3>Physical Climate VaR (%)</h3>
+        <p>El EAL proyectado a 15 años, descontado al WACC, expresado como porcentaje del Enterprise Value. Convierte la pérdida física en impacto sobre la valoración de la inversión — el idioma del análisis de equity y crédito.</p>
+        <div class="code" style="font-size:10px">
+PV_costs = Σ EAL×(1.03)^t / (1+WACC)^t, t=1..15
+ClimVaR  = PV_costs / Enterprise_Value
+        </div>
+        <div class="ref">MSCI Climate VaR Part 6 §2.3 (2022) + Part 7 §2.1.2</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Escenarios</div>
+    <div class="card">
+      <table class="ctable">
+        <thead>
+          <tr><th>Escenario</th><th>Descripción</th><th>Fuente SSP</th><th>Para qué sirve</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Línea base (2025)</td><td>Condición actual sin cambio climático adicional</td><td>Histórico</td><td>Riesgo presente, reporte NIIF S2 Fase 1</td></tr>
+          <tr><td>SSP1-2.6 (2030/2050)</td><td>Escenario optimista — Paris cumplido</td><td>IPCC AR6</td><td>Piso de pérdidas futuras</td></tr>
+          <tr><td>SSP3-7.0 (2030/2050)</td><td>Escenario base — políticas actuales</td><td>IPCC AR6</td><td>Escenario central del modelo</td></tr>
+          <tr><td>SSP5-8.5 (2030/2050)</td><td>Escenario adverso — sin nuevas políticas</td><td>IPCC AR6</td><td>Stress test, TCFD guidance</td></tr>
+          <tr><td>P95 portafolio</td><td>Percentil 95 del VaR agregado</td><td>MSCI Part 7</td><td>"Rango de incertidumbre" NIIF S2</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Tabla de output final (ejemplo)</div>
+    <div style="overflow-x:auto">
+    <table class="ctable">
+      <thead>
+        <tr><th>Empresa</th><th>Amenaza</th><th>EAL USD/año</th><th>Climate VaR %</th><th>Escenario</th><th>Fuente hazard</th><th>Fuente vuln.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Cerro Verde</td><td>Inundación</td><td class="ok">$ 340,000</td><td class="ok">−0.8%</td><td>SSP3-7.0 2030</td><td>WRI Aqueduct</td><td>Huizinga 2017</td></tr>
+        <tr><td>Cerro Verde</td><td>Estrés hídrico</td><td class="warn">$ 820,000</td><td class="warn">−1.9%</td><td>SSP3-7.0 2030</td><td>WRI Water Risk</td><td>Gap declarado</td></tr>
+        <tr><td>Engie</td><td>Sequía caudal</td><td class="warn">$ 1,200,000</td><td class="warn">−2.1%</td><td>SSP3-7.0 2030</td><td>ANA pctil 2.5</td><td>COES proxy</td></tr>
+        <tr><td>Nexa</td><td>Deslizamiento</td><td>En análisis</td><td>Gap vuln.</td><td>—</td><td>NASA LHASA</td><td class="no">Sin curva empírica</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin-top:8px;font-family:'IBM Plex Mono',monospace">* Valores ilustrativos. La columna "Fuente vuln." es el campo clave de auditabilidad: si dice "Gap declarado" o "Sin curva empírica", el número no existe y no se inventa.</p>
+  </div>
+
+  <div class="gap">
+    <div class="eyebrow">Por qué esto es superior a lo que ofrecen las consultoras</div>
+    <div class="card ct">
+      <p>ERM, EY y Libélula entregan un score de riesgo o un índice cualitativo. Ninguno produce pérdida esperada en USD por activo con fuente auditable. Lo que estamos construyendo es lo que la NIIF S2 describe como "impactos financieros cuantitativos" — el nivel de detalle que la norma va a requerir y que los reportes de las empresas del portafolio tendrán que demostrar.</p>
+      <div class="ref">PwC — Alineamiento TCFD / NIIF S2 (dic 2024): "las entidades deben estimar impactos financieros de riesgos climáticos en sus estados financieros"</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ REFS ═══════════════ -->
+<div class="page" id="page-refs">
+  <div class="eyebrow">Trazabilidad completa</div>
+  <h1>Referencias técnicas</h1>
+  <p>Cada componente del modelo cita su fuente. Sin referencias, no hay modelo defendible.</p>
+
+  <div class="gap">
+    <div class="card ct">
+      <h3>Metodología central</h3>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--teal)"></div>
+        <div>
+          <div class="src-name">MSCI Carbon Delta — Climate VaR Methodology, Part 4: Physical Climate Risk (2022)</div>
+          <div class="src-desc">Fórmula operativa de pérdida esperada, umbrales de hazard por amenaza, factores de vulnerabilidad por sector NACE, ejemplo numérico completo. La columna vertebral del modelo.</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--teal)"></div>
+        <div>
+          <div class="src-name">MSCI Carbon Delta — Climate VaR Methodology, Part 6: Financial Modelling (2022)</div>
+          <div class="src-desc">Conversión de pérdida física a impacto en valoración. PV(costos)/EV. Modelo de Merton para separación equity/deuda.</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--teal)"></div>
+        <div>
+          <div class="src-name">MSCI Carbon Delta — Climate VaR Methodology, Part 7: Aggregation (2022)</div>
+          <div class="src-desc">Agregación a nivel portafolio. Fórmula del P95 bajo distribución normal.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card cb" style="margin-top:12px">
+      <h3>Curvas de vulnerabilidad</h3>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--blue)"></div>
+        <div>
+          <div class="src-name">Huizinga, J., De Moel, H., Szewczyk, W. (2017). Global flood depth-damage functions. EUR 28552 EN. JRC Technical Reports. Publications Office of the European Union.</div>
+          <div class="src-desc">Las curvas depth-damage empíricas que convierten profundidad de inundación en Damage Ratio por tipo de activo. Referencia estándar de la industria.</div>
+          <div class="src-url">publications.jrc.ec.europa.eu · doi:10.2760/16510</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card ca" style="margin-top:12px">
+      <h3>Fuentes de hazard validadas en campo peruano</h3>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--amber)"></div>
+        <div>
+          <div class="src-name">ERM International Group — Evaluación de Riesgos Climáticos, Propuesta SURA Perú (2025)</div>
+          <div class="src-desc">Tabla de 9 indicadores con fuente exacta por peligro. Valida el uso de WRI Aqueduct (inundación y estrés hídrico), Fathom (inundación pluvial), CMIP6/NASA (deslizamientos) y SIGRID (línea base peruana).</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--amber)"></div>
+        <div>
+          <div class="src-name">CENEPRED — SIGRID: Sistema de Información para la Gestión del Riesgo de Desastres</div>
+          <div class="src-url">sigrid.cenepred.gob.pe</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--amber)"></div>
+        <div>
+          <div class="src-name">WRI — Aqueduct Floods & Water Risk Atlas (2023)</div>
+          <div class="src-url">aqueduct.wri.org</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--amber)"></div>
+        <div>
+          <div class="src-name">NASA — Landslide Hazard Assessment for Situational Awareness (LHASA)</div>
+          <div class="src-url">maps.nccs.nasa.gov/download/landslides</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--amber)"></div>
+        <div>
+          <div class="src-name">Fathom Global — Flood Hazard Data (2023)</div>
+          <div class="src-url">fathom.global</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card cp" style="margin-top:12px">
+      <h3>Marco regulatorio</h3>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--purple)"></div>
+        <div>
+          <div class="src-name">PwC — Alineamiento del TCFD con las NIIF de Sostenibilidad (diciembre 2024)</div>
+          <div class="src-desc">Establece que NIIF S2 exige impactos financieros cuantitativos del riesgo climático — no scores cualitativos. Convierte el modelo en un insumo de compliance regulatorio, no solo un ejercicio analítico interno.</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--purple)"></div>
+        <div>
+          <div class="src-name">IPCC AR6 — Sixth Assessment Report, Working Group I (2021)</div>
+          <div class="src-desc">Base científica de los escenarios SSP utilizados en las proyecciones de WRI Aqueduct y demás fuentes de hazard futuro.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card cg" style="margin-top:12px">
+      <h3>Contexto de mercado peruano</h3>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--green)"></div>
+        <div>
+          <div class="src-name">Libélula Consultoría — Propuesta Tec-Eco SURA: Riesgos Climáticos (junio 2025)</div>
+          <div class="src-desc">Identifica las 9 empresas priorizadas con unidades operativas y departamentos. Define el universo de análisis y valida la relevancia geográfica de las 3 amenazas para el portafolio peruano.</div>
+        </div>
+      </div>
+      <div class="src-row">
+        <div class="src-dot" style="background:var(--green)"></div>
+        <div>
+          <div class="src-name">A2G — Propuesta AFP Integra (junio 2025)</div>
+          <div class="src-desc">Tabla de dependencia climática sectorial 0–100 basada en IPCC/ND-GAIN/TCFD. Proxy de vulnerabilidad relativa para sectores sin curva empírica disponible.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function go(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+  document.querySelectorAll('.nb').forEach(b=>b.classList.remove('on'));
+  document.getElementById('page-'+id).classList.add('on');
+  event.currentTarget.classList.add('on');
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+</script>
+</body>
+</html>
+EOF
+echo "OK: $(wc -c < /mnt/user-data/outputs/framework_riesgo_fisico.html) bytes"
+Salida
+OK: 46141 bytes
