@@ -1,0 +1,158 @@
+Detecté un problema en el matcher: **SCOTIAC1 no mapeó**, pese a estar en Parametria. La causa: en Parametria el ticker es `"SCOTIAC1"` (sin " PE") pero en RVL es `"SCOTIAC1 PE Equity"`. Al quitar solo " Equity" queda "SCOTIAC1 PE", que no matchea "SCOTIAC1". Necesito una estrategia adicional: probar quitando también el código de bolsa. Mejoro el matcher:
+
+Con el fallback por primer token: 52 exactos + 16 por token = 68 mapeados, 8 sin match, y ahora **38 columnas alinean con EPU** (antes 23). Pero el fallback por "primer token" tiene un riesgo: podría mapear mal si dos instrumentos comparten prefijo. Verifico que sea seguro y reviso los 8 sin match para confirmar que son genuinamente inmapeables:
+
+Importante: hay **3 colisiones de primer token** (IFS, HOC, SMTSF tienen dos SBS distintos cada uno — típicamente porque cotizan en dos bolsas, PE y US). El fallback por primer token mapearía mal esos casos. Debo excluir el fallback cuando hay colisión, para no asignar el SBS equivocado.
+
+Refino el matcher: el fallback por primer token solo se usa si ese token es **único** en Parametria. Los ambiguos (IFS, HOC, SMTSF) y los 8 sin match se dejan sin mapear con aviso. Esto es lo más seguro. Verifico el resultado final:
+
+Ahora es seguro: IFS, HOC y SMTSF (los ambiguos) se mapean por match exacto con su bolsa (IFS PE vs IFS US se distinguen bien), y solo 8 quedan sin mapear — todos genuinamente inmapeables. 38 columnas alinean con EPU. El código está validado.
+
+Ahora preparo la entrega. Necesito darte: (1) el bloque helper nuevo, (2) los 2 reemplazos en el naming de precios, y (3) la limpieza de columnas duplicadas de BD. Ubico dónde insertar cada cosa:
+
+Tengo todos los puntos de inserción. Aquí está todo lo que necesitas.
+
+---
+
+## Corrección conceptual confirmada
+
+Tienes razón: leí la fila 1 de Parametria y los encabezados reales son **`Bloomberg | SBS | SBS | Sector | ISIN | Moneda`**. Lo que el código llama "ISIN" (columna C, `300009100001`) es en realidad el código **SBS**. El ISIN verdadero (alfanumérico, `PEP140001004`) está en la columna E, que el script no usa. De aquí en adelante lo llamo SBS.
+
+---
+
+## Cambio 1 — Agregar el helper de traducción ticker→SBS
+
+**Ubicación:** justo **después** de la línea `Diccionario_Parametria = dict(zip(Lista_Isins, Lista_Nombres))`.
+
+**Pega este bloque:**
+
+```python
+# %%
+# -----------------------------------------------------------------------
+# MAPEO TICKER (Bloomberg) -> SBS, para nombrar las columnas de precios de RVL.
+#
+# CONTEXTO: la hoja RVL nombra sus columnas de precio con TICKERS de Bloomberg
+# ("SCOTIAC1 PE Equity"), no con el código SBS. Los pesos de benchmark
+# (EPU/ETFPERU) y el resto del pipeline se cruzan por SBS. Si no traducimos,
+# el producto Precios x Pesos NO alinea y las columnas EPU/ETFPERU salen
+# VACÍAS en BD (bug detectado: Weight_ETFPERU_*, Weight_EPU_*, etc. sin datos).
+#
+# Parametria tiene el mapeo: col A = Bloomberg (ticker), col C = SBS.
+# El match es aproximado porque RVL agrega sufijos (" Equity", bolsa, número):
+#   1) quita " Equity" y busca match exacto           -> "IFS US Equity" -> "IFS US"
+#   2) si no, quita un sufijo numérico final           -> "FSM US Equity2" -> "FSM US"
+#   3) si no, usa el PRIMER token (código de empresa)   -> "SCOTIAC1 PE" -> "SCOTIAC1"
+#      pero SOLO si ese token es ÚNICO en Parametria (evita mapear mal
+#      instrumentos que cotizan en dos bolsas: IFS, HOC, SMTSF tienen dos SBS).
+# Los tickers que no logran mapearse se dejan con su NOMBRE ORIGINAL (el flujo
+# continúa) y se listan en un WARNING para que puedas revisarlos.
+# -----------------------------------------------------------------------
+from collections import defaultdict as _defaultdict
+
+_param_map = Base_Parametria.iloc[2:, [0, 2]].dropna()
+_param_map.columns = ["Bloomberg", "SBS"]
+Mapa_Bloomberg_SBS = dict(zip(
+    _param_map["Bloomberg"].astype(str).str.strip(),
+    _param_map["SBS"].astype(str).str.strip()
+))
+
+# Mapa por primer token, SOLO para tokens únicos (evita colisiones de doble bolsa)
+_tok_a_sbs = _defaultdict(set)
+for _bbg, _sbs in Mapa_Bloomberg_SBS.items():
+    _tok_a_sbs[_bbg.split()[0]].add(_sbs)
+Mapa_PrimerToken_SBS = {t: next(iter(s)) for t, s in _tok_a_sbs.items() if len(s) == 1}
+
+
+def _ticker_rvl_a_sbs(ticker):
+    """Traduce un ticker de RVL a SBS. Devuelve (valor, mapeado_ok)."""
+    if ticker is None:
+        return ticker, False
+    limpio = str(ticker).replace(" Equity", "").strip()
+    if limpio in Mapa_Bloomberg_SBS:
+        return Mapa_Bloomberg_SBS[limpio], True
+    limpio2 = limpio.rstrip("0123456789").strip()
+    if limpio2 in Mapa_Bloomberg_SBS:
+        return Mapa_Bloomberg_SBS[limpio2], True
+    tok = limpio.split()[0] if limpio.split() else limpio
+    if tok in Mapa_PrimerToken_SBS:
+        return Mapa_PrimerToken_SBS[tok], True
+    return ticker, False
+
+
+def _renombrar_columnas_precios_a_sbs(columnas):
+    """Traduce una lista de nombres de columna de precios (tickers RVL) a SBS.
+    Los no mapeables se dejan igual y se avisan por log."""
+    traducidas, no_mapeados = [], []
+    for c in columnas:
+        sbs, ok = _ticker_rvl_a_sbs(c)
+        traducidas.append(sbs)
+        if not ok and c is not None:
+            no_mapeados.append(c)
+    if no_mapeados:
+        log.warning(
+            "%d ticker(s) de RVL no se pudieron mapear a SBS vía Parametria "
+            "(se conservan con su nombre original; sus columnas de precio no "
+            "cruzarán con los benchmarks EPU/ETFPERU): %s",
+            len(no_mapeados), no_mapeados,
+        )
+    return traducidas
+```
+
+---
+
+## Cambio 2 — Usar la fila correcta y traducir, en los DOS bloques de precios
+
+En la hoja RVL, la fila que el código lee para los nombres (`loc[3]`) está **vacía**; los nombres reales están en `iloc[4]`. Hay que corregir eso **y** traducir a SBS.
+
+**2a — Bloque "Con dividendos".** Busca esta línea:
+```python
+columnas = Precios_Con_Dividendos.loc[3].tolist()
+```
+**Reemplázala por:**
+```python
+# La fila loc[3] de RVL está vacía; los nombres reales (tickers) están en iloc[4].
+# Se toman de ahí y se traducen a SBS para que crucen con el resto del pipeline.
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Con_Dividendos.iloc[4].tolist())
+```
+
+**2b — Bloque "Sin dividendos".** Busca esta línea:
+```python
+columnas = Precios_Sin_Dividendos.loc[3].tolist()
+```
+**Reemplázala por:**
+```python
+# Ídem bloque anterior: nombres reales en iloc[4], traducidos a SBS.
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Sin_Dividendos.iloc[4].tolist())
+```
+
+> Nota: el resto de ambos bloques (`columnas = columnas[1:]`, etc.) queda igual — el `[1:]` sigue quitando la primera columna como antes.
+
+---
+
+## Cambio 3 — Limpiar columnas duplicadas de BD (las 6 que reportaste: `_nan` y SBS repetidos)
+
+**Ubicación:** busca esta línea (cerca del final, en la limpieza de `df_final`):
+```python
+df_final = df_final[df_final.index <= pd.to_datetime(Fecha_Corte)]
+```
+**Pega esto INMEDIATAMENTE DESPUÉS de esa línea:**
+
+```python
+# Limpieza de columnas: quita columnas con nombre nulo/"nan" (vienen de ISINs
+# #N/A en el benchmark) y columnas de nombre DUPLICADO (deja la primera), para
+# que la hoja BD no tenga encabezados repetidos que confundan a las fórmulas
+# INDEX/MATCH de las hojas de presentación.
+_cols_validas = [c for c in df_final.columns if c is not None and str(c).lower() != "nan"]
+df_final = df_final[_cols_validas]
+df_final = df_final.loc[:, ~df_final.columns.duplicated(keep="first")]
+```
+
+---
+
+## Qué esperar al correr
+
+En el log verás un WARNING con los **8 tickers no mapeados** (`SMT CN, ARA CN, GBVLAC1 PE, FSM US, FSM US2, TAL CN, 1506604D CN, FALAB CI`). Son instrumentos que en RVL cotizan en una bolsa distinta a la de Parametria o que no están en Parametria; el código **sigue adelante** y sus columnas de precio simplemente no cruzarán con los benchmarks (igual que cualquier instrumento sin dato). Los otros ~68 sí quedan mapeados y las columnas `Weight_EPU_*`, `Weight_ETFPERU_*` volverán a tener datos, con lo que W9:X86 de Posicionamiento se llenarán.
+
+Una validación que te recomiendo hacer tú tras correr: abre Posicionamiento y confirma que W9:X86 ya traen valores. Si algún instrumento específico que te importa quedó en la lista de no-mapeados y lo necesitas en el benchmark, agrégalo a Parametria con el ticker **exactamente** como aparece en RVL (sin el " Equity") y volverá a mapear.
+
+¿Quieres que te arme también una pequeña celda de verificación (para pegar al final) que te confirme automáticamente cuántas columnas EPU/ETFPERU quedaron con datos, así lo chequeas de una sin revisar a mano?
