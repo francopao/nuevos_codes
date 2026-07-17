@@ -1,0 +1,65 @@
+Buenas noticias primero: **mis mejoras funcionaron** — en el log se ve `Calendario BD: 2125 filas -> 1886 (removidas 239 por finde/feriado)`. El error **no** viene de mi código; es otra cosa. Déjame leer tu intento-15 en la zona de apertura y guardado para darte el diagnóstico exacto.Ya está claro. Tu log confirma dos cosas: **mis mejoras corrieron bien** (`Calendario BD: 2125 → 1886, removidas 239`), y el fallo es al **guardar**, con mensaje explícito de Excel:
+
+> *"We can't save '…Rendimiento RVL.xlsm' because the file is **read-only**."*
+
+Esto **no es un bug del código** — es que el archivo se abrió en **solo lectura**. Déjame verificar una cosa en tu código para darte la mejor solución.`wb1.app` solo se usa en el `finally`, así que puedo darte mejoras seguras. Aquí va el diagnóstico y la solución.
+
+## Qué pasó
+
+El archivo `\\SPPEAPP00023\...\Rendimiento RVL.xlsm` se abrió en **solo lectura**, por eso `wb1.save()` (línea 1832) reventó. Como corridas anteriores sí guardaban ("guardado correctamente"), lo más probable es una de estas, en orden de probabilidad:
+
+1. **El libro ya está abierto** — en tu propia pantalla, o en un **proceso `EXCEL.EXE` zombi** que quedó de la corrida anterior que crasheó (intento-13/14). Cuando llamas `xw.Book(ruta)` y Excel ya tiene ese libro abierto, xlwings **se engancha a esa instancia existente**, que quedó en solo lectura.
+2. **Otro usuario de la red lo tiene abierto** (es carpeta compartida). Señal: en la carpeta aparece un archivo oculto `~$Rendimiento RVL.xlsm` que dice quién lo tiene.
+3. El archivo tiene el **atributo Solo-lectura** activado, o no tienes permiso de escritura en esa carpeta de red.
+
+## Solución inmediata (esto es lo que te desbloquea ahora)
+
+1. Cierra todas las ventanas de Excel.
+2. Abre el **Administrador de tareas** → termina todos los procesos **`Microsoft Excel` / `EXCEL.EXE`** (matas los zombis).
+3. Ve a la carpeta y confirma que no exista `~$Rendimiento RVL.xlsm` (si existe y nadie lo tiene abierto, bórralo).
+4. Clic derecho en el archivo → Propiedades → que **Solo lectura** esté desmarcado.
+5. Reejecuta.
+
+## Mejoras al código (para que falle rápido y claro, no a los 5 minutos)
+
+**Mejora 1 — Chequeo de solo-lectura al abrir.** Así te enteras en segundos, no después de recalcular todo. Insértala **dentro del `try`, justo debajo** de `wb1 = xw.Book(...)` (línea 579):
+
+```python
+    if getattr(wb1.api, "ReadOnly", False):
+        raise PermissionError(
+            "El libro se abrió en modo SOLO LECTURA; no se podrá guardar:\n  "
+            f"{Monitor_Rentabilidad}\n"
+            "Ciérralo en Excel, termina procesos EXCEL.EXE zombis en el Administrador "
+            "de tareas, verifica que nadie más lo tenga abierto en la red y que tengas "
+            "permiso de escritura en la carpeta; luego reejecuta."
+        )
+```
+
+**Mejora 2 — Cierre limpio en el `finally`.** Tu traceback muestra un segundo `com_error` confuso porque `wb1.app.quit()` intenta guardar cambios de un libro read-only y Excel lanza un diálogo. Reemplaza el bloque `finally` actual (líneas 1837-1841) por:
+
+```python
+finally:
+    try:
+        _app = wb1.app
+        _app.display_alerts = False
+        wb1.close()          # cierra el libro sin intentar guardar
+        _app.quit()
+    except Exception:
+        log.warning("No se pudo cerrar limpiamente la instancia de Excel abierta por xlwings.")
+```
+
+Con esto, si vuelve a estar en solo lectura, verás un único mensaje claro en vez del `com_error` enredado.
+
+## Opcional (más robusto, pero cambia comportamiento)
+
+Si quieres **evitar engancharte a una instancia zombi**, abre en una instancia dedicada. Reemplaza la línea 579 `wb1 = xw.Book(Monitor_Rentabilidad, update_links=False)` por:
+
+```python
+    _xlapp = xw.App(visible=True, add_book=False)   # visible=True conserva el recálculo de fórmulas/charts al guardar
+    _xlapp.display_alerts = False
+    wb1 = _xlapp.books.open(Monitor_Rentabilidad, update_links=False)
+```
+
+(y en el `finally`, `_xlapp.quit()` en vez de `_app.quit()`). Ojo: esto no ayuda si el archivo está **genuinamente bloqueado por otro usuario** en la red —ahí siempre abrirá read-only y no hay vuelta que dar por código—; solo evita el caso "me enganché a mi propio Excel abierto".
+
+Un apunte importante para tu tranquilidad: como el guardado falló, la hoja BD **no se sobrescribió**, así que no perdiste nada ni se corrompió el libro. Tu filtro de calendario ya quedó validado (239 filas removidas, exactamente lo esperado). Una vez desbloquees el archivo y guarde bien, si quieres validamos que el nuevo BD (con el calendario limpio) reconcilie mejor contra tu BD antigua. ¿Le damos?
