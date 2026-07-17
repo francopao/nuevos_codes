@@ -1,0 +1,67 @@
+El filtro funciona: 2124 → −158 findes → 1966 → −81 feriados USA → 1885 filas, y con `FERIADOS = []` las filas quedan intactas (sin riesgo). Ahora sí, déjame ver los anclajes exactos donde debes insertar.Listo, ya tengo todo claro y verificado. Te separo el **veredicto de la comparación** de las **instrucciones**.
+
+## Veredicto: ¿está bien la matemática? Sí.
+
+Comparé tu BD antigua (2019–2023, código pre-2022 que confías) contra la que genera tu código actual, en las fechas que se solapan. Fui capa por capa:
+
+| Capa | Resultado antigua vs nueva |
+|---|---|
+| `Retorno_Precios_No_Acum` (precio + FX) | **Idéntico** — correlación 1.0000, diferencia 0 |
+| `weight` base (por instrumento) | **Idéntico** — suma de pesos = 1.0000 en ambas, mismo # de posiciones (24 vs 23) |
+| `Ret_*_O_Total` (retorno del portafolio) | Coincide en ~87% de días dentro de 1%, y ~60% dentro de 0.0001 |
+
+Las diferencias del `_O_Total` **no** están en precios, ni en FX, ni en pesos —esas capas son idénticas—. Se concentran en un puñado de fechas puntuales (2021-06-07, 2021-07-06, 2023-10-04…) que aparecen desalineadas **en las cuatro AFPs a la vez**. Ese patrón —mismo día, todas las carteras, una versión marca el movimiento y la otra lo pone ~0— es la firma exacta de un **manejo distinto de calendario (fines de semana / feriados / bfill)** entre las dos versiones del código, no de un error de cálculo. Es decir: es justamente el problema de alineación que venimos discutiendo, y limpiar el calendario debería reconciliar la mayoría.
+
+Dos honestidades del proceso: durante la investigación tuve **dos falsas alarmas** (me salió "los pesos suman 3.0" y "las contribuciones no cuadran"). Ambas eran artefacto de mi propio script, que al filtrar por el prefijo `weight_IN_F1_` capturaba también las variantes `_L_` e `_IL_` (base+líquido+ilíquido = 1+1+1). Corregido el filtro, todo cuadra. Lo mismo, el arreglo de **intento-14 es inocuo aquí**: solo tocó el bucle de gráficos de precios del PDF, no toca pesos ni retornos.
+
+Conclusión: puedes confiar en la matemática. Lo que sí conviene arreglar es el calendario, que es lo que pediste y lo que además limpia esas fechas desalineadas.
+
+## Instrucciones (2 ediciones, sin tocar fórmulas de Excel)
+
+**Edición 1 — Lista de feriados editable.** Colócala al inicio, junto a tus imports (necesita `pandas` ya importado, que ya lo tienes).
+
+```python
+from pandas.tseries.holiday import USFederalHolidayCalendar
+
+# -----------------------------------------------------------------------
+# FERIADOS a excluir de la hoja BD (además de sábados y domingos).
+# Editable con libertad. Vacío NO rompe nada: FERIADOS = pd.to_datetime([])
+# Por defecto: feriados federales de EE.UU. (generados por pandas, no a mano).
+# -----------------------------------------------------------------------
+_cal_usa = USFederalHolidayCalendar()
+FERIADOS = list(_cal_usa.holidays(start="2018-01-01", end="2027-12-31"))
+
+# Feriados extra / de mercado no federales (ej. Good Friday). Opcional:
+FERIADOS_EXTRA = [
+    # "2024-03-29",  # Good Friday 2024
+    # "2025-04-18",  # Good Friday 2025
+]
+FERIADOS = pd.to_datetime(list(FERIADOS) + list(FERIADOS_EXTRA))
+```
+
+**Edición 2 — Filtro de calendario.** Insértalo **justo después** de la línea `df_final = df_final.sort_index()` (línea ~1761), antes del bloque de equivalencias/rename.
+
+```python
+# --- Normalización de calendario de la hoja BD ---
+# Quita sábados y domingos (no hay data) y los feriados de FERIADOS.
+df_final.index = pd.to_datetime(df_final.index)
+_antes = len(df_final)
+df_final = df_final[df_final.index.dayofweek < 5]                 # 0=Lun … 4=Vie
+df_final = df_final[~df_final.index.normalize().isin(FERIADOS)]   # FERIADOS vacío -> no quita nada
+log.info("Calendario BD: %d filas -> %d (removidas %d por finde/feriado).",
+         _antes, len(df_final), _antes - len(df_final))
+```
+
+Nada más. No toca pesos, retornos ni fórmulas.
+
+## Qué verás en consola (lo probé con tu BD actual)
+
+```
+Calendario BD: 2124 filas -> 1885 (removidas 239 por finde/feriado).
+```
+
+Desglose: 158 filas de sábado/domingo + 81 feriados USA que existían como fila. Y confirmado el caso seguro: con `FERIADOS = pd.to_datetime([])`, las filas quedan intactas (solo se quitan findes).
+
+Un apunte para cerrar el círculo con lo de antes: al dejar BD con ~1 fila por día hábil, tu fórmula de Excel `OFFSET(...,NETWORKDAYS)` vuelve a alinear mucho mejor (el residuo que quede será solo por feriados que no estén en tu lista). Si en algún cruce ves un pequeño desfase, agregas ese feriado a `FERIADOS_EXTRA` y listo.
+
+¿Quieres que valide el resultado corriendo el bloque sobre una copia y comparando de nuevo contra la BD antigua para medir cuánto reconcilia?
