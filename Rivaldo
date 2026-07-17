@@ -1,0 +1,588 @@
+# -*- coding: utf-8 -*-
+"""
+============================================================================
+ Dashboard_RVL.py  -  Generador de dashboard interactivo (HTML) del Monitor
+                      de Rendimiento RVL.
+----------------------------------------------------------------------------
+ Lee UNICAMENTE la hoja "BD" (el insumo que exporta tu pipeline) y la hoja
+ "Parametria" del mismo libro 'Rendimiento RVL.xlsm', y reconstruye en un
+ solo HTML las tres vistas del libro:
+
+   1. Resumen        -> matriz de retornos por AFP x Fondo (Day/WTD/MTD/YTD)
+   2. Rendimiento    -> curvas de retorno acumulado + AUM (series de tiempo)
+   3. Posicionamiento-> pesos al corte por sector e instrumento (por AFP/Fondo)
+
+ y agrega una seccion NUESTRA:
+
+   4. Corroboracion  -> compara el metodo de acumulacion de Excel
+                        (OFFSET con alto = NETWORKDAYS) contra el metodo
+                        correcto por FECHAS, y muestra por que el rendimiento
+                        se ve distinto ("bajo").
+
+ NO modifica el libro. Solo lee. Salida = un archivo .html autocontenido.
+
+ Requisitos: pandas, numpy, openpyxl  (plotly se carga por CDN en el HTML).
+============================================================================
+"""
+
+import os
+import re
+import json
+import html
+import logging
+import datetime as dt
+
+import numpy as np
+import pandas as pd
+from openpyxl import load_workbook
+
+# ----------------------------------------------------------------------------
+# CONFIGURACION
+# ----------------------------------------------------------------------------
+# Ruta del libro. Por defecto la misma que usa tu pipeline (variable
+# Monitor_Rentabilidad). Cambiala si corres esto en otra ubicacion.
+LIBRO = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\Rendimiento RVL.xlsm"
+
+# Carpeta / archivo de salida del dashboard.
+SALIDA_HTML = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\Dashboard RVL.html"
+
+# Fecha de inicio (YTD). None -> 1 de enero del anio de la fecha de corte.
+FECHA_INICIO = None
+# Fecha de corte. None -> ultima fecha disponible en BD.
+FECHA_CORTE = None
+
+# Fuente de Plotly. CDN por defecto; si tu red corporativa lo bloquea,
+# descarga plotly.min.js y apunta aqui a la ruta local (ej. r".\plotly.min.js").
+PLOTLY_SRC = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+
+AFPS = ["IN", "HA", "PF", "RI", "EXSIS"]
+FONDOS = ["F1", "F2", "F3", "M"]
+AFP_LABEL = {"IN": "IN (Integra)", "HA": "HA (Habitat)", "PF": "PF (Profuturo)",
+             "RI": "RI (Prima)", "EXSIS": "EX SIS (Sistema)"}
+
+# ----------------------------------------------------------------------------
+# LOG
+# ----------------------------------------------------------------------------
+log = logging.getLogger("dashboard_rvl")
+if not log.handlers:
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s",
+                                     "%Y-%m-%d %H:%M:%S"))
+    log.addHandler(h)
+log.setLevel(logging.INFO)
+
+
+# ============================================================================
+# 1) LECTURA DE BD Y PARAMETRIA
+# ============================================================================
+def _leer_parametria(ruta):
+    """code -> (nombre, sector) desde la hoja Parametria (C=code, A=ticker, D=sector)."""
+    wb = load_workbook(ruta, read_only=True, data_only=True)
+    ws = wb["Parametria"]
+    code2name, code2sector = {}, {}
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        ticker = row[0] if len(row) > 0 else None
+        code = row[2] if len(row) > 2 else None       # col C
+        sector = row[3] if len(row) > 3 else None      # col D
+        if code is None:
+            continue
+        code = str(code).strip()
+        code2name[code] = str(ticker).strip() if ticker is not None else code
+        code2sector[code] = str(sector).strip() if sector is not None else "Otros"
+    wb.close()
+    log.info("Parametria: %d instrumentos mapeados.", len(code2name))
+    return code2name, code2sector
+
+
+def _leer_bd(ruta):
+    """
+    Lee la hoja BD en streaming (read_only) y devuelve:
+      - fechas (list[date])
+      - ret_total: DataFrame de retornos DIARIOS por 'Ret_<AFP>_<F>_O_Total'
+      - aum:       DataFrame de niveles 'AUM_RVL_<AFP>_<F>'
+      - header, weight_idx: para leer pesos por fila cuando se necesite
+    Solo materializa las familias necesarias (no las 7,897 columnas).
+    """
+    wb = load_workbook(ruta, read_only=True, data_only=True)
+    ws = wb["BD"]
+    it = ws.iter_rows(values_only=True)
+    header = list(next(it))
+
+    def _cols(pred):
+        return {header[j]: j for j in range(len(header))
+                if isinstance(header[j], str) and pred(header[j])}
+
+    ret_cols = _cols(lambda h: h.startswith("Ret_") and h.endswith("_O_Total"))
+    aum_cols = _cols(lambda h: h.startswith("AUM_RVL_"))
+    weight_idx = {header[j]: j for j in range(len(header))
+                  if isinstance(header[j], str) and header[j].startswith("weight_")}
+
+    fechas, ret_rows, aum_rows, weight_rows = [], [], [], []
+    for row in it:
+        d = row[0]
+        if not isinstance(d, dt.datetime):
+            continue
+        fechas.append(d.date())
+        ret_rows.append([row[j] if isinstance(row[j], (int, float)) else np.nan
+                         for j in ret_cols.values()])
+        aum_rows.append([row[j] if isinstance(row[j], (int, float)) else np.nan
+                         for j in aum_cols.values()])
+        # guardamos la fila completa de pesos (para el snapshot de posicionamiento)
+        weight_rows.append(row)
+    wb.close()
+
+    idx = pd.to_datetime(fechas)
+    ret_total = pd.DataFrame(ret_rows, index=idx, columns=list(ret_cols.keys())).sort_index()
+    aum = pd.DataFrame(aum_rows, index=idx, columns=list(aum_cols.keys())).sort_index()
+    log.info("BD: %d filas de fecha, %d cols Ret_*_O_Total, %d cols AUM_RVL_*, %d cols weight_*.",
+             len(fechas), len(ret_cols), len(aum_cols), len(weight_idx))
+    log.info("BD: rango de fechas %s -> %s.", idx.min().date(), idx.max().date())
+    return idx, ret_total, aum, header, weight_idx, weight_rows, fechas
+
+
+# ============================================================================
+# 2) VENTANAS DE FECHA (igual criterio que Resumen: Day / WTD / MTD / YTD)
+# ============================================================================
+def _primer_habil_mes(fecha):
+    primero = fecha.replace(day=1)
+    while np.is_busday(primero) == False:  # noqa: E712
+        primero += dt.timedelta(days=1)
+    return primero
+
+
+def _inicio_semana(fecha):
+    # lunes de la semana de la fecha de corte (WEEKDAY(...,2) -> ISO)
+    return fecha - dt.timedelta(days=fecha.weekday())
+
+
+# ============================================================================
+# 3) ACUMULACION: metodo CORRECTO (por fechas) y metodo EXCEL (OFFSET)
+# ============================================================================
+def compound_por_fechas(serie_diaria, d0, d1, incluir_d0=False):
+    """PRODUCT(1+r)-1 sobre las fechas reales en (d0, d1] (o [d0,d1] si incluir_d0)."""
+    s = serie_diaria.dropna()
+    if incluir_d0:
+        mask = (s.index.date >= d0) & (s.index.date <= d1)
+    else:
+        mask = (s.index.date > d0) & (s.index.date <= d1)
+    fac = (1.0 + s[mask]).prod()
+    return fac - 1.0
+
+
+def compound_excel_offset(serie_diaria, fechas_ordenadas, d_start, d_cut):
+    """
+    Replica EXACTA de la formula de Excel:
+        PRODUCT(1+OFFSET(BD!A1, fila(d_start)-1, col-1, NETWORKDAYS(d_start,d_cut)))-1
+    Arranca en la FILA de d_start y toma NETWORKDAYS filas consecutivas hacia abajo.
+    Devuelve (retorno, alto_usado, fecha_en_la_que_realmente_termina).
+    """
+    s = serie_diaria
+    # localizar la fila de d_start (o la primera fila >= d_start)
+    try:
+        si = fechas_ordenadas.index(d_start)
+    except ValueError:
+        si = next((k for k, dd in enumerate(fechas_ordenadas) if dd >= d_start), None)
+        if si is None:
+            return np.nan, 0, None
+    alto = int(np.busday_count(d_start, d_cut)) + 1   # NETWORKDAYS inclusivo
+    fac, ultima = 1.0, fechas_ordenadas[si]
+    for k in range(si, min(si + alto, len(fechas_ordenadas))):
+        v = s.iloc[k]
+        if isinstance(v, (int, float)) and not np.isnan(v):
+            fac *= (1.0 + v)
+        ultima = fechas_ordenadas[k]
+    return fac - 1.0, alto, ultima
+
+
+# ============================================================================
+# 4) CALCULOS DEL DASHBOARD
+# ============================================================================
+def calcular(idx, ret_total, aum, fechas, d_inicio, d_corte):
+    fechas_ord = sorted(fechas)
+    d_wtd = _inicio_semana(d_corte)
+    d_mtd = _primer_habil_mes(d_corte)
+
+    resumen = []          # filas: AFP, Fondo, Day, WTD, MTD, YTD
+    curvas = {}           # 'AFP_F' -> Series (indice acumulado base 100)
+    corrobora = []        # AFP, Fondo, YTD_correcto, YTD_excel, delta, fecha_excel
+
+    for afp in AFPS:
+        for f in FONDOS:
+            col = f"Ret_{afp}_{f}_O_Total"
+            if col not in ret_total.columns:
+                continue
+            s = ret_total[col]
+            if s.dropna().empty:
+                continue
+
+            day = float(s.dropna().iloc[-1]) if not s.dropna().empty else np.nan
+            # ventana de corte: valor del dia de corte exacto si existe
+            if pd.Timestamp(d_corte) in s.index:
+                day = float(s.loc[pd.Timestamp(d_corte)])
+
+            ytd = compound_por_fechas(s, d_inicio, d_corte)
+            wtd = compound_por_fechas(s, d_wtd, d_corte)
+            mtd = compound_por_fechas(s, d_mtd, d_corte)
+            resumen.append([afp, f, day, wtd, mtd, ytd])
+
+            # curva acumulada (base 100) en la ventana YTD
+            mask = (s.index.date > d_inicio) & (s.index.date <= d_corte)
+            curva = (1.0 + s[mask].fillna(0)).cumprod() * 100.0
+            curvas[f"{afp}_{f}"] = curva
+
+            # corroboracion: metodo excel vs fechas (solo YTD/Aggr)
+            ytd_excel, alto, fecha_fin = compound_excel_offset(s, fechas_ord, d_inicio, d_corte)
+            corrobora.append([afp, f, ytd, ytd_excel, ytd_excel - ytd, fecha_fin, alto])
+
+    resumen = pd.DataFrame(resumen, columns=["AFP", "Fondo", "Day", "WTD", "MTD", "YTD"])
+    corrobora = pd.DataFrame(corrobora, columns=["AFP", "Fondo", "YTD_correcto",
+                                                 "YTD_excel", "Delta", "FechaFinExcel", "AltoFilas"])
+    # niveles de AUM (ultimo)
+    aum_ultimo = aum.loc[:pd.Timestamp(d_corte)].dropna(how="all")
+    aum_ultimo = aum_ultimo.iloc[-1] if len(aum_ultimo) else pd.Series(dtype=float)
+
+    return resumen, curvas, corrobora, aum, aum_ultimo, d_wtd, d_mtd, fechas_ord
+
+
+def posicionamiento(header, weight_idx, weight_rows, fechas, d_corte,
+                    code2name, code2sector):
+    """Snapshot de pesos en la fecha de corte -> por AFP/Fondo, agregado por sector."""
+    # fila del corte
+    try:
+        ri = fechas.index(d_corte)
+    except ValueError:
+        ri = max(range(len(fechas)), key=lambda k: fechas[k] if fechas[k] <= d_corte else dt.date.min)
+    fila = weight_rows[ri]
+
+    pat = re.compile(r"^weight_(IN|HA|PF|RI|EXSIS)_(F1|F2|F3|M)_(.+)$")
+    # estructura: pos[afp][f] = {sector: peso, ...}, y detalle por instrumento
+    pos = {a: {f: {} for f in FONDOS} for a in AFPS}
+    detalle = {a: {f: [] for f in FONDOS} for a in AFPS}
+    for name, j in weight_idx.items():
+        m = pat.match(name)
+        if not m:
+            continue
+        afp, f, code = m.group(1), m.group(2), m.group(3)
+        v = fila[j] if j < len(fila) else None
+        if not isinstance(v, (int, float)) or v == 0 or (isinstance(v, float) and np.isnan(v)):
+            continue
+        sector = code2sector.get(code, "Otros")
+        nombre = code2name.get(code, code)
+        pos[afp][f][sector] = pos[afp][f].get(sector, 0.0) + float(v)
+        detalle[afp][f].append((nombre, sector, float(v)))
+    return pos, detalle
+
+
+# ============================================================================
+# 5) RENDER HTML
+# ============================================================================
+def _fmt_pct(x):
+    return "-" if (x is None or (isinstance(x, float) and np.isnan(x))) else f"{x*100:,.2f}%"
+
+
+def _fmt_money(x):
+    return "-" if (x is None or (isinstance(x, float) and np.isnan(x))) else f"{x:,.0f}"
+
+
+def _tabla_resumen_html(resumen):
+    rows = ""
+    for afp in AFPS:
+        sub = resumen[resumen["AFP"] == afp]
+        if sub.empty:
+            continue
+        rows += f'<tr class="afp"><td colspan="6">{html.escape(AFP_LABEL[afp])}</td></tr>'
+        for _, r in sub.iterrows():
+            def cls(v):
+                return "pos" if (isinstance(v, float) and v > 0) else ("neg" if (isinstance(v, float) and v < 0) else "")
+            rows += (f'<tr><td class="lab">{r.Fondo}</td>'
+                     f'<td class="{cls(r.Day)}">{_fmt_pct(r.Day)}</td>'
+                     f'<td class="{cls(r.WTD)}">{_fmt_pct(r.WTD)}</td>'
+                     f'<td class="{cls(r.MTD)}">{_fmt_pct(r.MTD)}</td>'
+                     f'<td class="{cls(r.YTD)}">{_fmt_pct(r.YTD)}</td></tr>')
+    return (f'<table class="grid"><thead><tr><th>Fondo</th><th>Day</th>'
+            f'<th>WTD</th><th>MTD</th><th>YTD (Aggr.)</th></tr></thead><tbody>{rows}</tbody></table>')
+
+
+def _tabla_corrobora_html(corrobora, d_corte):
+    rows = ""
+    for _, r in corrobora.iterrows():
+        mismatch = (r.FechaFinExcel != d_corte)
+        badge = (f'<span class="warn">{r.FechaFinExcel}</span>' if mismatch
+                 else f'<span class="ok">{r.FechaFinExcel}</span>')
+        dcls = "neg" if r.Delta < 0 else ("pos" if r.Delta > 0 else "")
+        rows += (f'<tr><td class="lab">{r.AFP} {r.Fondo}</td>'
+                 f'<td>{_fmt_pct(r.YTD_correcto)}</td>'
+                 f'<td>{_fmt_pct(r.YTD_excel)}</td>'
+                 f'<td class="{dcls}">{_fmt_pct(r.Delta)}</td>'
+                 f'<td>{badge}</td></tr>')
+    return (f'<table class="grid"><thead><tr><th>AFP/Fondo</th>'
+            f'<th>YTD correcto<br><small>(por fechas)</small></th>'
+            f'<th>YTD Excel<br><small>(OFFSET/NETWORKDAYS)</small></th>'
+            f'<th>&Delta;</th><th>Excel termina en</th></tr></thead><tbody>{rows}</tbody></table>')
+
+
+def _pos_html(pos, detalle, afp_sel="IN", fondo_sel="F1"):
+    d = pos.get(afp_sel, {}).get(fondo_sel, {})
+    tot = sum(d.values()) or 1.0
+    rows = ""
+    for sector, w in sorted(d.items(), key=lambda kv: -kv[1]):
+        rows += f'<tr><td class="lab">{html.escape(sector)}</td><td>{_fmt_pct(w)}</td></tr>'
+    rows += f'<tr class="afp"><td class="lab">Total invertido</td><td>{_fmt_pct(tot)}</td></tr>'
+    top = sorted(detalle.get(afp_sel, {}).get(fondo_sel, []), key=lambda t: -t[2])[:10]
+    trows = "".join(f'<tr><td class="lab">{html.escape(n)}</td>'
+                    f'<td><small>{html.escape(s)}</small></td><td>{_fmt_pct(w)}</td></tr>'
+                    for n, s, w in top)
+    return (f'<div class="two"><div><h4>Pesos por sector &mdash; {afp_sel} {fondo_sel}</h4>'
+            f'<table class="grid">{rows}</table></div>'
+            f'<div><h4>Top 10 posiciones &mdash; {afp_sel} {fondo_sel}</h4>'
+            f'<table class="grid">{trows}</table></div></div>')
+
+
+def construir_html(resumen, curvas, corrobora, aum, aum_ultimo, pos, detalle,
+                   d_inicio, d_corte, d_wtd, d_mtd):
+    # datos para plotly (curvas de retorno acumulado)
+    traces_ret = []
+    for key, s in curvas.items():
+        traces_ret.append(dict(x=[d.strftime("%Y-%m-%d") for d in s.index],
+                               y=[round((v/100.0-1.0)*100, 4) for v in s.values],
+                               name=key, mode="lines"))
+    # curvas de AUM (por AFP, fondo M o suma) -> mostramos AUM_RVL_<afp>_M si existe si no F1..F3
+    aum_win = aum.loc[:pd.Timestamp(d_corte)]
+    traces_aum = []
+    for afp in AFPS:
+        col_m = f"AUM_RVL_{afp}_M"
+        cols = [c for c in [col_m] if c in aum_win.columns]
+        if not cols:
+            cols = [f"AUM_RVL_{afp}_{f}" for f in ["F1", "F2", "F3"] if f"AUM_RVL_{afp}_{f}" in aum_win.columns]
+        if not cols:
+            continue
+        serie = aum_win[cols].sum(axis=1).dropna()
+        if serie.empty:
+            continue
+        traces_aum.append(dict(x=[d.strftime("%Y-%m-%d") for d in serie.index],
+                               y=[round(float(v), 2) for v in serie.values],
+                               name=AFP_LABEL[afp], mode="lines"))
+
+    tabla_resumen = _tabla_resumen_html(resumen)
+    tabla_corr = _tabla_corrobora_html(corrobora, d_corte)
+    # AUM ultimo
+    aum_rows = "".join(
+        f'<tr><td class="lab">{html.escape(c.replace("AUM_RVL_", ""))}</td><td>{_fmt_money(aum_ultimo[c])}</td></tr>'
+        for c in aum_ultimo.index)
+    tabla_aum = f'<table class="grid"><thead><tr><th>AUM (corte)</th><th>Valor</th></tr></thead><tbody>{aum_rows}</tbody></table>'
+
+    # selectores de posicionamiento
+    sel_afp = "".join(f'<option value="{a}">{AFP_LABEL[a]}</option>' for a in AFPS)
+    sel_f = "".join(f'<option value="{f}">{f}</option>' for f in FONDOS)
+    pos_default = _pos_html(pos, detalle, "IN", "F1")
+    pos_json = {a: {f: {"sector": pos[a][f],
+                        "top": sorted(detalle[a][f], key=lambda t: -t[2])[:10]}
+                    for f in FONDOS} for a in AFPS}
+
+    # peor caso de desalineacion para el texto
+    corr_bad = corrobora[corrobora["FechaFinExcel"] != d_corte]
+    max_delta = corrobora["Delta"].abs().max() if len(corrobora) else 0.0
+
+    plotly = json.dumps
+    tpl = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard RVL</title>
+<script src="{PLOTLY_SRC}"></script>
+<style>
+  :root {{ --bg:#0f1420; --card:#171d2b; --ink:#e8edf6; --mut:#93a0b8;
+           --pos:#3fb37f; --neg:#e06b6b; --acc:#5b8def; --warn:#e0a94b; --line:#26304a; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:var(--bg); color:var(--ink);
+          font-family:"Segoe UI",Roboto,Arial,sans-serif; font-size:14px; }}
+  header {{ padding:20px 28px; border-bottom:1px solid var(--line); }}
+  h1 {{ margin:0; font-size:20px; letter-spacing:.3px; }}
+  .sub {{ color:var(--mut); font-size:12px; margin-top:4px; }}
+  nav {{ display:flex; gap:4px; padding:12px 28px 0; border-bottom:1px solid var(--line);
+         position:sticky; top:0; background:var(--bg); z-index:5; flex-wrap:wrap; }}
+  nav button {{ background:transparent; color:var(--mut); border:0; padding:10px 16px;
+                border-bottom:2px solid transparent; cursor:pointer; font-size:14px; }}
+  nav button.active {{ color:var(--ink); border-bottom-color:var(--acc); }}
+  section {{ display:none; padding:24px 28px; }}
+  section.active {{ display:block; }}
+  .card {{ background:var(--card); border:1px solid var(--line); border-radius:10px;
+           padding:18px 20px; margin-bottom:20px; }}
+  h3 {{ margin:0 0 14px; font-size:15px; }}
+  h4 {{ margin:0 0 10px; font-size:13px; color:var(--mut); }}
+  table.grid {{ width:100%; border-collapse:collapse; font-size:13px; }}
+  table.grid th, table.grid td {{ padding:7px 10px; text-align:right; border-bottom:1px solid var(--line); }}
+  table.grid th {{ color:var(--mut); font-weight:600; text-align:right; }}
+  table.grid td.lab, table.grid th:first-child {{ text-align:left; }}
+  tr.afp td {{ background:#1e2740; color:var(--acc); font-weight:600; text-align:left; }}
+  td.pos {{ color:var(--pos); }} td.neg {{ color:var(--neg); }}
+  .two {{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }}
+  .grid2 {{ display:grid; grid-template-columns:2fr 1fr; gap:20px; }}
+  .warn {{ color:var(--warn); font-weight:600; }} .ok {{ color:var(--pos); }}
+  .note {{ background:#231d10; border:1px solid var(--warn); border-radius:8px;
+           padding:14px 16px; color:#f0dcae; font-size:13px; line-height:1.5; }}
+  select {{ background:var(--card); color:var(--ink); border:1px solid var(--line);
+            border-radius:6px; padding:6px 10px; margin-right:8px; }}
+  .plot {{ width:100%; height:460px; }}
+  small {{ color:var(--mut); }}
+  @media(max-width:820px){{ .two,.grid2{{grid-template-columns:1fr;}} }}
+</style></head>
+<body>
+<header>
+  <h1>Monitor de Rendimiento RVL &mdash; Dashboard interactivo</h1>
+  <div class="sub">Insumo: hoja <b>BD</b> &nbsp;|&nbsp; Inicio (YTD): <b>{d_inicio}</b>
+   &nbsp;|&nbsp; Corte: <b>{d_corte}</b> &nbsp;|&nbsp; WTD desde <b>{d_wtd}</b>
+   &nbsp;|&nbsp; MTD desde <b>{d_mtd}</b></div>
+</header>
+<nav>
+  <button class="tab active" data-t="resumen">Resumen</button>
+  <button class="tab" data-t="rendimiento">Rendimiento</button>
+  <button class="tab" data-t="posicion">Posicionamiento</button>
+  <button class="tab" data-t="corr">Corroboraci&oacute;n del rendimiento</button>
+</nav>
+
+<section id="resumen" class="active">
+  <div class="grid2">
+    <div class="card"><h3>Retornos por AFP y Fondo (por fechas)</h3>{tabla_resumen}</div>
+    <div class="card"><h3>AUM al corte</h3>{tabla_aum}</div>
+  </div>
+</section>
+
+<section id="rendimiento">
+  <div class="card"><h3>Retorno acumulado YTD por AFP&times;Fondo</h3>
+    <div id="plot_ret" class="plot"></div>
+    <small>Curvas = PRODUCT(1+retorno diario)&minus;1 sobre las fechas reales, base en {d_inicio}.
+    Usa la leyenda para aislar series (doble clic).</small></div>
+  <div class="card"><h3>Evoluci&oacute;n de AUM (RVL) por AFP</h3>
+    <div id="plot_aum" class="plot"></div></div>
+</section>
+
+<section id="posicion">
+  <div class="card"><h3>Posicionamiento al corte</h3>
+    <div style="margin-bottom:14px">
+      <select id="selAfp">{sel_afp}</select>
+      <select id="selF">{sel_f}</select></div>
+    <div id="posBox">{pos_default}</div>
+    <div id="plot_pos" class="plot" style="height:380px;margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="corr">
+  <div class="card"><h3>&iquest;Por qu&eacute; el rendimiento se ve distinto?</h3>
+   <div class="note">
+     El libro acumula con <code>PRODUCT(1+OFFSET(BD!A1, fila_inicio, col, <b>NETWORKDAYS</b>(inicio,corte)))</code>,
+     es decir usa el <b>conteo de d&iacute;as h&aacute;biles como n&uacute;mero de FILAS</b>. Pero BD
+     no tiene exactamente una fila por d&iacute;a h&aacute;bil (arrastra filas de fines de
+     semana/feriados), as&iacute; que esa ventana <b>no aterriza en la fecha de corte</b>: se
+     corta antes y recorta la cola del per&iacute;odo. Seg&uacute;n el signo de los d&iacute;as
+     perdidos, el retorno resultante puede quedar por encima o por debajo del real.
+     Diferencia m&aacute;xima observada: <b>{_fmt_pct(max_delta)}</b>.
+     El m&eacute;todo por <b>fechas</b> (columna izquierda) es el correcto.
+   </div>
+   <div style="margin-top:16px">{tabla_corr}</div>
+  </div>
+</section>
+
+<script>
+  const TABS = document.querySelectorAll('nav .tab');
+  TABS.forEach(b => b.onclick = () => {{
+    TABS.forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('section').forEach(s=>s.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById(b.dataset.t).classList.add('active');
+    window.dispatchEvent(new Event('resize'));
+  }});
+
+  const RET = {plotly(traces_ret)};
+  const AUMD = {plotly(traces_aum)};
+  const POS = {plotly(pos_json)};
+  const LAY = {{ paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+    font:{{color:'#93a0b8'}}, margin:{{l:55,r:20,t:20,b:40}},
+    xaxis:{{gridcolor:'#26304a'}}, yaxis:{{gridcolor:'#26304a'}},
+    legend:{{orientation:'h', y:-0.18}}, hovermode:'x unified' }};
+
+  function draw() {{
+    Plotly.newPlot('plot_ret', RET.map(t=>({{...t, hovertemplate:'%{{y:.2f}}%'}})),
+      {{...LAY, yaxis:{{gridcolor:'#26304a', ticksuffix:'%'}}}}, {{responsive:true, displaylogo:false}});
+    Plotly.newPlot('plot_aum', AUMD, LAY, {{responsive:true}});
+    drawPos();
+  }}
+  function drawPos() {{
+    const a = document.getElementById('selAfp').value, f = document.getElementById('selF').value;
+    const d = (POS[a]&&POS[a][f])?POS[a][f].sector:{{}};
+    const labels = Object.keys(d), vals = labels.map(k=>d[k]*100);
+    Plotly.newPlot('plot_pos', [{{type:'bar', x:vals, y:labels, orientation:'h',
+      marker:{{color:'#5b8def'}}, hovertemplate:'%{{x:.2f}}%<extra></extra>'}}],
+      {{...LAY, margin:{{l:160,r:20,t:10,b:40}}, xaxis:{{gridcolor:'#26304a', ticksuffix:'%'}}}},
+      {{responsive:true}});
+  }}
+  function renderPosTable() {{
+    const a=document.getElementById('selAfp').value, f=document.getElementById('selF').value;
+    const p = POS[a][f];
+    let secRows=''; let tot=0;
+    const secs = Object.entries(p.sector).sort((x,y)=>y[1]-x[1]);
+    secs.forEach(([s,w])=>{{ tot+=w; secRows+=`<tr><td class="lab">${{s}}</td><td>${{(w*100).toFixed(2)}}%</td></tr>`; }});
+    secRows+=`<tr class="afp"><td class="lab">Total invertido</td><td>${{(tot*100).toFixed(2)}}%</td></tr>`;
+    let topRows=''; p.top.forEach(([n,s,w])=>{{ topRows+=`<tr><td class="lab">${{n}}</td><td><small>${{s}}</small></td><td>${{(w*100).toFixed(2)}}%</td></tr>`; }});
+    document.getElementById('posBox').innerHTML =
+      `<div class="two"><div><h4>Pesos por sector &mdash; ${{a}} ${{f}}</h4><table class="grid">${{secRows}}</table></div>`+
+      `<div><h4>Top 10 posiciones &mdash; ${{a}} ${{f}}</h4><table class="grid">${{topRows}}</table></div></div>`;
+  }}
+  document.getElementById('selAfp').onchange = ()=>{{renderPosTable();drawPos();}};
+  document.getElementById('selF').onchange = ()=>{{renderPosTable();drawPos();}};
+  window.addEventListener('load', ()=>{{ draw(); renderPosTable(); }});
+</script>
+</body></html>"""
+    return tpl
+
+
+# ============================================================================
+# 6) MAIN
+# ============================================================================
+def main():
+    log.info("Leyendo libro: %s", LIBRO)
+    if not os.path.exists(LIBRO):
+        log.error("No se encontro el libro. Revisa la variable LIBRO.")
+        raise FileNotFoundError(LIBRO)
+
+    code2name, code2sector = _leer_parametria(LIBRO)
+    idx, ret_total, aum, header, weight_idx, weight_rows, fechas = _leer_bd(LIBRO)
+
+    d_corte = FECHA_CORTE or max(fechas)
+    if isinstance(d_corte, dt.datetime):
+        d_corte = d_corte.date()
+    d_inicio = FECHA_INICIO or dt.date(d_corte.year, 1, 1)
+    if isinstance(d_inicio, dt.datetime):
+        d_inicio = d_inicio.date()
+    log.info("Ventana: inicio=%s  corte=%s", d_inicio, d_corte)
+
+    resumen, curvas, corrobora, aum, aum_ultimo, d_wtd, d_mtd, fechas_ord = \
+        calcular(idx, ret_total, aum, fechas, d_inicio, d_corte)
+    log.info("Retornos calculados para %d combinaciones AFP x Fondo.", len(resumen))
+
+    pos, detalle = posicionamiento(header, weight_idx, weight_rows, fechas, d_corte,
+                                   code2name, code2sector)
+    n_pos = sum(len(v) for a in detalle.values() for v in a.values())
+    log.info("Posicionamiento: %d posiciones (instrumento x AFP x Fondo) al corte.", n_pos)
+
+    # --- reporte de corroboracion en consola ---
+    desalineados = corrobora[corrobora["FechaFinExcel"] != d_corte]
+    log.info("Corroboracion: %d/%d series donde el metodo Excel NO aterriza en el corte.",
+             len(desalineados), len(corrobora))
+    if len(desalineados):
+        ej = desalineados.iloc[0]
+        log.info("  Ej. %s %s -> Excel termina en %s (deberia ser %s). "
+                 "YTD correcto=%.2f%%  vs  YTD Excel=%.2f%%  (delta=%.2f pp).",
+                 ej.AFP, ej.Fondo, ej.FechaFinExcel, d_corte,
+                 ej.YTD_correcto * 100, ej.YTD_excel * 100, ej.Delta * 100)
+
+    html_out = construir_html(resumen, curvas, corrobora, aum, aum_ultimo, pos, detalle,
+                              d_inicio, d_corte, d_wtd, d_mtd)
+    os.makedirs(os.path.dirname(SALIDA_HTML) or ".", exist_ok=True)
+    with open(SALIDA_HTML, "w", encoding="utf-8") as fh:
+        fh.write(html_out)
+    log.info("Dashboard generado: %s  (%.1f KB)", SALIDA_HTML, len(html_out) / 1024)
+    log.info("Listo. Abre el archivo en tu navegador.")
+
+
+if __name__ == "__main__":
+    main()
