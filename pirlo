@@ -1,0 +1,1996 @@
+# %%
+# =============================================================================
+# CHANGELOG - Modernización del script (ver diagnóstico completo entregado
+# previamente en el chat para el detalle y la evidencia de cada punto)
+#
+# BLOQUEANTES corregidos:
+#   1. fillna(method='ffill') -> .ffill()  (2 ocurrencias: EPU_Limpio, ETFPERU_Limpio)
+#   2. DQ_SIS: la fila de encabezado con ISINs en la hoja DQ_RV de QEST ya no
+#      está en una posición fija (estaba hardcodeada en la columna 13 tras
+#      transponer); ahora se localiza dinámicamente buscando la fila que
+#      empieza con ["Fondo","Fecha","Fondo_Fecha"].
+#   3. calculo_Aum: mismo problema en la hoja DataHistórica (fila de
+#      encabezados hardcodeada en la posición 4); ahora se localiza
+#      dinámicamente buscando la fila cuya primera celda sea "Fecha".
+#
+# RIESGOS SILENCIOSOS corregidos:
+#   4. Parametria: Lista_Isins/Lista_Nombres se construían con
+#      Base_Parametria.dropna(axis=0), que descarta CUALQUIER fila con un
+#      NaN en cualquier columna -- incluida "Moneda", que legítimamente
+#      puede venir vacía. Esto eliminaba silenciosamente ~21 instrumentos
+#      reales del universo de RVL. Ahora se exige solo que existan
+#      Nombre/ISIN/Sector (columnas 0,1,2,3); si falta Moneda se loguea
+#      una advertencia con el detalle, pero el instrumento SÍ se conserva.
+#   5. weight_EXSIS_F1_ apuntaba por copy-paste a weight_EXSIS_F1_L (solo
+#      cartera líquida) en vez de weight_EXSIS_F1 (peso total). Corregido.
+#   6. wb1.save() nunca se llamaba: los cambios podían perderse al cerrar
+#      el proceso. Se agrega guardado explícito + cierre de la instancia de
+#      Excel, con manejo de errores.
+#   7. Se eliminó una segunda apertura huérfana de xw.Book(...) al final
+#      del script (abría una instancia de Excel duplicada que nunca se
+#      usaba ni se cerraba).
+#
+# NO SE CAMBIÓ (decisión de negocio pendiente, ver diagnóstico):
+#   - El tratamiento de "ND"/NaN -> 0 en precios, TC, AUM y posiciones se
+#     deja intacto para no alterar el resultado financiero. Queda marcado
+#     con comentarios "# DECISIÓN NEGOCIO" en cada punto donde ocurre.
+#   - El parseo de fechas con format='mixed' se deja igual (con errors=
+#     'raise', que sí revienta si encuentra algo no parseable).
+#   - No se hizo la refactorización grande para deduplicar los bloques de
+#     cálculo de weights/retornos por AFP (IN/HA/PF/RI/EXSIS): ese cambio
+#     es deseable pero de alto riesgo de alterar el resultado sin poder
+#     validarlo end-to-end contra Excel/xlwings en este entorno. Se deja
+#     como propuesta de siguiente iteración, ya con el script corriendo.
+#
+# LIMPIEZA:
+#   - Imports no usados eliminados: win32com.client, os, xlrd, re,
+#     getpass, strftime, shutil, load_workbook.
+#   - Se agregó logging básico y try/except alrededor de cada etapa que
+#     toca archivos externos (lecturas de Excel, escritura final,
+#     generación de PDFs), para que un fallo diga QUÉ paso falló en vez
+#     de tronar con un traceback genérico.
+#   - Se eliminaron ~250 líneas de bloques de código comentado y
+#     duplicado al final del script (versión vieja de los mismos cálculos).
+#
+# -----------------------------------------------------------------------------
+# ITERACIÓN 2 (compatibilidad con hoja BD + mejora de PDFs):
+#
+# CONTRATO DE COLUMNAS DE BD (Opción B - no tocar el Excel):
+#   Las hojas de presentación (Resumen, Rendimiento, Posicionamiento x4) leen
+#   la hoja BD con ~5,600 fórmulas INDEX/MATCH que buscan columnas POR NOMBRE
+#   EXACTO (p.ej. "Ret_IN_F1_O_Total", "Weight_EPU_<isin>",
+#   "Retorno_Precios_No_Acum_<x>"). Si una columna esperada no existe, la
+#   fórmula devuelve #N/A/#REF! y se propaga al PDF final de Excel.
+#   - Se eliminaron los .dropna(axis=1, how="all") de los bloques EPU/ETFPERU
+#     (PxQ y Ret): esos dropna borraban columnas que quedaban todas-NaN y con
+#     ellas el NOMBRE que las hojas necesitan. Ahora se conservan todas las
+#     columnas (quedan en NaN/0 pero el nombre se preserva). Esto recupera el
+#     desglose per-ISIN de EPU/ETFPERU que el usuario confirmó que usa.
+#   NOTA IMPORTANTE: la cantidad final de columnas de BD depende de cuántos
+#   instrumentos existan en los archivos de entrada REALES de producción
+#   (QEST, BDPrecios, RVL). Con archivos de muestra reducidos se generan menos
+#   columnas; con los de producción se generan todas. La diferencia de columnas
+#   observada en las comparativas se debía en gran parte a que los archivos de
+#   muestra tenían menos instrumentos que los de producción, no solo al código.
+#
+# LIMPIEZA DEL ÍNDICE DE BD (sin tocar columnas):
+#   - Antes de exportar a BD se limpia el índice de fechas: se quitan filas de
+#     índice nulo, filas totalmente vacías (fechas que entraban solo por el
+#     outer-join de pd.concat, típicamente fines de semana o fechas futuras),
+#     se recorta a Fecha_Corte y se ordena cronológicamente. Esto elimina las
+#     ~239 filas fantasma que aparecían en la hoja BD.
+#
+# PDFs DE MATPLOTLIB (mejora de visualización):
+#   - Fondo SIEMPRE blanco (figura y savefig).
+#   - Eje X legible: un tick por año, formato "Mon-YY", sin rotación forzada.
+#   - Grilla suave, spines superior/derecho ocultos, leyenda ÚNICA por figura.
+#   - Fecha de corte visible en cada página.
+#   - Página "Precios" corregida: se filtran instrumentos sin datos para no
+#     dibujar ejes vacíos; los subgráficos sobrantes se apagan.
+#   - Las dos funciones casi idénticas (completa/reducida) se unificaron en
+#     Generar_PDF_Rendimiento(..., solo_integra=bool), evitando ~180 líneas.
+#
+# COMPATIBILIDAD PANDAS 3:
+#   - select_dtypes(include='object') -> include=['object','string'] para
+#     silenciar el Pandas4Warning de migración de strings.
+#   - DQ_IN/DQ_SIS: el pd.concat([base, nuevos]) fallaba con InvalidIndexError
+#     en pandas 3 cuando los encabezados (ISINs) tienen DUPLICADOS y la base
+#     histórica y los datos nuevos del QEST tienen conjuntos de columnas
+#     ligeramente distintos (instrumentos agregados/retirados entre corridas).
+#     En pandas 2 esto se toleraba; pandas 3 prohíbe reindexar con etiquetas
+#     no únicas. Se agregó _concat_preservando_esquema(), que apila por
+#     POSICIÓN respetando el esquema de la base (contrato de columnas), deja
+#     NaN donde falte un instrumento y descarta columnas nuevas no previstas.
+#   - Parametria: si la columna C tiene ISINs REPETIDOS, Lista_Isins tenía
+#     duplicados y .reindex(columns=Lista_Isins) fallaba en pandas 3
+#     ("cannot reindex on an axis with duplicate labels"). Se de-duplica
+#     Lista_Isins/Lista_Nombres en el origen (primera aparición, mismo criterio
+#     que MATCH en Excel). Además se agregó _reindex_columnas_seguro(), usado en
+#     los 12 reindex de posiciones DQ_*, que también de-duplica las columnas del
+#     DataFrame ORIGEN antes de reindexar (el reindex falla igual si el origen
+#     trae columnas repetidas, no solo el target).
+# =============================================================================
+import logging
+import datetime
+import pandas as pd
+import numpy as np
+import polars as pl
+import xlwings as xw
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.backends.backend_pdf import PdfPages
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+)
+log = logging.getLogger("Rendimiento_RVL")
+
+# %%
+fecha_hoy = datetime.datetime.today().strftime('%d.%m.%y')
+# %% md
+## Inicio del Código
+# %%
+# -----------------------------------------------------------------------
+# CONFIGURACIÓN CENTRALIZADA DE RUTAS
+# -----------------------------------------------------------------------
+Qest = r"Z:\Benchmarking\QEST_BD.xlsm"
+Monitor_Rentabilidad = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\Rendimiento RVL.xlsm"
+Pdf = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\PDFs\Rendimiento RVL YTD.pdf"
+Pdfs = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\PDFs\Rendimiento RVL YTD Reducido.pdf"
+Aum = r"Z:\Valor Cuota\DataValorCuota_IN.xlsm"
+# OJO: en el script original esta ruta terminaba en ".xlsx", pero el
+# archivo real del proyecto es "BDPrecios_VB_IN.xlsm" (macro-enabled).
+# Confirma cuál es la extensión correcta en el servidor de red; si de
+# verdad existe un .xlsx separado y es el que se debe usar, revierte
+# esta línea.
+BDPrecios = r"Z:\Benchmarking\BDPrecios_VB_IN.xlsx"
+
+# Constantes usadas al parsear el bloque diario de QEST DQ_IN: cada fecha
+# nueva trae 3 tipos de dato (Q, PxQ, %Fondo) x 3 fondos = 9 filas antes
+# de llegar a la siguiente fecha. Verificado contra QEST_BD.xlsm real.
+N_FONDOS_IN = 3
+N_TIPOS_DATO_IN = 3
+BLOQUE_FILAS_DQ_IN = N_FONDOS_IN * N_TIPOS_DATO_IN  # = 9
+# %%
+## A diferencia de las otras bases. Aqui no se va a agregar por empresas.Con lo cual no sería necesario la agrupacion.
+# %%
+## 20/05: Se realizan cambios a la fuente de los precios y rentabilida. Se pasa de usar a bloomberg
+## como fuente a usar eL BDPrecios.
+# %% md
+### Lista de variables
+# %%
+Base_Parametria = pd.read_excel(Monitor_Rentabilidad, sheet_name="Parametria", header=None)
+
+# Antes: Base_Parametria.dropna(axis=0) exigía que las 6 columnas (incluida
+# Moneda) estuvieran completas, y eliminaba silenciosamente cualquier
+# instrumento con Moneda vacía (~21 instrumentos reales, ver changelog).
+# Ahora solo exigimos Nombre/ISIN(x2)/Sector, que son las columnas
+# necesarias para definir el universo de instrumentos. Moneda se valida
+# aparte, y si falta se loguea (no se descarta el instrumento).
+Parametria_Base_Isins = Base_Parametria.dropna(subset=[0, 1, 2, 3])
+
+# IMPORTANTE (pandas 3): Lista_Isins se usa como etiquetas de columna para
+# .reindex(columns=Lista_Isins) en múltiples DataFrames. Si Parametria tiene
+# ISINs REPETIDOS en la columna C, pandas 3 lanza
+# "cannot reindex on an axis with duplicate labels". Además, ISINs repetidos
+# generarían columnas duplicadas en la hoja BD, y las fórmulas INDEX/MATCH de
+# las hojas de presentación solo toman la PRIMERA coincidencia. Por eso se
+# de-duplica aquí en el origen, conservando el ORDEN y la PRIMERA aparición
+# (mismo criterio que usa Excel al hacer MATCH). Esto no cambia el resultado
+# financiero: un ISIN repetido en Parametria es un error de captura de datos.
+_isins_raw = Parametria_Base_Isins.iloc[:, 2].tolist()
+_nombres_raw = Parametria_Base_Isins.iloc[:, 0].tolist()
+
+_vistos = set()
+Lista_Isins = []
+Lista_Nombres = []
+_isins_duplicados = []
+for _isin, _nombre in zip(_isins_raw, _nombres_raw):
+    if _isin in _vistos:
+        _isins_duplicados.append((_isin, _nombre))
+        continue
+    _vistos.add(_isin)
+    Lista_Isins.append(_isin)
+    Lista_Nombres.append(_nombre)
+
+if _isins_duplicados:
+    log.warning(
+        "Parametria tiene %d ISIN(s) repetido(s) en la columna C; se conserva "
+        "solo la PRIMERA aparición de cada uno (se descartan estas repeticiones: "
+        "%s). Revisa Parametria si esto no es lo esperado.",
+        len(_isins_duplicados), _isins_duplicados,
+    )
+
+_sin_moneda = Parametria_Base_Isins[
+    Parametria_Base_Isins[2].isin(Lista_Isins) & Parametria_Base_Isins[5].isna()
+]
+if not _sin_moneda.empty:
+    log.warning(
+        "%d instrumento(s) en Parametria sin Moneda asignada (se conservan "
+        "en Lista_Isins, pero NO se les aplicará conversión de FX): %s",
+        _sin_moneda[2].nunique(), _sin_moneda[0].tolist(),
+    )
+
+Diccionario_Parametria = dict(zip(Lista_Isins, Lista_Nombres))
+
+# %%
+# -----------------------------------------------------------------------
+# MAPEO TICKER (Bloomberg) -> SBS, para nombrar las columnas de precios de RVL.
+#
+# CONTEXTO: la hoja RVL nombra sus columnas de precio con TICKERS de Bloomberg
+# ("SCOTIAC1 PE Equity"), no con el código SBS. Los pesos de benchmark
+# (EPU/ETFPERU) y el resto del pipeline se cruzan por SBS. Si no traducimos,
+# el producto Precios x Pesos NO alinea y las columnas EPU/ETFPERU salen
+# VACÍAS en BD (bug detectado: Weight_ETFPERU_*, Weight_EPU_*, etc. sin datos).
+#
+# Parametria tiene el mapeo: col A = Bloomberg (ticker), col C = SBS.
+# El match es aproximado porque RVL agrega sufijos (" Equity", bolsa, número):
+#   1) quita " Equity" y busca match exacto           -> "IFS US Equity" -> "IFS US"
+#   2) si no, quita un sufijo numérico final           -> "FSM US Equity2" -> "FSM US"
+#   3) si no, usa el PRIMER token (código de empresa)   -> "SCOTIAC1 PE" -> "SCOTIAC1"
+#      pero SOLO si ese token es ÚNICO en Parametria (evita mapear mal
+#      instrumentos que cotizan en dos bolsas: IFS, HOC, SMTSF tienen dos SBS).
+# Los tickers que no logran mapearse se dejan con su NOMBRE ORIGINAL (el flujo
+# continúa) y se listan en un WARNING para que puedas revisarlos.
+# -----------------------------------------------------------------------
+from collections import defaultdict as _defaultdict
+
+_param_map = Base_Parametria.iloc[2:, [0, 2]].dropna()
+_param_map.columns = ["Bloomberg", "SBS"]
+Mapa_Bloomberg_SBS = dict(zip(
+    _param_map["Bloomberg"].astype(str).str.strip(),
+    _param_map["SBS"].astype(str).str.strip()
+))
+
+# Mapa por primer token, SOLO para tokens únicos (evita colisiones de doble bolsa)
+_tok_a_sbs = _defaultdict(set)
+for _bbg, _sbs in Mapa_Bloomberg_SBS.items():
+    _tok_a_sbs[_bbg.split()[0]].add(_sbs)
+Mapa_PrimerToken_SBS = {t: next(iter(s)) for t, s in _tok_a_sbs.items() if len(s) == 1}
+
+
+def _ticker_rvl_a_sbs(ticker):
+    """Traduce un ticker de RVL a SBS. Devuelve (valor, mapeado_ok)."""
+    if ticker is None:
+        return ticker, False
+    limpio = str(ticker).replace(" Equity", "").strip()
+    if limpio in Mapa_Bloomberg_SBS:
+        return Mapa_Bloomberg_SBS[limpio], True
+    limpio2 = limpio.rstrip("0123456789").strip()
+    if limpio2 in Mapa_Bloomberg_SBS:
+        return Mapa_Bloomberg_SBS[limpio2], True
+    tok = limpio.split()[0] if limpio.split() else limpio
+    if tok in Mapa_PrimerToken_SBS:
+        return Mapa_PrimerToken_SBS[tok], True
+    return ticker, False
+
+
+def _renombrar_columnas_precios_a_sbs(columnas):
+    """Traduce una lista de nombres de columna de precios (tickers RVL) a SBS.
+    Los no mapeables se dejan igual y se avisan por log."""
+    traducidas, no_mapeados = [], []
+    for c in columnas:
+        sbs, ok = _ticker_rvl_a_sbs(c)
+        traducidas.append(sbs)
+        _etiquetas_campo = ("Px_last", "TOT_RETURN_INDEX_GROSS_DVDS")
+        if not ok and c is not None and not str(c).startswith(_etiquetas_campo):
+            no_mapeados.append(c)
+    if no_mapeados:
+        log.warning(
+            "%d ticker(s) de RVL no se pudieron mapear a SBS vía Parametria "
+            "(se conservan con su nombre original; sus columnas de precio no "
+            "cruzarán con los benchmarks EPU/ETFPERU): %s",
+            len(no_mapeados), no_mapeados,
+        )
+    return traducidas
+
+def _fila_tickers_rvl(df_precios):
+    """Localiza dinámicamente la fila de df_precios que contiene los tickers
+    de Bloomberg (la que tiene celdas con 'Equity'). Evita depender de un
+    número de fila fijo, que cambia según cómo el motor de lectura indexe la
+    hoja RVL. Devuelve la ETIQUETA de índice de esa fila."""
+    for idx in df_precios.index:
+        vals = df_precios.loc[idx].astype(str)
+        if vals.str.contains("Equity", na=False).any():
+            return idx
+    raise ValueError(
+        "No se encontró la fila de tickers (con 'Equity') en la hoja RVL. "
+        "Revisa la estructura de la hoja RVL."
+    )
+
+
+
+
+
+Sectores = Base_Parametria.iloc[::, 3]
+Sectores_DF = Base_Parametria.iloc[::, 2:4]
+Sectores = Sectores.dropna()
+Sectores_DF = Sectores_DF.dropna()
+Sectores_DF.columns = ["ISIN", "Sector"]
+Lista_Sectores = Sectores.unique().tolist()
+
+Agrupados_Sectores = {sector: Sectores_DF[Sectores_DF['Sector'] == sector]['ISIN'].tolist() for sector in
+                      Lista_Sectores}
+
+Monedas = Base_Parametria.iloc[::, 5]
+Monedas_DF = Base_Parametria.iloc[::, [2, 5]]
+Monedas = Monedas.dropna()
+Monedas_DF = Monedas_DF.dropna()
+Monedas_DF.columns = ["ISIN", "Moneda"]
+Lista_Monedas = Monedas.unique().tolist()
+
+Agrupados_Monedas = {moneda: Monedas_DF[Monedas_DF['Moneda'] == moneda]['ISIN'].tolist() for moneda in Lista_Monedas}
+
+ListaIN = ["Fondo", "Dato", "Fecha", "SBS"] + Lista_Isins
+ListaUsados = ["Fondo", "Dato", "Fecha", "SBS"] + Lista_Isins
+ListaEx = ["Fondo", "Fecha", "Fondo_Fecha"] + Lista_Isins
+lista_BDP = ['Campo', 'Fecha'] + Lista_Isins
+# %%
+# CARTERA LÍQUIDA [BAP US, BUENAVC1 PE, BVN US, IFS PE, IFS US, HOC LSE, HOC EU, HBM US, SCCO]
+L = ['302012200001', '302008100002', '3220082A1040', '300013200001', '300013200002', '3920836W5029', '3020836W5029',
+     '345445281022', '345217200001']
+
+
+# %% md
+### Utilidad: localizar filas de encabezado dinámicamente
+#
+# Tanto DQ_IN como DQ_SIS parten de hojas "crudas" exportadas por QEST
+# donde los datos reales empiezan después de un bloque de filas variable
+# (resúmenes, nombres, tickers, etc.). El script original asumía una
+# posición de fila FIJA para ese encabezado; se comprobó contra los datos
+# reales que esa posición se había corrido (ver changelog), rompiendo el
+# parseo de DQ_SIS en silencio. Esta función busca el encabezado por
+# CONTENIDO en vez de por posición fija, y si no lo encuentra, falla con
+# un mensaje claro en vez de seguir con datos desalineados.
+# %%
+def _localizar_fila_encabezado(df, valores_esperados, max_filas_busqueda=60):
+    n = len(valores_esperados)
+    limite = min(max_filas_busqueda, len(df))
+    for i in range(limite):
+        fila = df.iloc[i, :n].tolist()
+        if fila == valores_esperados:
+            return i
+    raise ValueError(
+        f"No se encontró la fila de encabezado esperada {valores_esperados} "
+        f"en las primeras {limite} filas. La estructura de origen pudo haber "
+        f"cambiado; revisa manualmente antes de continuar."
+    )
+
+
+# %%
+def _reindex_columnas_seguro(df, columnas):
+    """
+    Equivalente a df.reindex(columns=columnas) pero robusto ante columnas
+    DUPLICADAS en el DataFrame de origen (pandas 3 lanza ValueError
+    "cannot reindex on an axis with duplicate labels" en ese caso).
+
+    Si el origen tiene columnas repetidas, se conserva la PRIMERA aparición de
+    cada una (mismo criterio que MATCH en Excel) antes de reindexar. Las
+    columnas pedidas que no existan en el origen quedan como NaN.
+    """
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
+    return df.reindex(columns=columnas)
+
+
+# %%
+def _concat_preservando_esquema(base, nuevos):
+    """
+    Concatena verticalmente 'nuevos' debajo de 'base' preservando el esquema
+    (columnas) de 'base'.
+
+    Motivo: los encabezados de DQ_IN/DQ_SIS son listas de ISINs que pueden
+    contener DUPLICADOS (p.ej. un mismo ISIN repetido en Parametria/Benchmark)
+    y además la base histórica y los datos nuevos del QEST pueden tener
+    conjuntos de columnas ligeramente distintos (instrumentos agregados o
+    retirados entre corridas). En pandas 3, pd.concat sobre eje de filas
+    intenta reindexar por etiqueta y falla con InvalidIndexError cuando las
+    columnas no son únicas. Aquí concatenamos por POSICIÓN sobre el esquema de
+    la base: se reindexa 'nuevos' a las columnas de 'base' de forma posicional
+    (respetando duplicados) y se apilan los valores. Las columnas que estén en
+    'nuevos' pero no en 'base' se descartan (la base define el contrato); las
+    que estén en 'base' pero no en 'nuevos' quedan como NaN.
+    """
+    base_cols = list(base.columns)
+
+    # Mapa columna->posiciones en 'nuevos' (respeta duplicados por orden de aparición)
+    from collections import defaultdict
+    pos_por_col = defaultdict(list)
+    for i, c in enumerate(nuevos.columns):
+        pos_por_col[c].append(i)
+
+    usados = defaultdict(int)
+    col_data = {}
+    nuevos_vals = nuevos.to_numpy()
+    for j, c in enumerate(base_cols):
+        posiciones = pos_por_col.get(c, [])
+        k = usados[c]
+        if k < len(posiciones):
+            col_data[j] = nuevos_vals[:, posiciones[k]]
+            usados[c] += 1
+        else:
+            # columna de la base que no existe (o se agotó) en 'nuevos' -> NaN
+            col_data[j] = np.full(len(nuevos), np.nan, dtype=object)
+
+    nuevos_alineado = pd.DataFrame(
+        {j: col_data[j] for j in range(len(base_cols))}
+    )
+    nuevos_alineado.columns = base_cols
+
+    # Apilar por valores para no gatillar el reindex por etiquetas duplicadas
+    base_reset = base.copy()
+    base_reset.columns = range(len(base_cols))
+    nuevos_reset = nuevos_alineado.copy()
+    nuevos_reset.columns = range(len(base_cols))
+    apilado = pd.concat([base_reset, nuevos_reset], ignore_index=True)
+    apilado.columns = base_cols
+    return apilado
+
+
+# %% md
+### DQ_IN
+# %%
+def DQ_IN(df1, DQ_IN_BD, ListaIN, ListaUsados):
+    fila_header = _localizar_fila_encabezado(df1, ["Fondo", "Dato", "Fecha", "SBS"])
+    # Se eliminan las primeras filas del documento que no serán usadas
+    df1 = df1.drop(df1.index[list(range(0, fila_header))])
+    df1 = df1.transpose()
+    df1 = df1.rename(columns={fila_header: "Isins"})
+    filtrada = df1[df1["Isins"].isin(ListaIN)]
+    filtrada = filtrada.transpose()
+    filtrada1 = filtrada
+    filtrada1.columns = filtrada.iloc[0].to_list()
+    filtrada = filtrada1[1:]
+
+    DQ_IN_FECHAS = DQ_IN_BD["Fecha"][::-1].copy()
+    DQ_IN_UltimaFecha = DQ_IN_FECHAS.iloc[0]
+
+    log.info("DQ IN: última fecha en base = %s", DQ_IN_UltimaFecha)
+
+    Qest_DQ_IN_Fechas = filtrada["Fecha"].values.tolist()
+
+    if DQ_IN_UltimaFecha not in Qest_DQ_IN_Fechas:
+        raise ValueError(
+            f"La última fecha de la base de Integra ({DQ_IN_UltimaFecha}) no "
+            f"existe en las fechas del QEST (DQ_IN). Esto suele significar que "
+            f"el QEST no está actualizado hasta esa fecha, o que hay un hueco "
+            f"entre la base y el QEST. Actualiza QEST_BD.xlsm antes de correr. "
+            f"Rango de fechas disponibles en QEST: "
+            f"{Qest_DQ_IN_Fechas[0]} ... {Qest_DQ_IN_Fechas[-1]}."
+        )
+
+    # +BLOQUE_FILAS_DQ_IN: cada fecha trae 9 filas (3 fondos x 3 tipos de
+    # dato Q/PxQ/%Fondo) antes de llegar a la fecha siguiente. Ver
+    # constante definida al inicio del script.
+    ubifechas = Qest_DQ_IN_Fechas.index(DQ_IN_UltimaFecha) + BLOQUE_FILAS_DQ_IN
+    Nuevos_DQ_IN = filtrada[ubifechas::]
+    Nuevos_DQ_IN = Nuevos_DQ_IN.reset_index()
+    Nuevos_DQ_IN = Nuevos_DQ_IN.drop("index", axis=1)
+    Nuevos_DQ_IN = Nuevos_DQ_IN.loc[Nuevos_DQ_IN['Dato'] == "Q"]
+
+    LISTO = _concat_preservando_esquema(DQ_IN_BD, Nuevos_DQ_IN).reset_index(drop=True)
+
+    return LISTO
+
+
+# %% md
+### DQ_SIS
+# %%
+def DQ_SIS(df2, DQ_SIS_BD, ListaEx):
+    fila_header = _localizar_fila_encabezado(df2, ["Fondo", "Fecha", "Fondo_Fecha"])
+    # Se eliminan las filas iniciales que no son de nuestro interes
+    df3 = df2.drop(df2.index[list(range(0, fila_header))])
+    # Se mantienen las columnas de las empresas de nuestro interes
+    df3 = df3.transpose()
+    df3 = df3.rename(columns={fila_header: "Isins"})
+    filtrada_sis = df3[df3["Isins"].isin(ListaEx)]
+    filtrada_sis = filtrada_sis.transpose()
+    filtrada_sis = filtrada_sis.reset_index().drop(["index"], axis=1)
+    filtrada_sis = filtrada_sis.dropna(how="all")
+    # Con fila_header localizado dinámicamente, la fila 0 (no la 2, como
+    # asumía la versión anterior) es ahora el encabezado real
+    # (Fondo/Fecha/Fondo_Fecha/ISINs). Verificado contra QEST_BD.xlsm real.
+    filtrada_sis.columns = filtrada_sis.iloc[0].to_list()
+    filtrada_sis = filtrada_sis.drop(0)
+    filtrada_sis = filtrada_sis.drop(["Fondo"], axis=1)
+
+    DQ_SIS_BD.columns = DQ_SIS_BD.iloc[0].to_list()
+    DQ_SIS_BD_H = DQ_SIS_BD.drop(0)
+    DQ_SIS_BD_H_F = DQ_SIS_BD_H[2::]
+
+    DQ_SIS_FECHAS = DQ_SIS_BD_H_F["Fecha"][::-1]
+    DQ_SIS_FECHAS = DQ_SIS_FECHAS.drop_duplicates()
+    DQ_SIS_UltimaFecha = DQ_SIS_FECHAS.iloc[0]
+
+    log.info("DQ SIS: última fecha en base = %s", DQ_SIS_UltimaFecha)
+
+    Qest_DQ_SIS_Fechas = filtrada_sis["Fecha"].values.tolist()
+    if DQ_SIS_UltimaFecha not in Qest_DQ_SIS_Fechas:
+        raise ValueError(
+            f"La última fecha de la base del Sistema ({DQ_SIS_UltimaFecha}) no "
+            f"existe en las fechas del QEST (DQ_RV). Actualiza QEST_BD.xlsm "
+            f"antes de correr. Rango disponible en QEST: "
+            f"{Qest_DQ_SIS_Fechas[0]} ... {Qest_DQ_SIS_Fechas[-1]}."
+        )
+    ubifechas_SIS = Qest_DQ_SIS_Fechas.index(DQ_SIS_UltimaFecha)
+
+    Nuevos_DQ_SIS = filtrada_sis[ubifechas_SIS::]
+    Nuevos_DQ_SIS = Nuevos_DQ_SIS.reset_index()
+    Nuevos_DQ_SIS = Nuevos_DQ_SIS.drop("index", axis=1)
+    Nuevos_DQ_SIS = Nuevos_DQ_SIS.dropna(how="all")
+
+    DQ_SIS_BD_Final = DQ_SIS_BD_H.iloc[:ubifechas_SIS]
+    LISTO_SIS = _concat_preservando_esquema(DQ_SIS_BD_Final, Nuevos_DQ_SIS)
+    return LISTO_SIS
+
+
+# %%
+try:
+    DQ_IN_BD = pl.read_excel(Monitor_Rentabilidad, sheet_name="DQ_IN").to_pandas()
+    df1 = pl.read_excel(Qest, sheet_name="DQ_IN", has_header=False).to_pandas()
+    DQ_SIS_BD = pl.read_excel(Monitor_Rentabilidad, sheet_name="DQ_SIS", has_header=False).to_pandas()
+    df2 = pl.read_excel(Qest, sheet_name="DQ_RV", has_header=False).to_pandas()
+except Exception:
+    log.exception(
+        "Fallo al leer DQ_IN/DQ_RV desde '%s' o DQ_IN/DQ_SIS desde '%s'. "
+        "Verifica rutas de red y que los archivos no estén abiertos/bloqueados.",
+        Qest, Monitor_Rentabilidad,
+    )
+    raise
+# %%
+try:
+    Base_Integra = DQ_IN(df1, DQ_IN_BD, ListaIN, ListaUsados)
+    Base_Sistema = DQ_SIS(df2, DQ_SIS_BD, ListaEx)
+    Base_Sistema = Base_Sistema.reset_index(drop=True)
+except Exception:
+    log.exception(
+        "Fallo al procesar DQ_IN/DQ_SIS. Si la estructura de origen cambió, "
+        "revisa el mensaje de _localizar_fila_encabezado más arriba."
+    )
+    raise
+# %%
+Fecha_Corte = pd.to_datetime(Base_Integra.iloc[::-1, 2].reset_index().iloc[0, 1])
+Fecha_Corte
+# %% md
+### Exportando al Excel
+# %%
+try:
+    wb1 = xw.Book(Monitor_Rentabilidad, update_links=False)
+except Exception:
+    log.exception(
+        "No se pudo abrir '%s' con xlwings. Verifica que la ruta de red esté "
+        "disponible, que Excel esté instalado y que el archivo no esté "
+        "bloqueado por otro usuario.", Monitor_Rentabilidad,
+    )
+    raise
+# %% md
+#### DQ_IN / DQ_SIS
+# %%
+try:
+    sheet1 = wb1.sheets["DQ_IN"]
+    sheet1["A2"].options(pd.DataFrame, header=None, index=False).value = Base_Integra
+
+    sheet2 = wb1.sheets["DQ_SIS"]
+    sheet2["A2"].options(pd.DataFrame, header=None, index=False).value = Base_Sistema
+except Exception:
+    log.exception("Fallo al escribir DQ_IN/DQ_SIS en el Excel (cambios NO guardados).")
+    raise
+
+
+# %% md
+### AUM
+# %%
+def calculo_Aum(df, fondos, afps):
+    fila_header = _localizar_fila_encabezado(df, ["Fecha"], max_filas_busqueda=15)
+    lista_df = []
+
+    # Calculo del AUM de cada fondo por AFP
+    for fondo in fondos:
+        for afp in afps:
+            df_temp = df.copy()
+            df_temp = df_temp[fila_header:]
+            df_temp = df_temp.transpose()
+            lista_aum = ['Fecha', f'{afp}-FONDO{fondo}']
+            df_ = df_temp[df_temp[fila_header].isin(lista_aum)]
+            df_ = df_.transpose()
+
+            df_.columns = df_.iloc[0].to_list()
+            df_ = df_.drop(fila_header, axis=0)
+
+            df_['Fecha'] = pd.to_datetime(df_['Fecha'], errors='coerce')
+            df_.set_index('Fecha', inplace=True)
+            df_ = df_.set_axis([f'{afp}_F{fondo}'], axis=1)
+            df_ = df_['2014-12-30':]
+            # DECISIÓN NEGOCIO: "ND"/NaN -> 0. Se mantiene igual que el
+            # original para no cambiar el resultado financiero; ver
+            # changelog y diagnóstico para la discusión de riesgo.
+            df_ = df_.replace("ND", 0).fillna(0).astype(np.float64)
+            lista_df.append(df_)
+
+    df_final = pd.concat(lista_df, axis=1)
+
+    # Calculo del Market Share de cada AFP
+    df_final['Total'] = df_final.sum(axis=1)
+
+    for afp in afps:
+        df_final[f'{afp}_MF'] = df_final.filter(like=f'{afp}_').sum(axis=1)
+        df_final[f'{afp}_Share'] = df_final[f'{afp}_MF'] / df_final['Total']
+
+    # Calculo de los AUM Ex-Sistema de cada afp
+    combinaciones = {
+        'EXIN': ['HA', 'PF', 'RI'],
+        'EXHA': ['IN', 'PF', 'RI'],
+        'EXPF': ['IN', 'HA', 'RI'],
+        'EXRI': ['IN', 'PF', 'HA']
+    }
+
+    for fondo in fondos:
+        for nuevo_col, cols in combinaciones.items():
+            df_final[f'{nuevo_col}_F{fondo}'] = df_final[[f'{col}_F{fondo}' for col in cols]].sum(axis=1)
+
+    # Calculo del AUM total de cada AFP
+    df_final['Aum_IN'] = df_final['IN_F1'] + df_final['IN_F2'] + df_final['IN_F3']
+    df_final['Aum_HA'] = df_final['HA_F1'] + df_final['HA_F2'] + df_final['HA_F3']
+    df_final['Aum_PF'] = df_final['PF_F1'] + df_final['PF_F2'] + df_final['PF_F3']
+    df_final['Aum_RI'] = df_final['RI_F1'] + df_final['RI_F2'] + df_final['RI_F3']
+
+    # Se elimina la columna "Total"
+    df_final.drop(columns=['Total'], inplace=True)
+
+    return df_final
+
+
+fondos = ['1', '2', '3']
+afps = ['IN', 'HA', 'PF', 'RI']
+try:
+    df_Aum = pl.read_excel(Aum, sheet_name="DataHistórica", has_header=False, engine="calamine",
+                           read_options={"use_columns": "B:V", "skip_rows": 0, "n_rows": 22000}).to_pandas()
+    df_AUM_Share = calculo_Aum(df_Aum, fondos, afps)
+except Exception:
+    log.exception("Fallo al leer/calcular AUM desde '%s' (hoja DataHistórica).", Aum)
+    raise
+# Se crea la variable "Ultimafechadisponible" para crear los pdfs
+ultfechadisp = df_AUM_Share.index[-1]
+ultfechadisp
+# %% md
+### TC
+# %%
+try:
+    df_BDTC = pl.read_excel(BDPrecios, sheet_name="BDTC", has_header=False, engine="calamine",
+                            read_options={"use_columns": "A:DB", "skip_rows": 0, "n_rows": 22000}).to_pandas()
+except Exception:
+    log.exception("Fallo al leer '%s' (hoja BDTC).", BDPrecios)
+    raise
+# %%
+# Nuevos tc
+lista_tc = ['Campo', 'Fecha', 'DOL', 'GBP', "CAD"]
+df_tc = df_BDTC.drop(df1.index[:5]).transpose().rename(columns={5: "Moneda"})
+filtrada_tc = df_tc[df_tc["Moneda"].isin(lista_tc)].transpose().reset_index(drop=True)
+filtrada_tc.columns = filtrada_tc.iloc[0]
+filtrada_tc = filtrada_tc.drop(0)
+TC = filtrada_tc[filtrada_tc['Campo'].str.contains("P")].drop(['Campo'], axis=1).reset_index(drop=True)
+TC['Fecha'] = TC['Fecha'].astype(str)
+TC['Fecha'] = pd.to_datetime(TC['Fecha'], format='mixed', dayfirst=True, errors='raise')
+TC_F = TC.copy()
+
+TC_F.set_index('Fecha', inplace=True)
+# DECISIÓN NEGOCIO: "ND"/NaN -> 0, igual que el original.
+TC_F = TC_F.replace("ND", 0).fillna(0).astype(np.float64)
+
+# %%
+df_AUM_Share = df_AUM_Share.div(TC_F['DOL'], axis=0).dropna(axis=0, how='all').copy()
+# %% md
+### Precios Vector
+# %%
+try:
+    df_BDat_Act = pl.read_excel(BDPrecios, sheet_name="BDat_Act", has_header=False, engine="calamine").to_pandas()
+except Exception:
+    log.exception("Fallo al leer '%s' (hoja BDat_Act).", BDPrecios)
+    raise
+# %%
+df_BDP = df_BDat_Act.drop(df1.index[:13]).transpose().rename(columns={13: "SBS"})
+Filtrado_BDP = df_BDP[df_BDP["SBS"].isin(lista_BDP)].transpose().reset_index(drop=True)
+Filtrado_BDP.columns = Filtrado_BDP.iloc[0]
+Filtrado_BDP = Filtrado_BDP.drop(0)
+Filtrado_BDP['Fecha'] = Filtrado_BDP['Fecha'].astype(str)
+Filtrado_BDP['Fecha'] = pd.to_datetime(Filtrado_BDP['Fecha'], format='mixed', dayfirst=True, errors='raise')
+
+# Filtrado_BDP['Fecha'] = pd.to_datetime(Filtrado_BDP['Fecha'], dayfirst=True)
+
+Precios_VP = Filtrado_BDP[Filtrado_BDP['Campo'].str.contains("P")].drop(['Campo'], axis=1).reset_index(drop=True)
+Precios_VP.set_index('Fecha', inplace=True)
+Precios_VP = Precios_VP.replace("ND", 0).fillna(0).astype(np.float64)
+
+Retornos_VP = Filtrado_BDP[
+    Filtrado_BDP['Campo'].str.contains("Ret", case=False) & ~Filtrado_BDP['Campo'].str.contains("Ret1",
+                                                                                                case=False)].drop(
+    ['Campo'], axis=1).reset_index(drop=True)
+Retornos_VP.set_index('Fecha', inplace=True)
+Retornos_VP = Retornos_VP.replace("ND", 0).fillna(0).astype(np.float64)
+# %% md
+# Convirtiendo los precios a PEN.
+# %%
+for Moneda, isins in Agrupados_Monedas.items():
+    if (Moneda == "NSOL") | (Moneda == "None"):
+        print("Soles")
+    else:
+        print(Moneda)
+        Precios_VP[isins] = Precios_VP[isins].mul(TC_F[Moneda], axis=0)
+# %% md
+### Precios Bloomberg
+# %%
+try:
+    Precios_rvl = pl.read_excel(Monitor_Rentabilidad, sheet_name="RVL", engine="calamine", has_header=False,
+                                read_options={"skip_rows": 0, "n_rows": 4600}).to_pandas()
+except Exception:
+    log.exception("Fallo al leer '%s' (hoja RVL).", Monitor_Rentabilidad)
+    raise
+Precios_rvl = Precios_rvl.copy()
+# %%
+Fechas_Diarias = Precios_rvl["column_2"][5:]
+Fechas_Diarias = pd.to_datetime(Fechas_Diarias, format='%Y-%m-%d %H:%M:%S')
+Fechas_Diarias.dropna(inplace=True)
+# %% md
+#### Con dividendos
+# %%
+Precios_Con_Dividendos = Precios_rvl.loc[:, Precios_rvl.iloc[2] == "TOT_RETURN_INDEX_GROSS_DVDS"]
+# %%
+# La fila loc[3] de RVL está vacía; los nombres reales (tickers) están en iloc[4].
+# Se toman de ahí y se traducen a SBS para que crucen con el resto del pipeline.
+_fila_tk = _fila_tickers_rvl(Precios_Con_Dividendos)
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Con_Dividendos.loc[_fila_tk].tolist())
+
+Precios_Con_Dividendos_R = Precios_Con_Dividendos[5:].copy()
+columnas = columnas[1:]
+Precios_Con_Dividendos_R = Precios_Con_Dividendos_R.iloc[::, 1:]
+Precios_Con_Dividendos_R.columns = columnas
+
+Precios_Con_Dividendos_R.insert(0, "Fecha", Fechas_Diarias)
+Precios_Con_Dividendos_R.set_index("Fecha", inplace=True)
+Precios_Con_Dividendos_R.replace("#N/A N/A", np.nan, inplace=True)
+Precios_Con_Dividendos_R.replace("NM", np.nan, inplace=True)
+Precios_Con_Dividendos_R.replace("(Invalid Formula Name)", np.nan, inplace=True)
+Precios_Con_Dividendos_R.replace("NA", np.nan, inplace=True)
+Precios_Con_Dividendos_R.bfill(inplace=True)
+Precios_Con_Dividendos_R = Precios_Con_Dividendos_R.fillna(0)
+# Conversión a numérico POR POSICIÓN (no por nombre): si dos columnas de
+# precios tienen el mismo nombre (p.ej. tickers que no se pudieron mapear a
+# SBS y colisionan, o etiquetas de campo tipo 'Px_last'), df[nombre] devolvería
+# un DataFrame y pd.to_numeric fallaría con "arg must be a 1-d array". Iterando
+# por posición con .iloc cada columna es siempre una Serie 1-D.
+# Conversión a numérico reconstruyendo TODO el DataFrame de una vez (no
+# in-place). Iterar por posición y reasignar con .iloc fallaba en pandas 3
+# cuando hay columnas con NOMBRE DUPLICADO (p.ej. dos tickers que mapean al
+# mismo SBS) o columnas con dtype 'str': la reasignación choca con el dtype.
+# Reconstruir el frame preserva los nombres (incluso duplicados) y fuerza
+# float64 en todo, sin conflictos de dtype.
+_num = {j: pd.to_numeric(Precios_Con_Dividendos_R.iloc[:, j], errors='coerce').fillna(0).astype('float64')
+        for j in range(Precios_Con_Dividendos_R.shape[1])}
+_cols = Precios_Con_Dividendos_R.columns
+_idx = Precios_Con_Dividendos_R.index
+Precios_Con_Dividendos_R = pd.DataFrame(_num)
+Precios_Con_Dividendos_R.index = _idx
+Precios_Con_Dividendos_R.columns = _cols
+Precios_Con_Dividendos_R = Precios_Con_Dividendos_R.loc[:Fecha_Corte].copy()
+# %% md
+#### Sin Dividendos
+# %%
+Precios_Sin_Dividendos = Precios_rvl.loc[:, Precios_rvl.iloc[2] == "Px_last"]
+# %%
+# Ídem bloque anterior: nombres reales en iloc[4], traducidos a SBS.
+_fila_tk = _fila_tickers_rvl(Precios_Sin_Dividendos)
+columnas = _renombrar_columnas_precios_a_sbs(Precios_Sin_Dividendos.loc[_fila_tk].tolist())
+Precios_Sin_Dividendos_R = Precios_Sin_Dividendos[5:].copy()
+columnas = columnas[1:]
+Precios_Sin_Dividendos_R = Precios_Sin_Dividendos_R.iloc[::, 1:]
+Precios_Sin_Dividendos_R.columns = columnas
+
+Precios_Sin_Dividendos_R.insert(0, "Fecha", Fechas_Diarias)
+Precios_Sin_Dividendos_R.set_index("Fecha", inplace=True)
+Precios_Sin_Dividendos_R.replace("#N/A N/A", np.nan, inplace=True)
+Precios_Sin_Dividendos_R.replace("NM", np.nan, inplace=True)
+Precios_Sin_Dividendos_R.replace("(Invalid Formula Name)", np.nan, inplace=True)
+Precios_Sin_Dividendos_R.replace("NA", np.nan, inplace=True)
+Precios_Sin_Dividendos_R.bfill(inplace=True)
+Precios_Sin_Dividendos_R = Precios_Sin_Dividendos_R.fillna(0)
+# Conversión a numérico POR POSICIÓN (ver nota en el bloque Con Dividendos).
+# Ídem bloque Con Dividendos: reconstrucción completa para evitar el conflicto
+# de dtype al reasignar columnas con nombre duplicado en pandas 3.
+_num = {j: pd.to_numeric(Precios_Sin_Dividendos_R.iloc[:, j], errors='coerce').fillna(0).astype('float64')
+        for j in range(Precios_Sin_Dividendos_R.shape[1])}
+_cols = Precios_Sin_Dividendos_R.columns
+_idx = Precios_Sin_Dividendos_R.index
+Precios_Sin_Dividendos_R = pd.DataFrame(_num)
+Precios_Sin_Dividendos_R.index = _idx
+Precios_Sin_Dividendos_R.columns = _cols
+# %% md
+#### Solo dividendos
+# %%
+Dividendos = Precios_Con_Dividendos_R - Precios_Sin_Dividendos_R
+# %% md
+#### Solo EPU
+# %%
+EPU_Var = Retornos_VP["5460042E8427"]
+EPU_Var.dropna(inplace=True)
+# EPU_Var=EPU.pct_change().copy()
+# %%
+EPU_Var_Acum = ((1 + EPU_Var).cumprod() * 100)
+# %% md
+#### Solo ETFPERU
+# %%
+ETFPERU = Retornos_VP["5076822E0800"]
+ETFPERU.dropna(inplace=True)
+# ETFPERU=ETFPERU.pct_change().copy()
+# %%
+ETFPERU_Var_Acum = ((1 + ETFPERU).cumprod() * 100)
+# %% md
+### Qs por AFPs
+# %% md
+#### Integra
+# %%
+# Fondo 1
+DQ_IN_F1 = Base_Integra[Base_Integra["Fondo"].str.contains("IN-FONDO1")]
+DQ_IN_F1 = DQ_IN_F1.drop(["Dato", "SBS"], axis=1)
+DQ_IN_F1_O = _reindex_columnas_seguro(DQ_IN_F1, ['Fecha'] + Lista_Isins).copy()
+DQ_IN_F1_O = DQ_IN_F1_O.fillna(0).copy()
+DQ_IN_F1_O['Fecha'] = pd.to_datetime(DQ_IN_F1_O['Fecha'])
+DQ_IN_F1_O.set_index("Fecha", inplace=True)
+DQ_IN_F1_O = DQ_IN_F1_O.astype(np.float64)
+# Fondo 2
+DQ_IN_F2 = Base_Integra[Base_Integra["Fondo"].str.contains("IN-FONDO2")]
+DQ_IN_F2 = DQ_IN_F2.drop(["Dato", "SBS"], axis=1)
+DQ_IN_F2_O = _reindex_columnas_seguro(DQ_IN_F2, ['Fecha'] + Lista_Isins).copy()
+DQ_IN_F2_O = DQ_IN_F2_O.fillna(0).copy()
+DQ_IN_F2_O['Fecha'] = pd.to_datetime(DQ_IN_F2_O['Fecha'])
+DQ_IN_F2_O.set_index("Fecha", inplace=True)
+DQ_IN_F2_O = DQ_IN_F2_O.astype(np.float64)
+
+# Fondo 3
+DQ_IN_F3 = Base_Integra[Base_Integra["Fondo"].str.contains("IN-FONDO3")]
+DQ_IN_F3 = DQ_IN_F3.drop(["Dato", "SBS"], axis=1)
+DQ_IN_F3_O = _reindex_columnas_seguro(DQ_IN_F3, ['Fecha'] + Lista_Isins).copy()
+DQ_IN_F3_O = DQ_IN_F3_O.fillna(0).copy()
+DQ_IN_F3_O['Fecha'] = pd.to_datetime(DQ_IN_F3_O['Fecha'])
+DQ_IN_F3_O.set_index("Fecha", inplace=True)
+DQ_IN_F3_O = DQ_IN_F3_O.astype(np.float64)
+
+# Multifondos
+DQ_IN_M_O = DQ_IN_F1_O + DQ_IN_F2_O + DQ_IN_F3_O
+# %% md
+#### Sistema
+# %%
+Base_Sistema_ = Base_Sistema.copy()
+Base_Sistema_[["AFP-Fondo", "Fecha_Dia"]] = Base_Sistema_["Fondo_Fecha"].str.split('[_]', expand=True)
+Base_Sistema_.drop(columns=["Fecha", "Fondo_Fecha"], inplace=True)
+Base_Sistema_["Fecha_Dia"] = pd.to_datetime(Base_Sistema_["Fecha_Dia"], dayfirst=True)
+Base_Sistema_.set_index("Fecha_Dia", inplace=True)
+Base_Sistema_F = Base_Sistema_[2:]
+Base_Sistema_F = Base_Sistema_F.fillna(0).copy()
+# %%
+# Fondo 1
+DQ_HA_F1 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("HA-FONDO1")]
+DQ_HA_F1 = DQ_HA_F1.drop(["AFP-Fondo"], axis=1)
+DQ_HA_F1_O = _reindex_columnas_seguro(DQ_HA_F1, Lista_Isins).copy()
+DQ_HA_F1_O = DQ_HA_F1_O.fillna(0).copy()
+DQ_HA_F1_O = DQ_HA_F1_O.fillna(0).copy()
+# %%
+# ###Matcheo#########
+# Matching= DQ_IN_M_O.index.intersection(DQ_HA_F1_O.index)
+# ###################
+# DQ_HA_F1_O = DQ_HA_F1_O.loc[Matching].copy()
+# %%
+
+
+DQ_PF_F1 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("PF-FONDO1")]
+DQ_PF_F1 = DQ_PF_F1.drop(["AFP-Fondo"], axis=1)
+DQ_PF_F1_O = _reindex_columnas_seguro(DQ_PF_F1, Lista_Isins).copy()
+DQ_PF_F1_O = DQ_PF_F1_O.fillna(0).copy()
+# DQ_PF_F1_O = DQ_PF_F1_O.loc[Matching].copy()
+
+DQ_RI_F1 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("RI-FONDO1")]
+DQ_RI_F1 = DQ_RI_F1.drop(["AFP-Fondo"], axis=1)
+DQ_RI_F1_O = _reindex_columnas_seguro(DQ_RI_F1, Lista_Isins).copy()
+DQ_RI_F1_O = DQ_RI_F1_O.fillna(0).copy()
+# DQ_RI_F1_O = DQ_RI_F1_O.loc[Matching].copy()
+# %%
+# Fondo 2
+DQ_HA_F2 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("HA-FONDO2")]
+DQ_HA_F2 = DQ_HA_F2.drop(["AFP-Fondo"], axis=1)
+DQ_HA_F2_O = _reindex_columnas_seguro(DQ_HA_F2, Lista_Isins).copy()
+DQ_HA_F2_O = DQ_HA_F2_O.fillna(0).copy()
+# DQ_HA_F2_O = DQ_HA_F2_O.loc[Matching].copy()
+
+DQ_PF_F2 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("PF-FONDO2")]
+DQ_PF_F2 = DQ_PF_F2.drop(["AFP-Fondo"], axis=1)
+DQ_PF_F2_O = _reindex_columnas_seguro(DQ_PF_F2, Lista_Isins).copy()
+DQ_PF_F2_O = DQ_PF_F2_O.fillna(0).copy()
+# DQ_PF_F2_O = DQ_PF_F2_O.loc[Matching].copy()
+
+DQ_RI_F2 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("RI-FONDO2")]
+DQ_RI_F2 = DQ_RI_F2.drop(["AFP-Fondo"], axis=1)
+DQ_RI_F2_O = _reindex_columnas_seguro(DQ_RI_F2, Lista_Isins).copy()
+DQ_RI_F2_O = DQ_RI_F2_O.fillna(0).copy()
+# DQ_RI_F2_O = DQ_RI_F2_O.loc[Matching].copy()
+
+
+# Fondo 3
+DQ_HA_F3 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("HA-FONDO3")]
+DQ_HA_F3 = DQ_HA_F3.drop(["AFP-Fondo"], axis=1)
+DQ_HA_F3_O = _reindex_columnas_seguro(DQ_HA_F3, Lista_Isins).copy()
+DQ_HA_F3_O = DQ_HA_F3_O.fillna(0).copy()
+# DQ_HA_F3_O = DQ_HA_F3_O.loc[Matching].copy()
+
+DQ_PF_F3 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("PF-FONDO3")]
+DQ_PF_F3 = DQ_PF_F3.drop(["AFP-Fondo"], axis=1)
+DQ_PF_F3_O = _reindex_columnas_seguro(DQ_PF_F3, Lista_Isins).copy()
+DQ_PF_F3_O = DQ_PF_F3_O.fillna(0).copy()
+# DQ_PF_F3_O = DQ_PF_F3_O.loc[Matching].copy()
+
+DQ_RI_F3 = Base_Sistema_F[Base_Sistema_F["AFP-Fondo"].str.contains("RI-FONDO3")]
+DQ_RI_F3 = DQ_RI_F3.drop(["AFP-Fondo"], axis=1)
+DQ_RI_F3_O = _reindex_columnas_seguro(DQ_RI_F3, Lista_Isins).copy()
+DQ_RI_F3_O = DQ_RI_F3_O.fillna(0).copy()
+# DQ_RI_F3_O = DQ_RI_F3_O.loc[Matching].copy()
+# %%
+Lista_DF = [DQ_HA_F1_O, DQ_HA_F2_O, DQ_HA_F3_O, DQ_PF_F1_O, DQ_PF_F2_O, DQ_PF_F3_O, DQ_RI_F1_O, DQ_RI_F2_O, DQ_RI_F3_O]
+
+for i, df in enumerate(Lista_DF):
+    for column in df.select_dtypes(include=['object','string']).columns:
+        df[column] = pd.to_numeric(df[column], errors='coerce').fillna(0).astype('float64')
+# %%
+# Multifondos
+DQ_HA_M_O = DQ_HA_F1_O + DQ_HA_F2_O + DQ_HA_F3_O
+DQ_PF_M_O = DQ_PF_F1_O + DQ_PF_F2_O + DQ_PF_F3_O
+DQ_RI_M_O = DQ_RI_F1_O + DQ_RI_F2_O + DQ_RI_F3_O
+# %%
+# Ex Sistema
+DQ_EXSIS_F1_O = DQ_HA_F1_O + DQ_PF_F1_O + DQ_RI_F1_O
+DQ_EXSIS_F2_O = DQ_HA_F2_O + DQ_PF_F2_O + DQ_RI_F2_O
+DQ_EXSIS_F3_O = DQ_HA_F3_O + DQ_PF_F3_O + DQ_RI_F3_O
+# %%
+Lista_DF2 = [DQ_HA_F1_O, DQ_HA_F2_O, DQ_HA_F3_O, DQ_PF_F1_O, DQ_PF_F2_O, DQ_PF_F3_O, DQ_RI_F1_O, DQ_RI_F2_O, DQ_RI_F3_O,
+             DQ_HA_M_O, DQ_PF_M_O, DQ_RI_M_O, DQ_EXSIS_F1_O, DQ_EXSIS_F2_O, DQ_EXSIS_F3_O]
+# %% md
+### PxQ
+# %%
+PxQ_IN_F1 = Precios_VP.mul(DQ_IN_F1_O, axis=0)
+PxQ_IN_F1_O = PxQ_IN_F1.dropna(axis=0, how="all").copy()
+
+PxQ_IN_F2 = Precios_VP.mul(DQ_IN_F2_O, axis=0)
+PxQ_IN_F2_O = PxQ_IN_F2.dropna(axis=0, how="all").copy()
+
+PxQ_IN_F3 = Precios_VP.mul(DQ_IN_F3_O, axis=0)
+PxQ_IN_F3_O = PxQ_IN_F3.dropna(axis=0, how="all").copy()
+
+PxQ_IN_M = Precios_VP.mul(DQ_IN_M_O, axis=0)
+PxQ_IN_M_O = PxQ_IN_M.dropna(axis=0, how="all").copy()
+# %%
+# Habitat
+PxQ_HA_F1 = Precios_VP.mul(DQ_HA_F1_O, axis=0)
+PxQ_HA_F1_O = PxQ_HA_F1.dropna(axis=0, how="all").copy()
+PxQ_HA_F1_O = PxQ_HA_F1_O[~PxQ_HA_F1_O.index.duplicated(keep="first")]
+
+PxQ_HA_F2 = Precios_VP.mul(DQ_HA_F2_O, axis=0)
+PxQ_HA_F2_O = PxQ_HA_F2.dropna(axis=0, how="all").copy()
+PxQ_HA_F2_O = PxQ_HA_F2_O[~PxQ_HA_F2_O.index.duplicated(keep="first")]
+
+PxQ_HA_F3 = Precios_VP.mul(DQ_HA_F3_O, axis=0)
+PxQ_HA_F3_O = PxQ_HA_F3.dropna(axis=0, how="all").copy()
+PxQ_HA_F3_O = PxQ_HA_F3_O[~PxQ_HA_F3_O.index.duplicated(keep="first")]
+
+PxQ_HA_M = Precios_VP.mul(DQ_HA_M_O, axis=0)
+PxQ_HA_M_O = PxQ_HA_M.dropna(axis=0, how="all").copy()
+PxQ_HA_M_O = PxQ_HA_M_O[~PxQ_HA_M_O.index.duplicated(keep="first")]
+
+# Profuturo
+PxQ_PF_F1 = Precios_VP.mul(DQ_PF_F1_O, axis=0)
+PxQ_PF_F1_O = PxQ_PF_F1.dropna(axis=0, how="all").copy()
+PxQ_PF_F1_O = PxQ_PF_F1_O[~PxQ_PF_F1_O.index.duplicated(keep="first")]
+
+PxQ_PF_F2 = Precios_VP.mul(DQ_PF_F2_O, axis=0)
+PxQ_PF_F2_O = PxQ_PF_F2.dropna(axis=0, how="all").copy()
+PxQ_PF_F2_O = PxQ_PF_F2_O[~PxQ_PF_F2_O.index.duplicated(keep="first")]
+
+PxQ_PF_F3 = Precios_VP.mul(DQ_PF_F3_O, axis=0)
+PxQ_PF_F3_O = PxQ_PF_F3.dropna(axis=0, how="all").copy()
+PxQ_PF_F3_O = PxQ_PF_F3_O[~PxQ_PF_F3_O.index.duplicated(keep="first")]
+
+PxQ_PF_M = Precios_VP.mul(DQ_PF_M_O, axis=0)
+PxQ_PF_M_O = PxQ_PF_M.dropna(axis=0, how="all").copy()
+PxQ_PF_M_O = PxQ_PF_M_O[~PxQ_PF_M_O.index.duplicated(keep="first")]
+
+# Prima
+PxQ_RI_F1 = Precios_VP.mul(DQ_RI_F1_O, axis=0)
+PxQ_RI_F1_O = PxQ_RI_F1.dropna(axis=0, how="all").copy()
+PxQ_RI_F1_O = PxQ_RI_F1_O[~PxQ_RI_F1_O.index.duplicated(keep="first")]
+
+PxQ_RI_F2 = Precios_VP.mul(DQ_RI_F2_O, axis=0)
+PxQ_RI_F2_O = PxQ_RI_F2.dropna(axis=0, how="all").copy()
+PxQ_RI_F2_O = PxQ_RI_F2_O[~PxQ_RI_F2_O.index.duplicated(keep="first")]
+
+PxQ_RI_F3 = Precios_VP.mul(DQ_RI_F3_O, axis=0)
+PxQ_RI_F3_O = PxQ_RI_F3.dropna(axis=0, how="all").copy()
+PxQ_RI_F3_O = PxQ_RI_F3_O[~PxQ_RI_F3_O.index.duplicated(keep="first")]
+
+PxQ_RI_M = Precios_VP.mul(DQ_RI_M_O, axis=0)
+PxQ_RI_M_O = PxQ_RI_M.dropna(axis=0, how="all").copy()
+PxQ_RI_M_O = PxQ_RI_M_O[~PxQ_RI_M_O.index.duplicated(keep="first")]
+# %%
+# Ex Sis
+PxQ_EXSIS_F1 = Precios_VP.mul(DQ_EXSIS_F1_O, axis=0)
+PxQ_EXSIS_F1_O = PxQ_EXSIS_F1.dropna(axis=0, how="all").copy()
+PxQ_EXSIS_F1_O = PxQ_EXSIS_F1_O[~PxQ_EXSIS_F1_O.index.duplicated(keep="first")]
+
+PxQ_EXSIS_F2 = Precios_VP.mul(DQ_EXSIS_F2_O, axis=0)
+PxQ_EXSIS_F2_O = PxQ_EXSIS_F2.dropna(axis=0, how="all").copy()
+PxQ_EXSIS_F2_O = PxQ_EXSIS_F2_O[~PxQ_EXSIS_F2_O.index.duplicated(keep="first")]
+
+PxQ_EXSIS_F3 = Precios_VP.mul(DQ_EXSIS_F3_O, axis=0)
+PxQ_EXSIS_F3_O = PxQ_EXSIS_F3.dropna(axis=0, how="all").copy()
+PxQ_EXSIS_F3_O = PxQ_EXSIS_F3_O[~PxQ_EXSIS_F3_O.index.duplicated(keep="first")]
+# %% md
+### Weights
+# %%
+MATCHING = PxQ_IN_F1_O.index.intersection(df_AUM_Share.index)
+# %%
+# CARTERA ILÍQUIDA
+IL = [col for col in PxQ_IN_F1_O.columns if col not in L]
+# %%
+# weight_IN_F1 = PxQ_IN_F1_O.loc[MATCHING].div(df_AUM_Share['IN_F1'].loc[MATCHING],axis=0)
+# weight_IN_F2 = PxQ_IN_F2_O.loc[MATCHING].div(df_AUM_Share['IN_F2'].loc[MATCHING],axis=0)
+# weight_IN_F3 = PxQ_IN_F3_O.loc[MATCHING].div(df_AUM_Share['IN_F3'].loc[MATCHING],axis=0)
+# weight_IN_M = PxQ_IN_M_O.loc[MATCHING].div(df_AUM_Share['IN_MF'].loc[MATCHING],axis=0)
+
+# weight_HA_F1 = PxQ_HA_F1_O.loc[MATCHING].div(df_AUM_Share['HA_F1'].loc[MATCHING],axis=0)
+# weight_HA_F2 = PxQ_HA_F2_O.loc[MATCHING].div(df_AUM_Share['HA_F2'].loc[MATCHING],axis=0)
+# weight_HA_F3 = PxQ_HA_F3_O.loc[MATCHING].div(df_AUM_Share['HA_F3'].loc[MATCHING],axis=0)
+# weight_HA_M = PxQ_HA_M_O.loc[MATCHING].div(df_AUM_Share['HA_MF'].loc[MATCHING],axis=0)
+
+# weight_RI_F1 = PxQ_RI_F1_O.loc[MATCHING].div(df_AUM_Share['RI_F1'].loc[MATCHING],axis=0)
+# weight_RI_F2 = PxQ_RI_F2_O.loc[MATCHING].div(df_AUM_Share['RI_F2'].loc[MATCHING],axis=0)
+# weight_RI_F3 = PxQ_RI_F3_O.loc[MATCHING].div(df_AUM_Share['RI_F3'].loc[MATCHING],axis=0)
+# weight_RI_M = PxQ_RI_M_O.loc[MATCHING].div(df_AUM_Share['RI_MF'].loc[MATCHING],axis=0)
+
+# weight_PF_F1 = PxQ_PF_F1_O.loc[MATCHING].div(df_AUM_Share['PF_F1'].loc[MATCHING],axis=0)
+# weight_PF_F2 = PxQ_PF_F2_O.loc[MATCHING].div(df_AUM_Share['PF_F2'].loc[MATCHING],axis=0)
+# weight_PF_F3 = PxQ_PF_F3_O.loc[MATCHING].div(df_AUM_Share['PF_F3'].loc[MATCHING],axis=0)
+# weight_PF_M = PxQ_PF_M_O.loc[MATCHING].div(df_AUM_Share['PF_MF'].loc[MATCHING],axis=0)
+# %%
+weight_IN_F1 = PxQ_IN_F1_O.div(PxQ_IN_F1_O.sum(axis=1), axis=0)
+weight_IN_F2 = PxQ_IN_F2_O.div(PxQ_IN_F2_O.sum(axis=1), axis=0)
+weight_IN_F3 = PxQ_IN_F3_O.div(PxQ_IN_F3_O.sum(axis=1), axis=0)
+weight_IN_M = PxQ_IN_M_O.div(PxQ_IN_M_O.sum(axis=1), axis=0)
+# %%
+# PESOS CARTERA LÍQUIDA
+weight_IN_F1_L = PxQ_IN_F1_O[L].div(PxQ_IN_F1_O[L].sum(axis=1), axis=0)
+weight_IN_F2_L = PxQ_IN_F2_O[L].div(PxQ_IN_F2_O[L].sum(axis=1), axis=0)
+weight_IN_F3_L = PxQ_IN_F3_O[L].div(PxQ_IN_F3_O[L].sum(axis=1), axis=0)
+weight_IN_M_L = PxQ_IN_M_O[L].div(PxQ_IN_M_O[L].sum(axis=1), axis=0)
+
+# PESOS CARTERA ILÍQUIDA
+weight_IN_F1_IL = PxQ_IN_F1_O[IL].div(PxQ_IN_F1_O[IL].sum(axis=1), axis=0)
+weight_IN_F2_IL = PxQ_IN_F2_O[IL].div(PxQ_IN_F2_O[IL].sum(axis=1), axis=0)
+weight_IN_F3_IL = PxQ_IN_F3_O[IL].div(PxQ_IN_F3_O[IL].sum(axis=1), axis=0)
+weight_IN_M_IL = PxQ_IN_M_O[IL].div(PxQ_IN_M_O[IL].sum(axis=1), axis=0)
+# %%
+## Habitat
+weight_HA_F1 = PxQ_HA_F1_O.div(PxQ_HA_F1_O.sum(axis=1), axis=0)
+weight_HA_F2 = PxQ_HA_F2_O.div(PxQ_HA_F2_O.sum(axis=1), axis=0)
+weight_HA_F3 = PxQ_HA_F3_O.div(PxQ_HA_F3_O.sum(axis=1), axis=0)
+weight_HA_M = PxQ_HA_M_O.div(PxQ_HA_M_O.sum(axis=1), axis=0)
+
+## Profuturo
+weight_PF_F1 = PxQ_PF_F1_O.div(PxQ_PF_F1_O.sum(axis=1), axis=0)
+weight_PF_F2 = PxQ_PF_F2_O.div(PxQ_PF_F2_O.sum(axis=1), axis=0)
+weight_PF_F3 = PxQ_PF_F3_O.div(PxQ_PF_F3_O.sum(axis=1), axis=0)
+weight_PF_M = PxQ_PF_M_O.div(PxQ_PF_M_O.sum(axis=1), axis=0)
+
+## Prima
+weight_RI_F1 = PxQ_RI_F1_O.div(PxQ_RI_F1_O.sum(axis=1), axis=0)
+weight_RI_F2 = PxQ_RI_F2_O.div(PxQ_RI_F2_O.sum(axis=1), axis=0)
+weight_RI_F3 = PxQ_RI_F3_O.div(PxQ_RI_F3_O.sum(axis=1), axis=0)
+weight_RI_M = PxQ_RI_M_O.div(PxQ_RI_M_O.sum(axis=1), axis=0)
+
+## Ex Sis
+weight_EXSIS_F1 = PxQ_EXSIS_F1_O.div(PxQ_EXSIS_F1_O.sum(axis=1), axis=0)
+weight_EXSIS_F2 = PxQ_EXSIS_F2_O.div(PxQ_EXSIS_F2_O.sum(axis=1), axis=0)
+weight_EXSIS_F3 = PxQ_EXSIS_F3_O.div(PxQ_EXSIS_F3_O.sum(axis=1), axis=0)
+
+# %%
+# PESOS CARTERA LÍQUIDA
+## Habitat
+weight_HA_F1_L = PxQ_HA_F1_O[L].div(PxQ_HA_F1_O[L].sum(axis=1), axis=0)
+weight_HA_F2_L = PxQ_HA_F2_O[L].div(PxQ_HA_F2_O[L].sum(axis=1), axis=0)
+weight_HA_F3_L = PxQ_HA_F3_O[L].div(PxQ_HA_F3_O[L].sum(axis=1), axis=0)
+weight_HA_M_L = PxQ_HA_M_O[L].div(PxQ_HA_M_O[L].sum(axis=1), axis=0)
+
+## Profuturo
+weight_PF_F1_L = PxQ_PF_F1_O[L].div(PxQ_PF_F1_O[L].sum(axis=1), axis=0)
+weight_PF_F2_L = PxQ_PF_F2_O[L].div(PxQ_PF_F2_O[L].sum(axis=1), axis=0)
+weight_PF_F3_L = PxQ_PF_F3_O[L].div(PxQ_PF_F3_O[L].sum(axis=1), axis=0)
+weight_PF_M_L = PxQ_PF_M_O[L].div(PxQ_PF_M_O[L].sum(axis=1), axis=0)
+
+## Prima
+weight_RI_F1_L = PxQ_RI_F1_O[L].div(PxQ_RI_F1_O[L].sum(axis=1), axis=0)
+weight_RI_F2_L = PxQ_RI_F2_O[L].div(PxQ_RI_F2_O[L].sum(axis=1), axis=0)
+weight_RI_F3_L = PxQ_RI_F3_O[L].div(PxQ_RI_F3_O[L].sum(axis=1), axis=0)
+weight_RI_M_L = PxQ_RI_M_O[L].div(PxQ_RI_M_O[L].sum(axis=1), axis=0)
+
+## Ex Sis
+weight_EXSIS_F1_L = PxQ_EXSIS_F1_O[L].div(PxQ_EXSIS_F1_O[L].sum(axis=1), axis=0)
+weight_EXSIS_F2_L = PxQ_EXSIS_F2_O[L].div(PxQ_EXSIS_F2_O[L].sum(axis=1), axis=0)
+weight_EXSIS_F3_L = PxQ_EXSIS_F3_O[L].div(PxQ_EXSIS_F3_O[L].sum(axis=1), axis=0)
+
+# PESOS CARTERA ILÍQUIDA
+## Habitat
+weight_HA_F1_IL = PxQ_HA_F1_O[IL].div(PxQ_HA_F1_O[IL].sum(axis=1), axis=0)
+weight_HA_F2_IL = PxQ_HA_F2_O[IL].div(PxQ_HA_F2_O[IL].sum(axis=1), axis=0)
+weight_HA_F3_IL = PxQ_HA_F3_O[IL].div(PxQ_HA_F3_O[IL].sum(axis=1), axis=0)
+weight_HA_M_IL = PxQ_HA_M_O[IL].div(PxQ_HA_M_O[IL].sum(axis=1), axis=0)
+
+## Profuturo
+weight_PF_F1_IL = PxQ_PF_F1_O[IL].div(PxQ_PF_F1_O[IL].sum(axis=1), axis=0)
+weight_PF_F2_IL = PxQ_PF_F2_O[IL].div(PxQ_PF_F2_O[IL].sum(axis=1), axis=0)
+weight_PF_F3_IL = PxQ_PF_F3_O[IL].div(PxQ_PF_F3_O[IL].sum(axis=1), axis=0)
+weight_PF_M_IL = PxQ_PF_M_O[IL].div(PxQ_PF_M_O[IL].sum(axis=1), axis=0)
+
+## Prima
+weight_RI_F1_IL = PxQ_RI_F1_O[IL].div(PxQ_RI_F1_O[IL].sum(axis=1), axis=0)
+weight_RI_F2_IL = PxQ_RI_F2_O[IL].div(PxQ_RI_F2_O[IL].sum(axis=1), axis=0)
+weight_RI_F3_IL = PxQ_RI_F3_O[IL].div(PxQ_RI_F3_O[IL].sum(axis=1), axis=0)
+weight_RI_M_IL = PxQ_RI_M_O[IL].div(PxQ_RI_M_O[IL].sum(axis=1), axis=0)
+
+## Ex Sis
+weight_EXSIS_F1_IL = PxQ_EXSIS_F1_O[IL].div(PxQ_EXSIS_F1_O[IL].sum(axis=1), axis=0)
+weight_EXSIS_F2_IL = PxQ_EXSIS_F2_O[IL].div(PxQ_EXSIS_F2_O[IL].sum(axis=1), axis=0)
+weight_EXSIS_F3_IL = PxQ_EXSIS_F3_O[IL].div(PxQ_EXSIS_F3_O[IL].sum(axis=1), axis=0)
+# %%
+F1s = {"IN": weight_IN_F1, "HA": weight_HA_F1, "PF": weight_PF_F1, "RI": weight_RI_F1, "EXSIS": weight_EXSIS_F1}
+F2s = {"IN": weight_IN_F2, "HA": weight_HA_F2, "PF": weight_PF_F2, "RI": weight_RI_F2, "EXSIS": weight_EXSIS_F2}
+F3s = {"IN": weight_IN_F3, "HA": weight_HA_F3, "PF": weight_PF_F3, "RI": weight_RI_F3, "EXSIS": weight_EXSIS_F3}
+Ms = {"IN": weight_IN_M, "HA": weight_HA_M, "PF": weight_PF_M, "RI": weight_RI_M}
+# %%
+F1s_L = {"IN_L": weight_IN_F1_L, "HA_L": weight_HA_F1_L, "PF_L": weight_PF_F1_L, "RI_L": weight_RI_F1_L,
+         "EXSIS_L": weight_EXSIS_F1_L}
+F2s_L = {"IN_L": weight_IN_F2_L, "HA_L": weight_HA_F2_L, "PF_L": weight_PF_F2_L, "RI_L": weight_RI_F2_L,
+         "EXSIS_L": weight_EXSIS_F2_L}
+F3s_L = {"IN_L": weight_IN_F3_L, "HA_L": weight_HA_F3_L, "PF_L": weight_PF_F3_L, "RI_L": weight_RI_F3_L,
+         "EXSIS_L": weight_EXSIS_F3_L}
+Ms_L = {"IN_L": weight_IN_M_L, "HA_L": weight_HA_M_L, "PF_L": weight_PF_M_L, "RI_L": weight_RI_M_L}
+# %%
+F1s_IL = {"IN_IL": weight_IN_F1_IL, "HA_IL": weight_HA_F1_IL, "PF_IL": weight_PF_F1_IL, "RI_IL": weight_RI_F1_IL,
+          "EXSIS_IL": weight_EXSIS_F1_IL}
+F2s_IL = {"IN_IL": weight_IN_F2_IL, "HA_IL": weight_HA_F2_IL, "PF_IL": weight_PF_F2_IL, "RI_IL": weight_RI_F2_IL,
+          "EXSIS_IL": weight_EXSIS_F2_IL}
+F3s_IL = {"IN_IL": weight_IN_F3_IL, "HA_IL": weight_HA_F3_IL, "PF_IL": weight_PF_F3_IL, "RI_IL": weight_RI_F3_IL,
+          "EXSIS_IL": weight_EXSIS_F3_IL}
+Ms_IL = {"IN_IL": weight_IN_M_IL, "HA_IL": weight_HA_M_IL, "PF_IL": weight_PF_M_IL, "RI_IL": weight_RI_M_IL}
+# %% md
+#### Rezagando Weights
+# %%
+for afp, weights in F1s.items():
+    F1s[afp].index = F1s[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F1s[afp] = F1s[afp].iloc[:-1].copy()
+
+for afp, weights in F2s.items():
+    F2s[afp].index = F2s[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F2s[afp] = F2s[afp].iloc[:-1].copy()
+
+for afp, weights in F3s.items():
+    F3s[afp].index = F3s[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F3s[afp] = F3s[afp].iloc[:-1].copy()
+
+for afp, weights in Ms.items():
+    Ms[afp].index = Ms[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    Ms[afp] = Ms[afp].iloc[:-1].copy()
+# %%
+# CARTERA LÍQUIDA
+for afp, weights in F1s_L.items():
+    F1s_L[afp].index = F1s_L[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F1s_L[afp] = F1s_L[afp].iloc[:-1].copy()
+
+for afp, weights in F2s_L.items():
+    F2s_L[afp].index = F2s_L[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F2s_L[afp] = F2s_L[afp].iloc[:-1].copy()
+
+for afp, weights in F3s_L.items():
+    F3s_L[afp].index = F3s_L[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F3s_L[afp] = F3s_L[afp].iloc[:-1].copy()
+
+for afp, weights in Ms_L.items():
+    Ms_L[afp].index = Ms_L[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    Ms_L[afp] = Ms_L[afp].iloc[:-1].copy()
+# %%
+# CARTERA ILÍQUIDA
+for afp, weights in F1s_IL.items():
+    F1s_IL[afp].index = F1s_IL[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F1s_IL[afp] = F1s_IL[afp].iloc[:-1].copy()
+
+for afp, weights in F2s_IL.items():
+    F2s_IL[afp].index = F2s_IL[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F2s_IL[afp] = F2s_IL[afp].iloc[:-1].copy()
+
+for afp, weights in F3s_IL.items():
+    F3s_IL[afp].index = F3s_IL[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    F3s_IL[afp] = F3s_IL[afp].iloc[:-1].copy()
+
+for afp, weights in Ms_IL.items():
+    Ms_IL[afp].index = Ms_IL[afp].reset_index(names='Fecha')["Fecha"].shift(-1)
+    Ms_IL[afp] = Ms_IL[afp].iloc[:-1].copy()
+# %% md
+### Por sectores
+# %%
+Sectores_Weight_F1 = {}
+for afp, weights in F1s.items():
+    for Nombre_Sector, isins in Agrupados_Sectores.items():
+        Sectores_Weight_F1[f'{afp + "_" + Nombre_Sector + "_F1"}'] = weights.loc[:, weights.columns.intersection(isins)]
+        Sectores_Weight_F1[f'{afp + "_" + Nombre_Sector + "_F1"}'] = Sectores_Weight_F1[
+            f'{afp + "_" + Nombre_Sector + "_F1"}'].div(
+            Sectores_Weight_F1[f'{afp + "_" + Nombre_Sector + "_F1"}'].sum(axis=1), axis=0)
+
+Sectores_Weight_F2 = {}
+for afp, weights in F2s.items():
+    for Nombre_Sector, isins in Agrupados_Sectores.items():
+        Sectores_Weight_F2[f'{afp + "_" + Nombre_Sector + "_F2"}'] = weights.loc[:, weights.columns.intersection(isins)]
+        Sectores_Weight_F2[f'{afp + "_" + Nombre_Sector + "_F2"}'] = Sectores_Weight_F2[
+            f'{afp + "_" + Nombre_Sector + "_F2"}'].div(
+            Sectores_Weight_F2[f'{afp + "_" + Nombre_Sector + "_F2"}'].sum(axis=1), axis=0)
+
+Sectores_Weight_F3 = {}
+for afp, weights in F3s.items():
+    for Nombre_Sector, isins in Agrupados_Sectores.items():
+        Sectores_Weight_F3[f'{afp + "_" + Nombre_Sector + "_F3"}'] = weights.loc[:, weights.columns.intersection(isins)]
+        Sectores_Weight_F3[f'{afp + "_" + Nombre_Sector + "_F3"}'] = Sectores_Weight_F3[
+            f'{afp + "_" + Nombre_Sector + "_F3"}'].div(
+            Sectores_Weight_F3[f'{afp + "_" + Nombre_Sector + "_F3"}'].sum(axis=1), axis=0)
+
+Sectores_Weight_M = {}
+for afp, weights in Ms.items():
+    for Nombre_Sector, isins in Agrupados_Sectores.items():
+        Sectores_Weight_M[f'{afp + "_" + Nombre_Sector + "_M"}'] = weights.loc[:, weights.columns.intersection(isins)]
+        Sectores_Weight_M[f'{afp + "_" + Nombre_Sector + "_M"}'] = Sectores_Weight_M[
+            f'{afp + "_" + Nombre_Sector + "_M"}'].div(
+            Sectores_Weight_M[f'{afp + "_" + Nombre_Sector + "_M"}'].sum(axis=1), axis=0)
+
+# %%
+Fechas_Comp = weight_IN_M.index
+# %% md
+### Weights Benchmark
+# %%
+try:
+    Weights_Benchmark = pl.read_excel(Monitor_Rentabilidad, sheet_name="Benchmark", engine="calamine", has_header=False,
+                                      read_options={"skip_rows": 0, "n_rows": 4600}).to_pandas()
+except Exception:
+    log.exception("Fallo al leer '%s' (hoja Benchmark).", Monitor_Rentabilidad)
+    raise
+Weights_Benchmark = Weights_Benchmark.copy()
+# %% md
+#### EPU
+# %%
+Limpieza = Weights_Benchmark.columns[Weights_Benchmark.iloc[0].isin(["Benchmark", "EPU"])]
+EPU_Limpio = Weights_Benchmark[Limpieza].copy()
+EPU_Limpio = EPU_Limpio[4:].reset_index(drop=True).copy()
+EPU_Limpio.columns = EPU_Limpio.iloc[0]
+EPU_Limpio = EPU_Limpio.drop(0).reset_index(drop=True)
+EPU_Limpio = EPU_Limpio.rename(columns={EPU_Limpio.columns[0]: 'Fecha'})
+EPU_Limpio['Fecha'] = pd.to_datetime(EPU_Limpio['Fecha'], errors='coerce')
+EPU_Limpio = EPU_Limpio.set_index('Fecha')
+EPU_Limpio = EPU_Limpio.replace("-", 0)
+EPU_Limpio = EPU_Limpio.apply(pd.to_numeric, errors="coerce")
+EPU_Limpio = EPU_Limpio.reindex(PxQ_IN_F1_O.index).ffill()
+# %%
+PxQ_EPU = Precios_Sin_Dividendos_R.mul(EPU_Limpio, axis=0)
+PxQ_EPU = PxQ_EPU.dropna(axis=0, how="all").copy()
+# OPCIÓN B (contrato de columnas de BD): NO se eliminan columnas vacías.
+# Las hojas de presentación (Resumen/Posicionamiento/...) buscan columnas
+# EPU/ETFPERU por NOMBRE exacto con INDEX/MATCH; si aquí se elimina una
+# columna que quedó toda-NaN, esa columna desaparece de BD y la fórmula
+# devuelve #REF!/#N/A. Por eso se conservan todas las columnas (quedan en
+# NaN/0 pero el nombre se preserva). Antes: PxQ_EPU.dropna(axis=1, how="all").
+weight_EPU = PxQ_EPU.div(PxQ_EPU.sum(axis=1), axis=0)
+weight_EPU.index = weight_EPU.reset_index()["Fecha"].shift(-1)
+weight_EPU = weight_EPU.iloc[:-1].copy()
+# %% md
+#### ETFPERU
+# %% md
+# Dado que el ETFPERU no da los weights sino el número de acciones, se debe
+# multiplicar por el precio de la acción en cada día. El mismo proceso que se hace arriba.
+# %%
+Limpieza = Weights_Benchmark.columns[Weights_Benchmark.iloc[0].isin(["Benchmark", "ETFPERU"])]
+ETFPERU_Limpio = Weights_Benchmark[Limpieza].copy()
+ETFPERU_Limpio = ETFPERU_Limpio[4:].reset_index(drop=True).copy()
+ETFPERU_Limpio.columns = ETFPERU_Limpio.iloc[0]
+ETFPERU_Limpio = ETFPERU_Limpio.drop(0).reset_index(drop=True)
+ETFPERU_Limpio = ETFPERU_Limpio.rename(columns={ETFPERU_Limpio.columns[0]: 'Fecha'})
+ETFPERU_Limpio['Fecha'] = pd.to_datetime(ETFPERU_Limpio['Fecha'], errors='coerce')
+ETFPERU_Limpio = ETFPERU_Limpio.set_index('Fecha')
+ETFPERU_Limpio = ETFPERU_Limpio.replace("-", 0)
+ETFPERU_Limpio = ETFPERU_Limpio.apply(pd.to_numeric, errors="coerce")
+ETFPERU_Limpio = ETFPERU_Limpio.reindex(PxQ_IN_F1_O.index).ffill()
+# %%
+PxQ_ETFPERU = Precios_Sin_Dividendos_R.mul(ETFPERU_Limpio, axis=0)
+PxQ_ETFPERU = PxQ_ETFPERU.dropna(axis=0, how="all").copy()
+# OPCIÓN B: ver comentario en EPU. No se eliminan columnas vacías.
+weight_ETFPERU = PxQ_ETFPERU.div(PxQ_ETFPERU.sum(axis=1), axis=0)
+weight_ETFPERU.index = weight_ETFPERU.reset_index()["Fecha"].shift(-1)
+weight_ETFPERU = weight_ETFPERU.iloc[:-1].copy()
+# %%
+weights_etfs = {"Weight_EPU": weight_EPU, "Weight_ETFPERU": weight_ETFPERU}
+# %% md
+### Retornos
+# %%
+Precios_Con_Dividendos_Var = Precios_Con_Dividendos_R.copy()
+for col in Precios_Con_Dividendos_R.columns:
+    Precios_Con_Dividendos_R[col].dropna(inplace=True)
+    Precio_Cambio = Precios_Con_Dividendos_R[col].pct_change().copy()
+    Precios_Con_Dividendos_Var[col] = Precio_Cambio
+Precios_Con_Dividendos_Var.fillna(0, inplace=True)
+# %% md
+### Weighted Returns
+# %%
+Ret_IN_F1 = Retornos_VP.mul(F1s['IN'], axis=0)
+Ret_IN_F1_O = Ret_IN_F1.dropna(axis=0, how="all").copy()
+
+Ret_IN_F2 = Retornos_VP.mul(F2s['IN'], axis=0)
+Ret_IN_F2_O = Ret_IN_F2.dropna(axis=0, how="all").copy()
+
+Ret_IN_F3 = Retornos_VP.mul(F3s['IN'], axis=0)
+Ret_IN_F3_O = Ret_IN_F3.dropna(axis=0, how="all").copy()
+
+Ret_IN_M = Retornos_VP.mul(Ms['IN'], axis=0)
+Ret_IN_M_O = Ret_IN_M.dropna(axis=0, how="all").copy()
+# %%
+Ret_HA_F1 = Retornos_VP.mul(weight_HA_F1, axis=0)
+Ret_HA_F1_O = Ret_HA_F1.dropna(axis=0, how="all").copy()
+
+Ret_HA_F2 = Retornos_VP.mul(weight_HA_F2, axis=0)
+Ret_HA_F2_O = Ret_HA_F2.dropna(axis=0, how="all").copy()
+
+Ret_HA_F3 = Retornos_VP.mul(weight_HA_F3, axis=0)
+Ret_HA_F3_O = Ret_HA_F3.dropna(axis=0, how="all").copy()
+
+Ret_HA_M = Retornos_VP.mul(weight_HA_M, axis=0)
+Ret_HA_M_O = Ret_HA_M.dropna(axis=0, how="all").copy()
+# %%
+Ret_RI_F1 = Retornos_VP.mul(weight_RI_F1, axis=0)
+Ret_RI_F1_O = Ret_RI_F1.dropna(axis=0, how="all").copy()
+
+Ret_RI_F2 = Retornos_VP.mul(weight_RI_F2, axis=0)
+Ret_RI_F2_O = Ret_RI_F2.dropna(axis=0, how="all").copy()
+
+Ret_RI_F3 = Retornos_VP.mul(weight_RI_F3, axis=0)
+Ret_RI_F3_O = Ret_RI_F3.dropna(axis=0, how="all").copy()
+
+Ret_RI_M = Retornos_VP.mul(weight_RI_M, axis=0)
+Ret_RI_M_O = Ret_RI_M.dropna(axis=0, how="all").copy()
+# %%
+Ret_PF_F1 = Retornos_VP.mul(weight_PF_F1, axis=0)
+Ret_PF_F1_O = Ret_PF_F1.dropna(axis=0, how="all").copy()
+
+Ret_PF_F2 = Retornos_VP.mul(weight_PF_F2, axis=0)
+Ret_PF_F2_O = Ret_PF_F2.dropna(axis=0, how="all").copy()
+
+Ret_PF_F3 = Retornos_VP.mul(weight_PF_F3, axis=0)
+Ret_PF_F3_O = Ret_PF_F3.dropna(axis=0, how="all").copy()
+
+Ret_PF_M = Retornos_VP.mul(weight_PF_M, axis=0)
+Ret_PF_M_O = Ret_PF_M.dropna(axis=0, how="all").copy()
+# %%
+Ret_EXSIS_F1 = Retornos_VP.mul(weight_EXSIS_F1, axis=0)
+Ret_EXSIS_F1_O = Ret_EXSIS_F1.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F2 = Retornos_VP.mul(weight_EXSIS_F2, axis=0)
+Ret_EXSIS_F2_O = Ret_EXSIS_F2.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F3 = Retornos_VP.mul(weight_EXSIS_F3, axis=0)
+Ret_EXSIS_F3_O = Ret_EXSIS_F3.dropna(axis=0, how="all").copy()
+# %% md
+### Weighted Returns - CARTERA LÍQUIDA
+# %%
+Ret_IN_F1_L = Retornos_VP.mul(F1s_L['IN_L'], axis=0)
+Ret_IN_F1_O_L = Ret_IN_F1_L.dropna(axis=0, how="all").copy()
+
+Ret_IN_F2_L = Retornos_VP.mul(F2s_L['IN_L'], axis=0)
+Ret_IN_F2_O_L = Ret_IN_F2_L.dropna(axis=0, how="all").copy()
+
+Ret_IN_F3_L = Retornos_VP.mul(F3s_L['IN_L'], axis=0)
+Ret_IN_F3_O_L = Ret_IN_F3_L.dropna(axis=0, how="all").copy()
+
+Ret_IN_M_L = Retornos_VP.mul(Ms_L['IN_L'], axis=0)
+Ret_IN_M_O_L = Ret_IN_M_L.dropna(axis=0, how="all").copy()
+# %%
+Ret_HA_F1_L = Retornos_VP.mul(weight_HA_F1_L, axis=0)
+Ret_HA_F1_O_L = Ret_HA_F1_L.dropna(axis=0, how="all").copy()
+
+Ret_HA_F2_L = Retornos_VP.mul(weight_HA_F2_L, axis=0)
+Ret_HA_F2_O_L = Ret_HA_F2_L.dropna(axis=0, how="all").copy()
+
+Ret_HA_F3_L = Retornos_VP.mul(weight_HA_F3_L, axis=0)
+Ret_HA_F3_O_L = Ret_HA_F3_L.dropna(axis=0, how="all").copy()
+
+Ret_HA_M_L = Retornos_VP.mul(weight_HA_M_L, axis=0)
+Ret_HA_M_O_L = Ret_HA_M_L.dropna(axis=0, how="all").copy()
+# %%
+Ret_RI_F1_L = Retornos_VP.mul(weight_RI_F1_L, axis=0)
+Ret_RI_F1_O_L = Ret_RI_F1_L.dropna(axis=0, how="all").copy()
+
+Ret_RI_F2_L = Retornos_VP.mul(weight_RI_F2_L, axis=0)
+Ret_RI_F2_O_L = Ret_RI_F2_L.dropna(axis=0, how="all").copy()
+
+Ret_RI_F3_L = Retornos_VP.mul(weight_RI_F3_L, axis=0)
+Ret_RI_F3_O_L = Ret_RI_F3_L.dropna(axis=0, how="all").copy()
+
+Ret_RI_M_L = Retornos_VP.mul(weight_RI_M_L, axis=0)
+Ret_RI_M_O_L = Ret_RI_M_L.dropna(axis=0, how="all").copy()
+# %%
+Ret_PF_F1_L = Retornos_VP.mul(weight_PF_F1_L, axis=0)
+Ret_PF_F1_O_L = Ret_PF_F1_L.dropna(axis=0, how="all").copy()
+
+Ret_PF_F2_L = Retornos_VP.mul(weight_PF_F2_L, axis=0)
+Ret_PF_F2_O_L = Ret_PF_F2_L.dropna(axis=0, how="all").copy()
+
+Ret_PF_F3_L = Retornos_VP.mul(weight_PF_F3_L, axis=0)
+Ret_PF_F3_O_L = Ret_PF_F3_L.dropna(axis=0, how="all").copy()
+
+Ret_PF_M_L = Retornos_VP.mul(weight_PF_M_L, axis=0)
+Ret_PF_M_O_L = Ret_PF_M_L.dropna(axis=0, how="all").copy()
+# %%
+Ret_EXSIS_F1_L = Retornos_VP.mul(weight_EXSIS_F1_L, axis=0)
+Ret_EXSIS_F1_O_L = Ret_EXSIS_F1_L.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F2_L = Retornos_VP.mul(weight_EXSIS_F2_L, axis=0)
+Ret_EXSIS_F2_O_L = Ret_EXSIS_F2_L.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F3_L = Retornos_VP.mul(weight_EXSIS_F3_L, axis=0)
+Ret_EXSIS_F3_O_L = Ret_EXSIS_F3_L.dropna(axis=0, how="all").copy()
+# %% md
+### Weighted Returns - CARTERA ILÍQUIDA
+# %%
+Ret_IN_F1_IL = Retornos_VP.mul(F1s_IL['IN_IL'], axis=0)
+Ret_IN_F1_O_IL = Ret_IN_F1_IL.dropna(axis=0, how="all").copy()
+
+Ret_IN_F2_IL = Retornos_VP.mul(F2s_IL['IN_IL'], axis=0)
+Ret_IN_F2_O_IL = Ret_IN_F2_IL.dropna(axis=0, how="all").copy()
+
+Ret_IN_F3_IL = Retornos_VP.mul(F3s_IL['IN_IL'], axis=0)
+Ret_IN_F3_O_IL = Ret_IN_F3_IL.dropna(axis=0, how="all").copy()
+
+Ret_IN_M_IL = Retornos_VP.mul(Ms_IL['IN_IL'], axis=0)
+Ret_IN_M_O_IL = Ret_IN_M_IL.dropna(axis=0, how="all").copy()
+# %%
+Ret_HA_F1_IL = Retornos_VP.mul(weight_HA_F1_IL, axis=0)
+Ret_HA_F1_O_IL = Ret_HA_F1_IL.dropna(axis=0, how="all").copy()
+
+Ret_HA_F2_IL = Retornos_VP.mul(weight_HA_F2_IL, axis=0)
+Ret_HA_F2_O_IL = Ret_HA_F2_IL.dropna(axis=0, how="all").copy()
+
+Ret_HA_F3_IL = Retornos_VP.mul(weight_HA_F3_IL, axis=0)
+Ret_HA_F3_O_IL = Ret_HA_F3_IL.dropna(axis=0, how="all").copy()
+
+Ret_HA_M_IL = Retornos_VP.mul(weight_HA_M_IL, axis=0)
+Ret_HA_M_O_IL = Ret_HA_M_IL.dropna(axis=0, how="all").copy()
+# %%
+Ret_RI_F1_IL = Retornos_VP.mul(weight_RI_F1_IL, axis=0)
+Ret_RI_F1_O_IL = Ret_RI_F1_IL.dropna(axis=0, how="all").copy()
+
+Ret_RI_F2_IL = Retornos_VP.mul(weight_RI_F2_IL, axis=0)
+Ret_RI_F2_O_IL = Ret_RI_F2_IL.dropna(axis=0, how="all").copy()
+
+Ret_RI_F3_IL = Retornos_VP.mul(weight_RI_F3_IL, axis=0)
+Ret_RI_F3_O_IL = Ret_RI_F3_IL.dropna(axis=0, how="all").copy()
+
+Ret_RI_M_IL = Retornos_VP.mul(weight_RI_M_IL, axis=0)
+Ret_RI_M_O_IL = Ret_RI_M_IL.dropna(axis=0, how="all").copy()
+# %%
+Ret_PF_F1_IL = Retornos_VP.mul(weight_PF_F1_IL, axis=0)
+Ret_PF_F1_O_IL = Ret_PF_F1_IL.dropna(axis=0, how="all").copy()
+
+Ret_PF_F2_IL = Retornos_VP.mul(weight_PF_F2_IL, axis=0)
+Ret_PF_F2_O_IL = Ret_PF_F2_IL.dropna(axis=0, how="all").copy()
+
+Ret_PF_F3_IL = Retornos_VP.mul(weight_PF_F3_IL, axis=0)
+Ret_PF_F3_O_IL = Ret_PF_F3_IL.dropna(axis=0, how="all").copy()
+
+Ret_PF_M_IL = Retornos_VP.mul(weight_PF_M_IL, axis=0)
+Ret_PF_M_O_IL = Ret_PF_M_IL.dropna(axis=0, how="all").copy()
+# %%
+Ret_EXSIS_F1_IL = Retornos_VP.mul(weight_EXSIS_F1_IL, axis=0)
+Ret_EXSIS_F1_O_IL = Ret_EXSIS_F1_IL.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F2_IL = Retornos_VP.mul(weight_EXSIS_F2_IL, axis=0)
+Ret_EXSIS_F2_O_IL = Ret_EXSIS_F2_IL.dropna(axis=0, how="all").copy()
+
+Ret_EXSIS_F3_IL = Retornos_VP.mul(weight_EXSIS_F3_IL, axis=0)
+Ret_EXSIS_F3_O_IL = Ret_EXSIS_F3_IL.dropna(axis=0, how="all").copy()
+# %%
+Ret_EPU = Precios_Con_Dividendos_Var.mul(weight_EPU, axis=0)
+Ret_EPU_O = Ret_EPU.dropna(axis=0, how="all").copy()
+# OPCIÓN B: no se eliminan columnas vacías para preservar el contrato de
+# nombres de BD (ver comentario en el bloque EPU de weights).
+Ret_EPU_O = Ret_EPU_O.fillna(0)
+# %%
+Ret_ETFPERU = Precios_Con_Dividendos_Var.mul(weight_ETFPERU, axis=0)
+Ret_ETFPERU_O = Ret_ETFPERU.dropna(axis=0, how="all").copy()
+Ret_ETFPERU_O = Ret_ETFPERU_O.fillna(0)
+# %%
+Ret_ETFs = {"Ret_EPU": Ret_EPU_O, "Ret_ETFPERU": Ret_ETFPERU_O}
+# %%
+Retornos_Agregados_RVL = {"Ret_IN_F1_O": Ret_IN_F1_O, "Ret_IN_F2_O": Ret_IN_F2_O, "Ret_IN_F3_O": Ret_IN_F3_O,
+                          "Ret_IN_M_O": Ret_IN_M_O, "Ret_HA_F1_O": Ret_HA_F1_O, "Ret_HA_F2_O": Ret_HA_F2_O,
+                          "Ret_HA_F3_O": Ret_HA_F3_O, "Ret_HA_M_O": Ret_HA_M_O, "Ret_PF_F1_O": Ret_PF_F1_O,
+                          "Ret_PF_F2_O": Ret_PF_F2_O, "Ret_PF_F3_O": Ret_PF_F3_O, "Ret_PF_M_O": Ret_PF_M_O,
+                          "Ret_RI_F1_O": Ret_RI_F1_O, "Ret_RI_F2_O": Ret_RI_F2_O, "Ret_RI_F3_O": Ret_RI_F3_O,
+                          "Ret_RI_M_O": Ret_RI_M_O, "Ret_EXSIS_F1_O": Ret_EXSIS_F1_O, "Ret_EXSIS_F2_O": Ret_EXSIS_F2_O,
+                          "Ret_EXSIS_F3_O": Ret_EXSIS_F3_O, "Ret_IN_F1_O_L": Ret_IN_F1_O_L,
+                          "Ret_IN_F2_O_L": Ret_IN_F2_O_L, "Ret_IN_F3_O_L": Ret_IN_F3_O_L, "Ret_IN_M_O_L": Ret_IN_M_O_L,
+                          "Ret_HA_F1_O_L": Ret_HA_F1_O_L, "Ret_HA_F2_O_L": Ret_HA_F2_O_L,
+                          "Ret_HA_F3_O_L": Ret_HA_F3_O_L, "Ret_HA_M_O_L": Ret_HA_M_O_L, "Ret_PF_F1_O_L": Ret_PF_F1_O_L,
+                          "Ret_PF_F2_O_L": Ret_PF_F2_O_L, "Ret_PF_F3_O_L": Ret_PF_F3_O_L, "Ret_PF_M_O_L": Ret_PF_M_O_L,
+                          "Ret_RI_F1_O_L": Ret_RI_F1_O_L, "Ret_RI_F2_O_L": Ret_RI_F2_O_L,
+                          "Ret_RI_F3_O_L": Ret_RI_F3_O_L, "Ret_RI_M_O_L": Ret_RI_M_O_L,
+                          "Ret_EXSIS_F1_O_L": Ret_EXSIS_F1_O_L, "Ret_EXSIS_F2_O_L": Ret_EXSIS_F2_O_L,
+                          "Ret_EXSIS_F3_O_L": Ret_EXSIS_F3_O_L, "Ret_IN_F1_O_IL": Ret_IN_F1_O_IL,
+                          "Ret_IN_F2_O_IL": Ret_IN_F2_O_IL, "Ret_IN_F3_O_IL": Ret_IN_F3_O_IL,
+                          "Ret_IN_M_O_IL": Ret_IN_M_O_IL, "Ret_HA_F1_O_IL": Ret_HA_F1_O_IL,
+                          "Ret_HA_F2_O_IL": Ret_HA_F2_O_IL, "Ret_HA_F3_O_IL": Ret_HA_F3_O_IL,
+                          "Ret_HA_M_O_IL": Ret_HA_M_O_IL, "Ret_PF_F1_O_IL": Ret_PF_F1_O_IL,
+                          "Ret_PF_F2_O_IL": Ret_PF_F2_O_IL, "Ret_PF_F3_O_IL": Ret_PF_F3_O_IL,
+                          "Ret_PF_M_O_IL": Ret_PF_M_O_IL, "Ret_RI_F1_O_IL": Ret_RI_F1_O_IL,
+                          "Ret_RI_F2_O_IL": Ret_RI_F2_O_IL, "Ret_RI_F3_O_IL": Ret_RI_F3_O_IL,
+                          "Ret_RI_M_O_IL": Ret_RI_M_O_IL, "Ret_EXSIS_F1_O_IL": Ret_EXSIS_F1_O_IL,
+                          "Ret_EXSIS_F2_O_IL": Ret_EXSIS_F2_O_IL, "Ret_EXSIS_F3_O_IL": Ret_EXSIS_F3_O_IL}
+# %%
+Nombres_Fondos_ind = ["F1", "F2", "F3", "M"]
+Retornos_Agregados_Acum_RVL = {}
+for nombre, df in Retornos_Agregados_RVL.items():
+    Retornos_Agregados_RVL[nombre]["Total"] = Retornos_Agregados_RVL[nombre].sum(axis=1)
+    Retornos_Agregados_Acum_RVL[nombre] = (
+                (1 + Retornos_Agregados_RVL[nombre].replace([np.inf, -np.inf], np.nan).fillna(0)).cumprod() * 100)
+
+
+# %%
+# Retornos_Agregados_Acum_RVL_Totales={}
+# for fondo in Nombres_Fondos_ind:
+#     for nombre, df in Retornos_Agregados_Acum_RVL.items():
+#         temp_fondo=None
+#         temp_AFP=None
+#         temp_fondo = nombre.split("_")[2]
+#         temp_AFP = nombre.split("_")[1]
+#         key=f'{fondo}'
+#         if key not in Retornos_Agregados_Acum_RVL_Totales:
+#                 Retornos_Agregados_Acum_RVL_Totales[key] = pd.DataFrame()
+#         if nombre.split("_")[2] == fondo:
+#             column_total = pd.DataFrame({temp_AFP: df["Total"]})
+#             Retornos_Agregados_Acum_RVL_Totales[key] = pd.concat([Retornos_Agregados_Acum_RVL_Totales[key],column_total],axis=1)
+
+# %%
+def detectar_sufijo_cartera(nombre_clave: str) -> str:
+    """
+    Devuelve "", "_L" o "_IL" según la clave 'nombre_clave'.
+    Ajusta los if para que calcen con tu naming real:
+    - Ej: '..._O' normal, '..._L' líquida, '..._IL' ilíquida.
+    - O si usas '..._LIQ' y '..._ILIQ', busca esos tokens.
+    """
+    low = nombre_clave.lower()
+    # ejemplos de patrones frecuentes:
+    if any(tok in low for tok in ["_il", "_iliq", "iliq", "ilíquida", "iliquida"]):
+        return "_IL"
+    if any(tok in low for tok in ["_l", "_liq", "liquida", "líquida"]):
+        return "_L"
+    # Por descarte, normal:
+    return ""
+
+
+# %%
+Retornos_Agregados_Acum_RVL_Totales = {}
+for fondo in Nombres_Fondos_ind:
+    Retornos_Agregados_Acum_RVL_Totales.setdefault(fondo, pd.DataFrame())
+    for nombre, df in Retornos_Agregados_Acum_RVL.items():
+        partes = nombre.split("_")
+        if len(partes) < 3:
+            continue
+        afp = partes[1]  # IN/HA/PF/RI/EXSIS
+        ftag = partes[2]  # F1/F2/F3/M
+        if ftag != fondo:
+            continue
+        suf = detectar_sufijo_cartera(nombre)  # "", "_L", "_IL"
+        col_name = f"{afp}{suf}"
+        Retornos_Agregados_Acum_RVL_Totales[fondo] = Retornos_Agregados_Acum_RVL_Totales[fondo].join(
+            df[["Total"]].rename(columns={"Total": col_name}),
+            how="outer"
+        )
+# %%
+Ret_Acum_ETFs = {}
+for nombre, df in Ret_ETFs.items():
+    Ret_ETFs[nombre]["Total"] = Ret_ETFs[nombre].sum(axis=1)
+    Ret_Acum_ETFs[nombre] = ((1 + Ret_ETFs[nombre].replace([np.inf, -np.inf], np.nan).fillna(0)).cumprod() * 100)
+
+# %% md
+### Weighted Returns por sector
+# %%
+Lista_Weights_Sectores_Fondos = [Sectores_Weight_F1, Sectores_Weight_F2, Sectores_Weight_F3, Sectores_Weight_M]
+
+Sectores_Weight_F1 = {}
+for afp, weights in F1s.items():
+    for Nombre_Sector, isins in Agrupados_Sectores.items():
+        Sectores_Weight_F1[f'{afp + "_" + Nombre_Sector + "_F1"}'] = weights.loc[:, weights.columns.intersection(isins)]
+# %%
+Retornos_Weighted_Sectores_AFP = {}
+Retornos_Acumulados_Sectorial = {}
+
+for fondo in Lista_Weights_Sectores_Fondos:
+    for afp_sector, weights in fondo.items():
+        Retornos_Weighted_Sectores_AFP[f'{"Ret_" + afp_sector}'] = Precios_Con_Dividendos_Var.mul(weights, axis=0)
+        Retornos_Weighted_Sectores_AFP[f'{"Ret_" + afp_sector}'] = Retornos_Weighted_Sectores_AFP[
+            f'{"Ret_" + afp_sector}'].dropna(axis=0, how="all").copy()
+        Retornos_Weighted_Sectores_AFP[f'{"Ret_" + afp_sector}'] = Retornos_Weighted_Sectores_AFP[
+            f'{"Ret_" + afp_sector}'].dropna(axis=1, how="all").copy()
+        Retornos_Weighted_Sectores_AFP[f'{"Ret_" + afp_sector}']["Total"] = Retornos_Weighted_Sectores_AFP[
+            f'{"Ret_" + afp_sector}'].sum(axis=1)
+        Retornos_Acumulados_Sectorial[f'{"Ret_Acum_" + afp_sector}'] = ((1 + Retornos_Weighted_Sectores_AFP[
+            f'{"Ret_" + afp_sector}'].replace([np.inf, -np.inf], np.nan).fillna(0)).cumprod() * 100)
+# %%
+Solo_Totales_Retornos_Sectoriales = {}
+for sector in Lista_Sectores:
+    for nombre, Ret_acum in Retornos_Acumulados_Sectorial.items():
+        temp_fondo = None
+        temp_AFP = None
+        temp_fondo = nombre.split("_")[4]
+        temp_AFP = nombre.split("_")[2]
+        key = f'{sector + "_" + temp_fondo}'
+        if key not in Solo_Totales_Retornos_Sectoriales:
+            Solo_Totales_Retornos_Sectoriales[key] = pd.DataFrame()
+        if nombre.split("_")[3] == sector:
+            column_total = pd.DataFrame({temp_AFP: Ret_acum["Total"]})
+            Solo_Totales_Retornos_Sectoriales[key] = pd.concat([Solo_Totales_Retornos_Sectoriales[key], column_total],
+                                                               axis=1)
+# %% md
+#### Exportando a Excel nuevamente
+# %%
+df_exportar = []
+
+for i, df in Retornos_Agregados_RVL.items():
+    renombrados = df.copy()
+    renombrados.columns = [f'{i}_{col}' for col in renombrados.columns]
+    df_exportar.append(renombrados)
+
+# for i, df in Retornos_Agregados_Acum_RVL.items():
+#     renombrados =df.copy()
+#     renombrados.columns = [f'acum_{i}_{col}' for col in renombrados.columns]
+#     df_exportar.append(renombrados)
+
+
+# renombrados_P =Precios_Con_Dividendos_Var.copy()
+# renombrados_P = ((1+renombrados_P.replace([np.inf, -np.inf], np.nan).fillna(0)).cumprod()*100)
+# renombrados_P.columns = [f'Retorno_Precios_{col}' for col in renombrados_P.columns]
+# df_exportar.append(renombrados_P)
+
+renombrados_P = Precios_Con_Dividendos_Var.copy()
+renombrados_P.columns = [f'Retorno_Precios_No_Acum_{col}' for col in renombrados_P.columns]
+df_exportar.append(renombrados_P)
+
+Totales_AUM_RVL = {"IN_F1": PxQ_IN_F1_O, "IN_F2": PxQ_IN_F2_O, "IN_F3": PxQ_IN_F3_O, "IN_M": PxQ_IN_M_O,
+                   "HA_F1": PxQ_HA_F1_O, "HA_F2": PxQ_HA_F2_O, "HA_F3": PxQ_HA_F3_O, "HA_M": PxQ_HA_M_O,
+                   "PF_F1": PxQ_PF_F1_O, "PF_F2": PxQ_PF_F2_O, "PF_F3": PxQ_PF_F3_O, "PF_M": PxQ_PF_M_O,
+                   "RI_F1": PxQ_RI_F1_O, "RI_F2": PxQ_RI_F2_O, "RI_F3": PxQ_RI_F3_O, "RI_M": PxQ_RI_M_O,
+                   "EXSIS_F1": PxQ_EXSIS_F1_O, "EXSIS_F2": PxQ_EXSIS_F2_O, "EXSIS_F3": PxQ_EXSIS_F3_O}
+PD_Final = pd.DataFrame()
+for nombre, df in Totales_AUM_RVL.items():
+    PD_Final[f'AUM_RVL_{nombre}'] = df.sum(axis=1)
+
+df_exportar.append(PD_Final)
+
+Matriz_Weights = {"weight_IN_F1_": weight_IN_F1, "weight_IN_F2_": weight_IN_F2, "weight_IN_F3_": weight_IN_F3,
+                  "weight_IN_M_": weight_IN_M,
+                  "weight_HA_F1_": weight_HA_F1, "weight_HA_F2_": weight_HA_F2, "weight_HA_F3_": weight_HA_F3,
+                  "weight_HA_M_": weight_HA_M,
+                  "weight_RI_F1_": weight_RI_F1, "weight_RI_F2_": weight_RI_F2, "weight_RI_F3_": weight_RI_F3,
+                  "weight_RI_M_": weight_RI_M,
+                  "weight_PF_F1_": weight_PF_F1, "weight_PF_F2_": weight_PF_F2, "weight_PF_F3_": weight_PF_F3,
+                  "weight_PF_M_": weight_PF_M,
+                  "weight_EXSIS_F1_": weight_EXSIS_F1, "weight_EXSIS_F2_": weight_EXSIS_F2,
+                  "weight_EXSIS_F3_": weight_EXSIS_F3,
+                  "weight_IN_F1_L_": weight_IN_F1_L, "weight_IN_F2_L_": weight_IN_F2_L,
+                  "weight_IN_F3_L_": weight_IN_F3_L, "weight_IN_M_L_": weight_IN_M_L,
+                  "weight_HA_F1_L_": weight_HA_F1_L, "weight_HA_F2_L_": weight_HA_F2_L,
+                  "weight_HA_F3_L_": weight_HA_F3_L, "weight_HA_M_L_": weight_HA_M_L,
+                  "weight_RI_F1_L_": weight_RI_F1_L, "weight_RI_F2_L_": weight_RI_F2_L,
+                  "weight_RI_F3_L_": weight_RI_F3_L, "weight_RI_M_L_": weight_RI_M_L,
+                  "weight_PF_F1_L_": weight_PF_F1_L, "weight_PF_F2_L_": weight_PF_F2_L,
+                  "weight_PF_F3_L_": weight_PF_F3_L, "weight_PF_M_L_": weight_PF_M_L,
+                  "weight_EXSIS_F1_L_": weight_EXSIS_F1_L, "weight_EXSIS_F2_L_": weight_EXSIS_F2_L,
+                  "weight_EXSIS_F3_L_": weight_EXSIS_F3_L,
+                  "weight_IN_F1_IL_": weight_IN_F1_IL, "weight_IN_F2_IL_": weight_IN_F2_IL,
+                  "weight_IN_F3_IL_": weight_IN_F3_IL, "weight_IN_M_IL_": weight_IN_M_IL,
+                  "weight_HA_F1_IL_": weight_HA_F1_IL, "weight_HA_F2_IL_": weight_HA_F2_IL,
+                  "weight_HA_F3_IL_": weight_HA_F3_IL, "weight_HA_M_IL_": weight_HA_M_IL,
+                  "weight_RI_F1_IL_": weight_RI_F1_IL, "weight_RI_F2_IL_": weight_RI_F2_IL,
+                  "weight_RI_F3_IL_": weight_RI_F3_IL, "weight_RI_M_IL_": weight_RI_M_IL,
+                  "weight_PF_F1_IL_": weight_PF_F1_IL, "weight_PF_F2_IL_": weight_PF_F2_IL,
+                  "weight_PF_F3_IL_": weight_PF_F3_IL, "weight_PF_M_IL_": weight_PF_M_IL,
+                  "weight_EXSIS_F1_IL_": weight_EXSIS_F1_IL, "weight_EXSIS_F2_IL_": weight_EXSIS_F2_IL,
+                  "weight_EXSIS_F3_IL_": weight_EXSIS_F3_IL}
+for i, df in Matriz_Weights.items():
+    renombrados = df.iloc[:-1].copy()
+    renombrados.columns = [f'{i}{col}' for col in renombrados.columns]
+    df_exportar.append(renombrados)
+
+for i, df in Ret_ETFs.items():
+    renombrados = df.copy()
+    renombrados.columns = [f'{i}_{col}' for col in renombrados.columns]
+    df_exportar.append(renombrados)
+
+# for i, df in Ret_Acum_ETFs.items():
+#     renombrados = df.copy()
+#     renombrados.columns = [f'{i}_Acum_{col}' for col in renombrados.columns]
+#     df_exportar.append(renombrados)
+
+for i, df in weights_etfs.items():
+    renombrados = df.copy()
+    renombrados.columns = [f'{i}_{col}' for col in renombrados.columns]
+    df_exportar.append(renombrados)
+
+renombrados_P = Retornos_VP.copy()
+renombrados_P.columns = [f'Retorno_VP_{col}' for col in renombrados_P.columns]
+df_exportar.append(renombrados_P)
+
+df_final = pd.concat(df_exportar, axis=1)
+# Limpieza del ÍNDICE de fechas antes de exportar a BD (no toca columnas, para
+# preservar el contrato de nombres que consumen las hojas de presentación):
+#   - Quita filas con índice nulo.
+#   - Quita filas totalmente vacías (fechas que entraron solo por el outer-join,
+#     típicamente fines de semana o fechas futuras sin datos).
+#   - Recorta a la fecha de corte para no arrastrar fechas futuras.
+#   - Ordena cronológicamente.
+df_final = df_final[df_final.index.notna()]
+df_final = df_final.dropna(axis=0, how="all")
+df_final = df_final[df_final.index <= pd.to_datetime(Fecha_Corte)]
+
+
+# Limpieza de columnas: quita columnas con nombre nulo/"nan" (vienen de ISINs
+# #N/A en el benchmark) y columnas de nombre DUPLICADO (deja la primera), para
+# que la hoja BD no tenga encabezados repetidos que confundan a las fórmulas
+# INDEX/MATCH de las hojas de presentación.
+_cols_validas = [c for c in df_final.columns if c is not None and str(c).lower() != "nan"]
+df_final = df_final[_cols_validas]
+df_final = df_final.loc[:, ~df_final.columns.duplicated(keep="first")]
+
+
+
+df_final = df_final.sort_index()
+
+
+
+
+# ==========================================================
+# Equivalencias Parametria -> códigos internos
+# Solo cambia nombres de columnas de retorno al final
+# ==========================================================
+
+# ==========================================================
+# Diccionario de equivalencias desde hoja Parametria
+# ==========================================================
+
+# Crear equivalencias desde Parametria (columna A -> columna B)
+
+equivalencias = {}
+
+for i in range(2, len(Base_Parametria)):  # fila 3 de Excel
+
+    ticker = Base_Parametria.iloc[i, 0]
+    codigo = Base_Parametria.iloc[i, 1]
+
+    if pd.isna(ticker) or pd.isna(codigo):
+        continue
+
+    ticker = str(ticker).strip()
+    codigo = str(codigo).strip()
+
+    equivalencias[f"Retorno_Precios_No_Acum_{ticker}"] = f"Retorno_Precios_No_Acum_{codigo}"
+    equivalencias[f"Retorno_Precios_No_Acum_{ticker} Equity"] = f"Retorno_Precios_No_Acum_{codigo}"
+
+
+df_final.rename(
+    columns={k: v for k, v in equivalencias.items() if k in df_final.columns},
+    inplace=True
+)
+
+
+# %%
+try:
+    sheet_bd = wb1.sheets["BD"]
+    sheet_bd["A1"].options(pd.DataFrame).value = df_final
+    wb1.save()
+    log.info("'%s' guardado correctamente.", Monitor_Rentabilidad)
+except Exception:
+    log.exception("Fallo al escribir/guardar la hoja BD. Cambios NO guardados.")
+    raise
+finally:
+    try:
+        wb1.app.quit()
+    except Exception:
+        log.warning("No se pudo cerrar limpiamente la instancia de Excel abierta por xlwings.")
+
+
+
+
+
+# %%
+# FS
+# %% md
+### Graficando
+# %%
+# %%
+# =============================================================================
+# GRAFICADO (PDFs de matplotlib)
+#
+# Mejoras de visualización sobre la versión original:
+#   - Fondo SIEMPRE blanco (figura y guardado), para pegar en documentos/correos.
+#   - Eje X legible: un tick por año, rotación consistente, sin amontonamiento.
+#   - Grilla suave para lectura de valores.
+#   - Leyenda única por figura (no repetida en cada subgráfico).
+#   - Fecha de corte visible en el subtítulo.
+#   - Se corrige la página "Precios": se filtra a instrumentos con datos reales
+#     para no dibujar ejes vacíos.
+#   - Las dos funciones originales (completa y reducida) se unifican en una
+#     sola con el parámetro `solo_integra`, evitando ~180 líneas duplicadas.
+# =============================================================================
+
+# Paleta corporativa (misma que el original): Integra, Habitat, Profuturo, Prima
+COLORS_AFP = {
+    "IN": "#3e63ad",  # Integra  (azul)
+    "HA": "#00B0F0",  # Habitat  (celeste)
+    "PF": "#FF0000",  # Profuturo (rojo)
+    "RI": "#FFA500",  # Prima    (naranja)
+}
+COLOR_EPU = "#7f7f7f"       # gris
+COLOR_ETFPERU = "#2ca02c"   # verde
+LABELS_AFP = {"IN": "Integra", "HA": "Habitat", "PF": "Profuturo", "RI": "Prima"}
+
+
+def _estilo_ejes(ax, con_fechas=True):
+    """Aplica formato consistente a un subgráfico: grilla, fondo blanco, eje X anual."""
+    ax.set_facecolor("white")
+    ax.grid(True, which="major", color="#dddddd", linewidth=0.6, alpha=0.8)
+    ax.tick_params(axis="both", labelsize=9)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    if con_fechas:
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
+        for lbl in ax.get_xticklabels():
+            lbl.set_rotation(0)
+            lbl.set_ha("center")
+
+
+def _plot_afp_panel(ax, df, titulo, solo_integra):
+    """Dibuja EPU, ETF Perú, Integra (+resto de AFP si no es 'solo_integra')."""
+    ax.plot(EPU_Var_Acum, color=COLOR_EPU, label="EPU", linewidth=1.3)
+    ax.plot(ETFPERU_Var_Acum, color=COLOR_ETFPERU, label="ETF Perú", linewidth=1.3)
+    orden = ["IN"] if solo_integra else ["IN", "HA", "PF", "RI"]
+    for afp in orden:
+        if afp in df.columns:
+            ax.plot(df[afp], color=COLORS_AFP[afp], label=LABELS_AFP[afp], linewidth=1.6)
+    ax.set_title(titulo, fontsize=13, fontweight="bold", fontname="Trebuchet MS", pad=8)
+    _estilo_ejes(ax, con_fechas=True)
+
+
+def _leyenda_unica(fig, ax_ref):
+    """Coloca una sola leyenda para toda la figura, tomada de un eje de referencia."""
+    handles, labels = ax_ref.get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=len(labels),
+                   frameon=False, fontsize=11, bbox_to_anchor=(0.5, 0.005))
+
+
+def Generar_PDF_Rendimiento(Solo_Totales_Retornos_Sectoriales, Precios_Con_Dividendos_R,
+                            ruta_pdf, solo_integra=False):
+    """
+    Genera el PDF de rendimiento acumulado.
+    solo_integra=False -> PDF completo (Integra vs Habitat/Profuturo/Prima + benchmarks)
+    solo_integra=True  -> PDF reducido (solo Integra vs benchmarks)
+    """
+    fondos_orden = [("F1", "Fondo 1"), ("F2", "Fondo 2"), ("F3", "Fondo 3"), ("M", "Multifondo")]
+    subt = f"Fecha de corte: {pd.to_datetime(Fecha_Corte).strftime('%d-%b-%Y')}"
+    titulo_portafolio = "Rendimiento Portafolio RVL" if solo_integra else "Rendimientos Acumulados - Portafolio RVL"
+
+    with PdfPages(ruta_pdf) as pdf:
+        # ---------------- PÁGINA PORTAFOLIO ----------------
+        fig, axis = plt.subplots(2, 2, figsize=(16, 11), facecolor="white")
+        fig.suptitle(titulo_portafolio, fontsize=18, fontweight="bold", color="#000000")
+        fig.text(0.5, 0.945, subt, ha="center", fontsize=10, color="#555555")
+        pos = {"F1": (0, 0), "F2": (0, 1), "F3": (1, 0), "M": (1, 1)}
+        ax_ref = None
+        for clave, df in Retornos_Agregados_Acum_RVL_Totales.items():
+            if clave in pos:
+                r, c = pos[clave]
+                titulo = dict(fondos_orden)[clave]
+                _plot_afp_panel(axis[r, c], df, titulo, solo_integra)
+                ax_ref = axis[r, c]
+        _leyenda_unica(fig, ax_ref)
+        plt.tight_layout(rect=[0, 0.04, 1, 0.93])
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+
+        # ---------------- PÁGINAS POR SECTOR ----------------
+        prefijo = "Rendimiento: " if solo_integra else "Rendimiento Acumulado: "
+        for sector in Lista_Sectores:
+            fig, axis = plt.subplots(2, 2, figsize=(16, 11), facecolor="white")
+            fig.suptitle(f"{prefijo}{sector}", fontsize=18, fontweight="bold", color="#000000")
+            fig.text(0.5, 0.945, subt, ha="center", fontsize=10, color="#555555")
+            ax_ref = None
+            hay_datos = False
+            for nombre, df in Solo_Totales_Retornos_Sectoriales.items():
+                partes = nombre.split("_")
+                if partes[0] == sector and partes[1] in pos:
+                    r, c = pos[partes[1]]
+                    titulo = {"F1": "Fondo 1", "F2": "Fondo 2", "F3": "Fondo 3", "M": "Multifondo"}[partes[1]]
+                    _plot_afp_panel(axis[r, c], df, titulo, solo_integra)
+                    ax_ref = axis[r, c]
+                    hay_datos = True
+            if ax_ref is not None:
+                _leyenda_unica(fig, ax_ref)
+            plt.tight_layout(rect=[0, 0.04, 1, 0.93])
+            pdf.savefig(fig, facecolor="white")
+            plt.close(fig)
+
+        # ---------------- PÁGINAS DE PRECIOS ----------------
+        # Solo instrumentos que existen en el diccionario Y tienen algún dato
+        # no nulo/no cero (antes se dibujaban ejes vacíos -> páginas en blanco).
+        # Se selecciona POR POSICIÓN (no por nombre) para ser robustos ante
+        # columnas con nombre DUPLICADO: en ese caso Precios_Con_Dividendos_R[col]
+        # devuelve un DataFrame (no una Series) y `serie.notna().any()` produce una
+        # Series -> el `and` lanza "The truth value of a Series is ambiguous".
+        # Iterando por posición cada serie es 1-D garantizado.
+        _cols_precios = list(Precios_Con_Dividendos_R.columns)
+        candidatos = [j for j, col in enumerate(_cols_precios) if col in Diccionario_Parametria]
+        con_datos = []
+        for j in candidatos:
+            serie = Precios_Con_Dividendos_R.iloc[:, j]
+            if serie.notna().any() and (serie.fillna(0) != 0).any():
+                con_datos.append(j)
+        if not con_datos:
+            log.warning("No hay instrumentos con datos de precio para graficar; se omite la página de Precios.")
+        else:
+            por_pagina = 8  # 4 filas x 2 columnas
+            n_paginas = (len(con_datos) + por_pagina - 1) // por_pagina
+            contador = 0
+            for _ in range(n_paginas):
+                fig, axis = plt.subplots(4, 2, figsize=(16, 20), facecolor="white")
+                fig.suptitle("Precios", fontsize=18, fontweight="bold", color="#000000")
+                for y in range(4):
+                    for x in range(2):
+                        if contador >= len(con_datos):
+                            axis[y, x].axis("off")  # apaga ejes sobrantes en vez de dejarlos vacíos
+                            continue
+                        j = con_datos[contador]
+                        col = _cols_precios[j]
+                        axis[y, x].plot(Precios_Con_Dividendos_R.iloc[:, j], color="#3e63ad", linewidth=1.4)
+                        axis[y, x].set_title(Diccionario_Parametria[col], fontsize=12,
+                                             fontname="Trebuchet MS", pad=6)
+                        _estilo_ejes(axis[y, x], con_fechas=True)
+                        contador += 1
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                pdf.savefig(fig, facecolor="white")
+                plt.close(fig)
+    return ruta_pdf
+
+
+# %%
+try:
+    Generar_PDF_Rendimiento(Solo_Totales_Retornos_Sectoriales, Precios_Con_Dividendos_R,
+                            Pdf, solo_integra=False)
+    log.info("PDF completo generado: %s", Pdf)
+except Exception:
+    log.exception("Fallo al generar el PDF completo en '%s'.", Pdf)
+    raise
+
+# %%
+try:
+    Generar_PDF_Rendimiento(Solo_Totales_Retornos_Sectoriales, Precios_Con_Dividendos_R,
+                            Pdfs, solo_integra=True)
+    log.info("PDF reducido generado: %s", Pdfs)
+except Exception:
+    log.exception("Fallo al generar el PDF reducido en '%s'.", Pdfs)
+    raise
