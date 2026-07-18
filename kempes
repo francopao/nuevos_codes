@@ -1,0 +1,54 @@
+Buen catch. Déjame revisar el archivo antes de opinar.Confirmado, y la causa es clara. Déjame verificarla del todo.Tienes toda la razón, y ya encontré exactamente por qué. **No es que el filtro haya fallado** — funcionó perfecto. Mira lo que revela el archivo:
+
+| Bloque | Filas | ¿Findes? |
+|---|---|---|
+| Filas 2–1887 (datos nuevos) | **1886** | **0 findes** ✅ |
+| Filas 1888–2125 (residuo) | **238** | los 17 findes ❌ |
+
+En la fila 1887 termina tu data nueva (2026-07-15) y en la 1888 **la fecha salta hacia atrás a 2025-09-09**. Hay exactamente **una** ruptura cronológica, justo en esa frontera. Y los 1886 registros nuevos no tienen ni un solo sábado o domingo.
+
+## La causa
+
+`sheet_bd["A1"].options(pd.DataFrame).value = df_final` **escribe encima, pero no borra lo que sobra**. Antes BD tenía 2125 filas; ahora escribes 1886. Las 238 filas que sobran del volcado anterior (esas sí traían findes) se quedan ahí abajo, huérfanas. Es exactamente el mismo tipo de "filas fantasma" que ya habías anotado en el encabezado de tu código.
+
+Esto además es peligroso más allá de lo cosmético: son fechas **duplicadas** respecto al bloque nuevo, y tu hoja Resumen usa `OFFSET` contando filas hacia abajo — si una ventana alcanza la frontera, empieza a comerse el bloque viejo y devuelve números sin sentido.
+
+## La corrección (1 edición)
+
+En el bloque de escritura (línea ~1830), reemplaza estas dos líneas:
+
+```python
+    sheet_bd = wb1.sheets["BD"]
+    sheet_bd["A1"].options(pd.DataFrame).value = df_final
+```
+
+por:
+
+```python
+    sheet_bd = wb1.sheets["BD"]
+
+    # Limpia el volcado anterior ANTES de escribir: si el nuevo df tiene menos
+    # filas/columnas que el anterior, las sobrantes quedarían como "filas
+    # fantasma" (fechas duplicadas y desordenadas al final de la hoja).
+    _ur = sheet_bd.used_range
+    _filas_antes, _cols_antes = _ur.last_cell.row, _ur.last_cell.column
+    if _filas_antes > 1:
+        _ur.clear_contents()          # borra valores, conserva formato
+
+    sheet_bd["A1"].options(pd.DataFrame).value = df_final
+    log.info("Hoja BD: limpiadas %d filas x %d cols previas; escritas %d filas x %d cols.",
+             _filas_antes, _cols_antes, len(df_final) + 1, len(df_final.columns) + 1)
+```
+
+Uso `clear_contents()` y no `clear()` a propósito: borra los valores pero **conserva el formato** de la hoja. Y como BD es puramente data volcada (las fórmulas `INDEX/MATCH` viven en Resumen/Rendimiento/Posicionamiento, no en BD), no hay riesgo de borrar fórmulas.
+
+En la próxima corrida deberías ver algo así, y ya sin findes:
+
+```
+Calendario BD: 2125 filas -> 1886 (removidas 239 por finde/feriado).
+Hoja BD: limpiadas 2125 filas x 7897 cols previas; escritas 1887 filas x 7898 cols.
+```
+
+Un aviso menor: `clear_contents()` sobre ~2125×7897 celdas por COM puede tardar unos segundos; es normal y ocurre una sola vez por corrida.
+
+Nota aparte: en esta corrida la data ya llega a **2026-07-15** (antes 07-14), así que tu pipeline está tomando el dato nuevo correctamente. Cuando reejecutes con esta corrección, si quieres validamos que la BD limpia reconcilie mejor contra la BD antigua — que era la duda de fondo que quedó abierta.
