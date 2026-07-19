@@ -1,0 +1,758 @@
+# ==============================================================================
+# HUELLA DE CARBONO — MÓDULO ÚNICO (M11 + M14)
+# Reemplaza íntegramente la hoja "Presentacion" del workbook:
+#   - Reconstruye las 11 pivot tables como DataFrames
+#   - Exporta histórico estructurado (una hoja por fecha de corte)
+#   - Genera dashboard HTML interactivo con selectores dinámicos
+# Script autocontenido: sin imports de otros scripts del proyecto.
+# ==============================================================================
+
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+
+# --- dependencias del dashboard (M14) ---
+import plotly.graph_objects as go
+import plotly.io as pio
+
+# ------------------------------------------------------------------------------
+# RUTAS (red corporativa)
+# ------------------------------------------------------------------------------
+RUTA_BASE = Path(
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+    r"\2. Reportes\Medición Huella de Carbono\Python"
+)
+RUTA_INPUTS = RUTA_BASE / "Inputs"
+RUTA_OUTPUT = RUTA_BASE / "Output"
+
+ARCHIVO_WORKBOOK = RUTA_INPUTS / "BD Huella con Proxies - Propuesta Franco.xlsm"
+
+SALIDA_HISTORICO = RUTA_OUTPUT / "Huella_Historico.xlsx"
+SALIDA_DASHBOARD = RUTA_OUTPUT / "Dashboard_Huella.html"
+
+# Hoja fuente de los pivots (NO se usa la hoja "Presentacion")
+HOJA_VALORIZACION = "Valorización de Instrumentos"
+FILA_HEADERS_VALORIZACION = 3          # headers en fila 3 -> skiprows=2
+HOJA_CAJA = "Cálculo Caja"
+CELDA_CAJA_ADICIONAL = "D18"           # 'Cálculo Caja'!D18 (se divide entre 1e6)
+
+# ------------------------------------------------------------------------------
+# CONSTANTES DE NEGOCIO (equivalentes a los filtros de página de cada pivot)
+# ------------------------------------------------------------------------------
+PORTAFOLIOS_VALIDOS = ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]  # excluye IN-FONDO0
+
+# El filtro de página "Huella" de las pivots originales era una selección manual
+# de ítems acumulada entre semestres (no una regla). Se normaliza a Huella != 0.
+# Poner en False solo para diagnosticar diferencias contra el Excel legacy.
+EXCLUIR_HUELLA_CERO = True
+
+COL = {
+    "portafolio": "PORTAFOLIO",
+    "grupo": "GRUPO",
+    "nombre": "Nombre",
+    "tipo_renta": "TIPO_RENTA",
+    "estrategia": "Estrategia",
+    "rank_rt": "Rank_rt",
+    "plus": "Plus",
+    "plus_1": "Plus_1",
+    "huella": "Huella",
+    "intensidad_m": "Intensidad-M",
+    "intensidad": "Intensidad",
+    "inv": "Inv MM$",
+    "isin": "CODIGO_ISIN",
+    "sbs": "CODIGO_SBS",
+    "emisor": "EMISOR",
+    "grupo_econ": "GRUPO_ECONOMICO",
+}
+
+METRICAS = [COL["huella"], COL["intensidad_m"], COL["inv"]]
+
+
+# ==============================================================================
+# LECTURA DEL ORIGEN DE DATOS (mismo que alimentaba la caché de las pivots)
+# ==============================================================================
+def cargar_valorizacion(ruta_workbook: str | Path = ARCHIVO_WORKBOOK) -> pd.DataFrame:
+    """
+    Lee la tabla 'Tabla_Consulta_desde_Reporte_de_Valorización_de_Instrumentos'
+    (hoja 'Valorización de Instrumentos', headers en fila 3) ya materializada
+    tras el RefreshAll manual. Es la fuente única de las 11 pivots.
+    """
+    ruta = Path(ruta_workbook)
+    if not ruta.exists():
+        raise FileNotFoundError(f"No se encuentra el workbook: {ruta}")
+
+    df = pd.read_excel(
+        ruta,
+        sheet_name=HOJA_VALORIZACION,
+        skiprows=FILA_HEADERS_VALORIZACION - 1,
+        engine="openpyxl",
+    )
+    df.columns = [str(c).strip() for c in df.columns]
+    # descartar columnas basura de la exportación
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    df = df.loc[:, ~df.columns.str.contains("__xlsx", na=False)]
+    # descartar filas totalmente vacías o sin portafolio
+    df = df[df.get(COL["portafolio"]).notna()].reset_index(drop=True)
+    return df
+
+
+def leer_caja_adicional(ruta_workbook: str | Path = ARCHIVO_WORKBOOK) -> float:
+    """'Cálculo Caja'!D18 / 1e6 — se sumaba al bucket Cash en la hoja Presentacion."""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(Path(ruta_workbook), data_only=True, read_only=True)
+        val = wb[HOJA_CAJA][CELDA_CAJA_ADICIONAL].value
+        wb.close()
+        return float(val) / 1_000_000 if val else 0.0
+    except Exception:
+        return 0.0
+
+
+def detectar_fecha_corte(df: pd.DataFrame, fallback: str | None = None) -> str:
+    """Deriva 'yyyymm' desde FechaValoracion; si falla usa el fallback."""
+    if "FechaValoracion" in df.columns:
+        s = pd.to_datetime(df["FechaValoracion"], errors="coerce", dayfirst=True).dropna()
+        if not s.empty:
+            return s.max().strftime("%Y%m")
+    return fallback or datetime.now().strftime("%Y%m")
+
+
+# ==============================================================================
+# HELPERS
+# ==============================================================================
+def _base(df: pd.DataFrame) -> pd.DataFrame:
+    """Universo base común a todas las pivots: multifondos 1-2-3."""
+    out = df[df[COL["portafolio"]].isin(PORTAFOLIOS_VALIDOS)].copy()
+    for c in METRICAS + [COL["intensidad"]]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+    for c in [COL["plus"], COL["plus_1"], COL["estrategia"], COL["rank_rt"],
+              COL["tipo_renta"], COL["nombre"]]:
+        if c in out.columns:
+            out[c] = out[c].astype(str).str.strip()
+    return out
+
+
+def _sin_huella_cero(df: pd.DataFrame) -> pd.DataFrame:
+    if EXCLUIR_HUELLA_CERO:
+        return df[df[COL["huella"]] != 0]
+    return df
+
+
+def _agg(df: pd.DataFrame, keys: list[str], metricas: list[str] | None = None) -> pd.DataFrame:
+    metricas = metricas or METRICAS
+    metricas = [m for m in metricas if m in df.columns]
+    if df.empty:
+        return pd.DataFrame(columns=keys + metricas)
+    out = (df.groupby(keys, dropna=False)[metricas]
+             .sum()
+             .reset_index()
+             .sort_values(metricas[0], ascending=False, ignore_index=True))
+    return out
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+    """Construye todos los objetos que antes vivían en la hoja 'Presentacion'."""
+
+    def __init__(self, df_valorizacion: pd.DataFrame, fecha_corte: str,
+                 caja_adicional_mm: float = 0.0):
+        """
+        df_valorizacion : DataFrame de M10 (columnas formuladas ya construidas)
+        fecha_corte     : 'yyyymm' o 'yyyy-mm-dd'
+        caja_adicional_mm : 'Cálculo Caja'!D18/1e6 (se sumaba al bucket Cash)
+        """
+        self.fecha_corte = str(fecha_corte)
+        self.caja_adicional_mm = float(caja_adicional_mm or 0.0)
+        self.df = _base(df_valorizacion)
+        self.objetos: dict[str, pd.DataFrame] = {}
+
+    # --------------------------------------------------------------------------
+    # PivotTable1 (Z3:AA14) — AUM por Rank_rt  -> charts 2/4/5 (composición AUM)
+    # --------------------------------------------------------------------------
+    def aum_por_rank(self) -> pd.DataFrame:
+        out = _agg(self.df, [COL["rank_rt"]], [COL["inv"]])
+        # bucket Cash recibe la caja adicional (equivalente a 'Cálculo Caja'!D18/1e6)
+        if self.caja_adicional_mm:
+            mask = out[COL["rank_rt"]].str.lower() == "cash"
+            if mask.any():
+                out.loc[mask, COL["inv"]] += self.caja_adicional_mm
+            else:
+                out = pd.concat([out, pd.DataFrame(
+                    [{COL["rank_rt"]: "Cash", COL["inv"]: self.caja_adicional_mm}])],
+                    ignore_index=True)
+        total = out[COL["inv"]].sum()
+        out["% AUM"] = np.where(total, out[COL["inv"]] / total, 0.0)
+        return out.sort_values(COL["inv"], ascending=False, ignore_index=True)
+
+    # --------------------------------------------------------------------------
+    # PivotTable4 (AE4:AF37) — AUM por Rank_rt x Plus_1  -> chart1
+    # Reemplaza los ~30 GETPIVOTDATA de la columna AJ
+    # --------------------------------------------------------------------------
+    def aum_rank_x_plus1(self) -> pd.DataFrame:
+        out = _agg(self.df, [COL["rank_rt"], COL["plus_1"]], [COL["inv"]])
+        if self.caja_adicional_mm:
+            mask = (out[COL["rank_rt"]].str.lower() == "cash") & \
+                   (out[COL["plus_1"]] == "Cuestionario Integra")
+            if mask.any():
+                out.loc[mask, COL["inv"]] += self.caja_adicional_mm
+            else:
+                out = pd.concat([out, pd.DataFrame([{
+                    COL["rank_rt"]: "Cash", COL["plus_1"]: "Cuestionario Integra",
+                    COL["inv"]: self.caja_adicional_mm}])], ignore_index=True)
+        total = out[COL["inv"]].sum()
+        out["% AUM"] = np.where(total, out[COL["inv"]] / total, 0.0)
+        return out
+
+    # --------------------------------------------------------------------------
+    # PivotTable3 (AQ52:AS187) — mejores/peores contribuyentes BU + TD
+    # Filtros: Estrategia in {BU, TD} ; Plus_1 not in {SOV, Alts} ; Huella != 0
+    # --------------------------------------------------------------------------
+    def contribuyentes_bu_td(self, top_n: int = 15) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        d = self.df[
+            self.df[COL["estrategia"]].isin(["BU", "TD"])
+            & ~self.df[COL["plus_1"]].isin(["SOV", "Alts"])
+        ]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad_m"], COL["inv"]])
+        total = full[COL["huella"]].sum()
+        full["% Huella"] = np.where(total, full[COL["huella"]] / total, 0.0)
+        full["Ranking"] = full[COL["huella"]].rank(ascending=False, method="first").astype(int)
+        peores = full.head(top_n).reset_index(drop=True)
+        mejores = full.tail(top_n).sort_values(COL["huella"]).reset_index(drop=True)
+        return full, peores, mejores
+
+    # --------------------------------------------------------------------------
+    # PivotTable5 (Z80:AC88) — exposición a soberanos
+    # Filtros: Plus in {ETF, SOV} ; Plus_1 == 'SOV' ; Huella != 0
+    # --------------------------------------------------------------------------
+    def soberanos(self) -> pd.DataFrame:
+        d = self.df[
+            self.df[COL["plus"]].isin(["ETF", "SOV"])
+            & (self.df[COL["plus_1"]] == "SOV")
+        ]
+        d = _sin_huella_cero(d)
+        out = _agg(d, [COL["nombre"]], METRICAS)
+        tot_h = out[COL["huella"]].sum()
+        tot_i = out[COL["inv"]].sum()
+        out["% Huella"] = np.where(tot_h, out[COL["huella"]] / tot_h, 0.0)
+        out["% AUM"] = np.where(tot_i, out[COL["inv"]] / tot_i, 0.0)
+        # Intensidad implícita del emisor soberano (Tn CO2 / USD MM)
+        out["Intensidad implícita"] = np.where(
+            out[COL["inv"]] != 0, out[COL["huella"]] / out[COL["inv"]], 0.0)
+        return out
+
+    # --------------------------------------------------------------------------
+    # PivotTable2 (Z110:AB115) — informativo: Estrategia x Plus_1
+    # Filtros: Plus not in {Cash, #N/A, Cuestionario Integra} ; Huella != 0
+    # --------------------------------------------------------------------------
+    def estrategia_x_plus1(self) -> pd.DataFrame:
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "#N/A", "nan", "Cuestionario Integra"])]
+        d = _sin_huella_cero(d)
+        return _agg(d, [COL["estrategia"], COL["plus_1"]],
+                    [COL["huella"], COL["intensidad_m"], COL["inv"]])
+
+    # --------------------------------------------------------------------------
+    # PivotTable8 (ED50:EF241) — peores contribuyentes GENERAL (sin filtro de huella)
+    # Filtros: Plus not in {Cash, Cuestionario Integra}
+    # --------------------------------------------------------------------------
+    def contribuyentes_general(self, top_n: int = 20) -> tuple[pd.DataFrame, pd.DataFrame]:
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra"])]
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["inv"]])
+        total = full[COL["huella"]].sum()
+        full["% Huella"] = np.where(total, full[COL["huella"]] / total, 0.0)
+        full["Intensidad implícita"] = np.where(
+            full[COL["inv"]] != 0, full[COL["huella"]] / full[COL["inv"]], 0.0)
+        full["Ranking"] = full[COL["huella"]].rank(ascending=False, method="first").astype(int)
+        return full, full.head(top_n).reset_index(drop=True)
+
+    # --------------------------------------------------------------------------
+    # PivotTables 10/13/14/16/17 (BH60, BN60, BT60, BZ60, CF61)
+    # Bloques de resumen que alimentaban DP80:DT84 -> charts 14/15/16/17
+    # --------------------------------------------------------------------------
+    def _bloque(self, nombre: str, mask: pd.Series, por_tipo_renta: bool) -> pd.DataFrame:
+        d = _sin_huella_cero(self.df[mask])
+        keys = ([COL["tipo_renta"], COL["nombre"]] if por_tipo_renta else [COL["nombre"]])
+        det = _agg(d, keys, METRICAS)
+        det.insert(0, "Bloque", nombre)
+        return det
+
+    def bloques_estrategia(self) -> dict[str, pd.DataFrame]:
+        f = self.df
+        specs = {
+            "BU Portafolio": (f[COL["estrategia"]].eq("BU") & f[COL["plus"]].eq("Portafolio"), False),
+            "BU Proxies": (f[COL["estrategia"]].eq("BU") & f[COL["plus"]].eq("Proxies"), False),
+            "TD Portafolio/ETF": (f[COL["estrategia"]].eq("TD")
+                                  & f[COL["plus"]].isin(["ETF", "Portafolio"])
+                                  & ~f[COL["plus_1"]].isin(["BU", "Alts"]), True),
+            "TD Proxies": (f[COL["estrategia"]].eq("TD") & f[COL["plus"]].eq("Proxies")
+                           & ~f[COL["plus_1"]].isin(["BU", "Alts"]), True),
+            "ALT Proxies": (f[COL["estrategia"]].eq("ALT") & f[COL["plus"]].eq("Proxies")
+                            & f[COL["plus_1"]].eq("Alts"), True),
+        }
+        return {k: self._bloque(k, m, tr) for k, (m, tr) in specs.items()}
+
+    def resumen_bloques(self) -> pd.DataFrame:
+        """Equivalente al bloque DP53:DU84 (Huella en miles Tn + Intensidad)."""
+        filas = []
+        for nombre, det in self.bloques_estrategia().items():
+            if det.empty:
+                filas.append({"Bloque": nombre, "Huella": 0.0, "Huella (miles Tn)": 0.0,
+                              "Intensidad-M": 0.0, "Inv MM$": 0.0})
+                continue
+            filas.append({
+                "Bloque": nombre,
+                "Huella": det[COL["huella"]].sum(),
+                "Huella (miles Tn)": det[COL["huella"]].sum() / 1000,
+                "Intensidad-M": det[COL["intensidad_m"]].sum(),
+                "Inv MM$": det[COL["inv"]].sum(),
+            })
+        out = pd.DataFrame(filas)
+        out.loc[len(out)] = {
+            "Bloque": "TOTAL",
+            "Huella": out["Huella"].sum(),
+            "Huella (miles Tn)": out["Huella (miles Tn)"].sum(),
+            "Intensidad-M": out["Intensidad-M"].sum(),
+            "Inv MM$": out["Inv MM$"].sum(),
+        }
+        return out
+
+    # --------------------------------------------------------------------------
+    # Vistas adicionales para el dashboard (sector / país / tipo de renta)
+    # Reemplazan los bloques hardcodeados AD54:AE94 del Excel
+    # --------------------------------------------------------------------------
+    def por_dimension(self, col_dim: str, etiqueta: str) -> pd.DataFrame:
+        if col_dim not in self.df.columns:
+            return pd.DataFrame(columns=[etiqueta] + METRICAS)
+        d = _sin_huella_cero(self.df)
+        out = _agg(d, [col_dim], METRICAS).rename(columns={col_dim: etiqueta})
+        tot = out[COL["huella"]].sum()
+        out["% Huella"] = np.where(tot, out[COL["huella"]] / tot, 0.0)
+        return out
+
+    # --------------------------------------------------------------------------
+    # ORQUESTADOR
+    # --------------------------------------------------------------------------
+    def build_all(self) -> dict[str, pd.DataFrame]:
+        full_bu_td, peores_bu_td, mejores_bu_td = self.contribuyentes_bu_td()
+        full_gen, peores_gen = self.contribuyentes_general()
+
+        o = {
+            "AUM_por_Rank": self.aum_por_rank(),
+            "AUM_Rank_x_Plus1": self.aum_rank_x_plus1(),
+            "Contrib_BU_TD": full_bu_td,
+            "Contrib_BU_TD_Peores": peores_bu_td,
+            "Contrib_BU_TD_Mejores": mejores_bu_td,
+            "Soberanos": self.soberanos(),
+            "Estrategia_x_Plus1": self.estrategia_x_plus1(),
+            "Contrib_General": full_gen,
+            "Contrib_General_Peores": peores_gen,
+            "Resumen_Bloques": self.resumen_bloques(),
+            "Detalle_Bloques": pd.concat(self.bloques_estrategia().values(), ignore_index=True),
+            "Por_Tipo_Renta": self.por_dimension(COL["tipo_renta"], "Tipo de Renta"),
+            "Por_Estrategia": self.por_dimension(COL["estrategia"], "Estrategia"),
+            "Por_Grupo_Economico": self.por_dimension(COL["grupo_econ"], "Grupo Económico"),
+        }
+        for k, v in o.items():
+            v.insert(0, "FECHA_CORTE", self.fecha_corte)
+        self.objetos = o
+        return o
+
+    # --------------------------------------------------------------------------
+    # Formato LARGO (tidy) — es lo que hace el histórico realmente explotable
+    # FECHA_CORTE | OBJETO | DIM_1 | DIM_2 | METRICA | VALOR
+    # --------------------------------------------------------------------------
+    def to_long(self) -> pd.DataFrame:
+        if not self.objetos:
+            self.build_all()
+        filas = []
+        for nombre, df in self.objetos.items():
+            if df.empty:
+                continue
+            metricas = [c for c in df.columns
+                        if pd.api.types.is_numeric_dtype(df[c]) and c != "FECHA_CORTE"]
+            dims = [c for c in df.columns if c not in metricas + ["FECHA_CORTE"]]
+            tmp = df.melt(id_vars=["FECHA_CORTE"] + dims,
+                          value_vars=metricas, var_name="METRICA", value_name="VALOR")
+            tmp["OBJETO"] = nombre
+            tmp["DIM_1"] = tmp[dims[0]].astype(str) if len(dims) >= 1 else ""
+            tmp["DIM_2"] = tmp[dims[1]].astype(str) if len(dims) >= 2 else ""
+            tmp["DIM_3"] = tmp[dims[2]].astype(str) if len(dims) >= 3 else ""
+            filas.append(tmp[["FECHA_CORTE", "OBJETO", "DIM_1", "DIM_2", "DIM_3",
+                              "METRICA", "VALOR"]])
+        return pd.concat(filas, ignore_index=True) if filas else pd.DataFrame()
+
+
+# ==============================================================================
+# EXPORTADOR HISTÓRICO
+# Una hoja por fecha de corte + hoja HISTORICO acumulada (formato largo)
+# Idempotente: reescribe la hoja del corte si ya existe, nunca duplica
+# ==============================================================================
+class HistoricoExporter:
+
+    HOJA_HISTORICO = "HISTORICO"
+    HOJA_META = "_META"
+
+    def __init__(self, ruta_excel: str):
+        self.ruta = ruta_excel
+
+    def _leer_existente(self) -> dict[str, pd.DataFrame]:
+        if not os.path.exists(self.ruta):
+            return {}
+        try:
+            return pd.read_excel(self.ruta, sheet_name=None, engine="openpyxl")
+        except Exception:
+            return {}
+
+    def exportar(self, builder: PresentacionBuilder) -> str:
+        corte = builder.fecha_corte
+        largo_nuevo = builder.to_long()
+        hojas = self._leer_existente()
+
+        # --- HISTORICO acumulado: se purga el corte y se reinserta ---
+        hist_prev = hojas.get(self.HOJA_HISTORICO, pd.DataFrame())
+        if not hist_prev.empty and "FECHA_CORTE" in hist_prev.columns:
+            hist_prev = hist_prev[hist_prev["FECHA_CORTE"].astype(str) != corte]
+        historico = (pd.concat([hist_prev, largo_nuevo], ignore_index=True)
+                     if not hist_prev.empty else largo_nuevo)
+        historico = historico.sort_values(
+            ["FECHA_CORTE", "OBJETO", "METRICA"], ignore_index=True)
+
+        # --- Hoja ancha del corte (todos los objetos apilados) ---
+        hoja_corte = largo_nuevo.copy()
+
+        # --- Metadata de trazabilidad ---
+        meta_prev = hojas.get(self.HOJA_META, pd.DataFrame())
+        if not meta_prev.empty and "FECHA_CORTE" in meta_prev.columns:
+            meta_prev = meta_prev[meta_prev["FECHA_CORTE"].astype(str) != corte]
+        meta_new = pd.DataFrame([{
+            "FECHA_CORTE": corte,
+            "GENERADO": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "N_REGISTROS_FUENTE": len(builder.df),
+            "HUELLA_TOTAL": builder.df[COL["huella"]].sum(),
+            "AUM_TOTAL_MM": builder.df[COL["inv"]].sum(),
+            "EXCLUIR_HUELLA_CERO": EXCLUIR_HUELLA_CERO,
+            "PORTAFOLIOS": ", ".join(PORTAFOLIOS_VALIDOS),
+        }])
+        meta = pd.concat([meta_prev, meta_new], ignore_index=True) if not meta_prev.empty else meta_new
+
+        # --- Reescritura completa preservando cortes previos ---
+        otros = {k: v for k, v in hojas.items()
+                 if k not in (self.HOJA_HISTORICO, self.HOJA_META, corte)}
+
+        with pd.ExcelWriter(self.ruta, engine="openpyxl") as xw:
+            historico.to_excel(xw, sheet_name=self.HOJA_HISTORICO, index=False)
+            meta.to_excel(xw, sheet_name=self.HOJA_META, index=False)
+            hoja_corte.to_excel(xw, sheet_name=str(corte)[:31], index=False)
+            for nombre, df in sorted(otros.items(), reverse=True):
+                df.to_excel(xw, sheet_name=str(nombre)[:31], index=False)
+
+        return self.ruta
+
+    def cargar_historico(self) -> pd.DataFrame:
+        """Insumo directo del dashboard (M14): serie completa en formato largo."""
+        hojas = self._leer_existente()
+        return hojas.get(self.HOJA_HISTORICO, pd.DataFrame())
+
+
+# ==============================================================================
+# API DEL MÓDULO
+# ==============================================================================
+def run_m11(df_valorizacion: pd.DataFrame | None = None,
+            fecha_corte: str | None = None,
+            ruta_workbook: str | Path = ARCHIVO_WORKBOOK,
+            ruta_historico: str | Path = SALIDA_HISTORICO,
+            caja_adicional_mm: float | None = None
+            ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """
+    Si no se pasa df_valorizacion, lo lee directamente del workbook en Inputs.
+    Retorna:
+      objetos   : dict con todos los DataFrames del corte actual
+      historico : DataFrame largo con TODOS los cortes (insumo del dashboard M14)
+    """
+    RUTA_OUTPUT.mkdir(parents=True, exist_ok=True)
+
+    if df_valorizacion is None:
+        df_valorizacion = cargar_valorizacion(ruta_workbook)
+    if caja_adicional_mm is None:
+        caja_adicional_mm = leer_caja_adicional(ruta_workbook)
+    fecha_corte = fecha_corte or detectar_fecha_corte(df_valorizacion)
+
+    b = PresentacionBuilder(df_valorizacion, fecha_corte, caja_adicional_mm)
+    objetos = b.build_all()
+    exp = HistoricoExporter(str(ruta_historico))
+    exp.exportar(b)
+    print(f"[M11] Corte {fecha_corte} | {len(b.df)} registros | "
+          f"histórico -> {ruta_historico}")
+    return objetos, exp.cargar_historico()
+
+
+# ==============================================================================
+# M14 — DASHBOARD INTERACTIVO (reemplaza los charts de la hoja "Presentacion")
+# ==============================================================================
+# ------------------------------------------------------------------------------
+# PALETA CORPORATIVA AFP INTEGRA
+# ------------------------------------------------------------------------------
+PALETA = ["#3494BA", "#00AECB", "#ACD7CA", "#516FED", "#0B3C5D",
+          "#7FC8DE", "#C9E4DA", "#8A9BF0", "#1B6E8C", "#5FBFD4"]
+COLOR_TEXTO = "#1F2933"
+COLOR_GRID = "#E5EAF0"
+FUENTE = "Segoe UI, Calibri, sans-serif"
+
+LAYOUT_BASE = dict(
+    font=dict(family=FUENTE, size=12, color=COLOR_TEXTO),
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    margin=dict(l=50, r=30, t=60, b=60),
+    legend=dict(orientation="h", yanchor="bottom", y=-0.25, x=0),
+    hoverlabel=dict(font_family=FUENTE),
+)
+
+
+def _apply(fig: go.Figure, titulo: str, y_titulo: str = "") -> go.Figure:
+    fig.update_layout(title=dict(text=titulo, font=dict(size=16)), **LAYOUT_BASE)
+    fig.update_yaxes(showgrid=False, zeroline=False, title=y_titulo,
+                     showline=True, linecolor=COLOR_GRID)
+    fig.update_xaxes(showgrid=False, zeroline=False, showline=True, linecolor=COLOR_GRID)
+    return fig
+
+
+# ==============================================================================
+# PIVOTEO DEL HISTÓRICO LARGO
+# ==============================================================================
+def _obj(hist: pd.DataFrame, objeto: str, metrica: str | None = None,
+         corte: str | None = None) -> pd.DataFrame:
+    d = hist[hist["OBJETO"] == objeto]
+    if metrica:
+        d = d[d["METRICA"] == metrica]
+    if corte:
+        d = d[d["FECHA_CORTE"].astype(str) == str(corte)]
+    return d.copy()
+
+
+# ==============================================================================
+# GRÁFICOS (equivalentes a los charts de la hoja Presentacion)
+# ==============================================================================
+def fig_serie_metricas(hist: pd.DataFrame) -> go.Figure:
+    """Métricas y Metas: Huella (miles Tn) e Intensidad por corte."""
+    d = _obj(hist, "Resumen_Bloques")
+    d = d[d["DIM_1"] == "TOTAL"]
+    h = d[d["METRICA"] == "Huella (miles Tn)"].groupby("FECHA_CORTE")["VALOR"].sum()
+    i = d[d["METRICA"] == "Intensidad-M"].groupby("FECHA_CORTE")["VALOR"].sum()
+    fig = go.Figure()
+    fig.add_bar(x=h.index, y=h.values, name="Huella (miles Tn CO2)",
+                marker_color=PALETA[0],
+                text=[f"{v:,.1f}" for v in h.values], textposition="outside")
+    fig.add_scatter(x=i.index, y=i.values, name="Intensidad (Tn CO2 / USD MM)",
+                    yaxis="y2", mode="lines+markers",
+                    line=dict(color=PALETA[3], width=3), marker=dict(size=9))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False))
+    return _apply(fig, "Métricas y Metas — evolución por corte")
+
+
+def fig_bloques_apilado(hist: pd.DataFrame, corte: str, metrica: str) -> go.Figure:
+    """Huella / Intensidad apilada por bloque de estrategia (BU, TD, ALT)."""
+    d = _obj(hist, "Resumen_Bloques", metrica, corte)
+    d = d[d["DIM_1"] != "TOTAL"]
+    fig = go.Figure()
+    for k, (_, r) in enumerate(d.iterrows()):
+        fig.add_bar(x=[corte], y=[r["VALOR"]], name=r["DIM_1"],
+                    marker_color=PALETA[k % len(PALETA)])
+    total = d["VALOR"].sum()
+    fig.update_layout(barmode="stack",
+                      annotations=[dict(x=corte, y=total, text=f"{total:,.0f}",
+                                        showarrow=False, yshift=12,
+                                        font=dict(size=13, color=COLOR_TEXTO))])
+    return _apply(fig, f"{metrica} por estrategia — {corte}")
+
+
+def fig_contribuyentes(hist: pd.DataFrame, corte: str, objeto: str,
+                       titulo: str, top_n: int = 15) -> go.Figure:
+    d = _obj(hist, objeto, "Huella", corte)
+    d = d.groupby("DIM_1")["VALOR"].sum().sort_values(ascending=True).tail(top_n)
+    fig = go.Figure(go.Bar(x=d.values, y=d.index, orientation="h",
+                           marker_color=PALETA[0],
+                           text=[f"{v:,.0f}" for v in d.values],
+                           textposition="outside"))
+    return _apply(fig, titulo, "")
+
+
+def fig_soberanos(hist: pd.DataFrame, corte: str) -> go.Figure:
+    h = _obj(hist, "Soberanos", "Huella", corte).groupby("DIM_1")["VALOR"].sum()
+    a = _obj(hist, "Soberanos", "Inv MM$", corte).groupby("DIM_1")["VALOR"].sum()
+    idx = h.sort_values(ascending=False).index
+    fig = go.Figure()
+    fig.add_bar(x=idx, y=h.reindex(idx).values, name="Huella (Tn CO2)",
+                marker_color=PALETA[0])
+    fig.add_scatter(x=idx, y=a.reindex(idx).values, name="AUM (USD MM)",
+                    yaxis="y2", mode="markers",
+                    marker=dict(size=12, color=PALETA[3], symbol="diamond"))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False))
+    return _apply(fig, f"Exposición soberana por emisor — {corte}")
+
+
+def fig_aum_composicion(hist: pd.DataFrame, corte: str) -> go.Figure:
+    d = _obj(hist, "AUM_por_Rank", "Inv MM$", corte).groupby("DIM_1")["VALOR"].sum()
+    d = d[d > 0].sort_values(ascending=False)
+    fig = go.Figure(go.Pie(labels=d.index, values=d.values, hole=0.45,
+                           marker=dict(colors=PALETA * 3),
+                           textinfo="label+percent"))
+    fig.update_layout(**LAYOUT_BASE, title=dict(
+        text=f"Composición del AUM por Rank_rt — {corte}", font=dict(size=16)))
+    return fig
+
+
+def fig_estrategia_plus1(hist: pd.DataFrame, corte: str) -> go.Figure:
+    d = _obj(hist, "Estrategia_x_Plus1", "Huella", corte)
+    piv = d.pivot_table(index="DIM_1", columns="DIM_2", values="VALOR",
+                        aggfunc="sum", fill_value=0)
+    fig = go.Figure()
+    for k, c in enumerate(piv.columns):
+        fig.add_bar(x=piv.index, y=piv[c].values, name=str(c),
+                    marker_color=PALETA[k % len(PALETA)])
+    fig.update_layout(barmode="stack")
+    tot = piv.sum(axis=1)
+    fig.update_layout(annotations=[
+        dict(x=i, y=v, text=f"{v:,.0f}", showarrow=False, yshift=12)
+        for i, v in tot.items()])
+    return _apply(fig, f"Huella por Estrategia × Plus_1 — {corte}")
+
+
+# ==============================================================================
+# ENSAMBLADO HTML CON SELECTORES DINÁMICOS
+# ==============================================================================
+CSS = """
+<style>
+ body{font-family:Segoe UI,Calibri,sans-serif;background:#F7F9FB;margin:0;color:#1F2933}
+ header{background:#0B3C5D;color:#fff;padding:18px 28px}
+ header h1{margin:0;font-size:20px;font-weight:600}
+ header p{margin:4px 0 0;font-size:12px;opacity:.8}
+ .controles{display:flex;gap:22px;flex-wrap:wrap;padding:16px 28px;background:#fff;
+   border-bottom:1px solid #E5EAF0;position:sticky;top:0;z-index:10}
+ .control{display:flex;flex-direction:column;gap:6px}
+ .control label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5A6B7B}
+ select{min-width:190px;padding:7px 10px;border:1px solid #CFD8E3;border-radius:6px;
+   background:#fff;font-family:inherit;font-size:13px}
+ select[multiple]{height:104px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));
+   gap:18px;padding:22px 28px}
+ .card{background:#fff;border:1px solid #E5EAF0;border-radius:10px;padding:10px;
+   box-shadow:0 1px 3px rgba(11,60,93,.06)}
+ .card.full{grid-column:1/-1}
+ .oculto{display:none}
+ footer{padding:14px 28px;font-size:11px;color:#8A99A8}
+</style>
+"""
+
+JS = """
+<script>
+function aplicarFiltros(){
+  const corte = document.getElementById('selCorte').value;
+  document.querySelectorAll('[data-corte]').forEach(el=>{
+    el.classList.toggle('oculto', el.dataset.corte !== corte && el.dataset.corte !== 'ALL');
+  });
+  const sel = document.getElementById('selBloques');
+  const activos = Array.from(sel.selectedOptions).map(o=>o.value);
+  document.querySelectorAll('[data-plotly]').forEach(div=>{
+    const gd = div.querySelector('.js-plotly-plot') || div;
+    if(!gd.data) return;
+    const vis = gd.data.map(t => activos.length===0 || activos.includes(t.name) ? true : 'legendonly');
+    Plotly.restyle(gd, {visible: vis});
+  });
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('selCorte').addEventListener('change', aplicarFiltros);
+  document.getElementById('selBloques').addEventListener('change', aplicarFiltros);
+  aplicarFiltros();
+});
+</script>
+"""
+
+
+def construir_dashboard(ruta_historico: str | Path = SALIDA_HISTORICO,
+                        ruta_salida: str | Path = SALIDA_DASHBOARD) -> Path:
+    hist = HistoricoExporter(str(ruta_historico)).cargar_historico()
+    if hist.empty:
+        raise ValueError("El histórico está vacío: ejecutar M11 primero.")
+    hist["FECHA_CORTE"] = hist["FECHA_CORTE"].astype(str)
+    cortes = sorted(hist["FECHA_CORTE"].unique(), reverse=True)
+    bloques = sorted(_obj(hist, "Resumen_Bloques")["DIM_1"].unique().tolist())
+    bloques = [b for b in bloques if b != "TOTAL"]
+
+    partes: list[str] = []
+    primero = True
+
+    def render(fig: go.Figure, corte: str = "ALL", full: bool = False) -> str:
+        nonlocal primero
+        html = pio.to_html(fig, include_plotlyjs=primero, full_html=False,
+                           config={"displayModeBar": False, "responsive": True})
+        primero = False
+        cls = "card full" if full else "card"
+        return f'<div class="{cls}" data-corte="{corte}" data-plotly>{html}</div>'
+
+    # Serie temporal (transversal a todos los cortes)
+    partes.append(render(fig_serie_metricas(hist), "ALL", full=True))
+
+    # Bloques por corte
+    for c in cortes:
+        partes.append(render(fig_bloques_apilado(hist, c, "Huella"), c))
+        partes.append(render(fig_bloques_apilado(hist, c, "Intensidad-M"), c))
+        partes.append(render(fig_aum_composicion(hist, c), c))
+        partes.append(render(fig_estrategia_plus1(hist, c), c))
+        partes.append(render(fig_soberanos(hist, c), c, full=True))
+        partes.append(render(fig_contribuyentes(
+            hist, c, "Contrib_BU_TD", f"Mayores contribuyentes BU + TD — {c}"), c))
+        partes.append(render(fig_contribuyentes(
+            hist, c, "Contrib_General", f"Mayores contribuyentes (general) — {c}"), c))
+
+    opciones_corte = "".join(f'<option value="{c}">{c}</option>' for c in cortes)
+    opciones_bloque = "".join(f'<option value="{b}" selected>{b}</option>' for b in bloques)
+
+    html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Huella de Carbono — Dashboard</title>{CSS}</head><body>
+<header>
+  <h1>Huella de Carbono e Intensidad — Portafolio de Inversiones</h1>
+  <p>AFP Integra · Multifondos 1, 2 y 3 · generado automáticamente desde el pipeline Python</p>
+</header>
+<div class="controles">
+  <div class="control"><label>Fecha de corte</label>
+    <select id="selCorte">{opciones_corte}</select></div>
+  <div class="control"><label>Bloques / series (selección múltiple)</label>
+    <select id="selBloques" multiple>{opciones_bloque}</select></div>
+</div>
+<div class="grid">{''.join(partes)}</div>
+<footer>Fuente: Tabla de Valorización de Instrumentos (BD Huella con Proxies).
+Reemplaza íntegramente la hoja «Presentacion».</footer>
+{JS}</body></html>"""
+
+    ruta = Path(ruta_salida)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(html, encoding="utf-8")
+    print(f"[M14] Dashboard -> {ruta}")
+    return ruta
+
+
+# ==============================================================================
+# EJECUCIÓN COMPLETA: M11 (objetos + histórico) -> M14 (dashboard)
+# ==============================================================================
+def run_all(ruta_workbook=ARCHIVO_WORKBOOK,
+            ruta_historico=SALIDA_HISTORICO,
+            ruta_dashboard=SALIDA_DASHBOARD,
+            fecha_corte=None):
+    objetos, historico = run_m11(fecha_corte=fecha_corte,
+                                 ruta_workbook=ruta_workbook,
+                                 ruta_historico=ruta_historico)
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    return objetos, historico
+
+
+if __name__ == "__main__":
+    run_all()
