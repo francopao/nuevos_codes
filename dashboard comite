@@ -1,0 +1,264 @@
+# ==============================================================================
+# M14 — DASHBOARD INTERACTIVO (reemplaza los charts de la hoja "Presentacion")
+# Insumo: histórico largo generado por M11 (Huella_Historico.xlsx, hoja HISTORICO)
+# Salida: Z:\...\Python\Output\Dashboard_Huella.html  (autocontenido, Plotly embebido)
+# ==============================================================================
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.io as pio
+
+from m11_presentacion import (
+    RUTA_OUTPUT, SALIDA_HISTORICO, SALIDA_DASHBOARD, HistoricoExporter,
+)
+
+# ------------------------------------------------------------------------------
+# PALETA CORPORATIVA AFP INTEGRA
+# ------------------------------------------------------------------------------
+PALETA = ["#3494BA", "#00AECB", "#ACD7CA", "#516FED", "#0B3C5D",
+          "#7FC8DE", "#C9E4DA", "#8A9BF0", "#1B6E8C", "#5FBFD4"]
+COLOR_TEXTO = "#1F2933"
+COLOR_GRID = "#E5EAF0"
+FUENTE = "Segoe UI, Calibri, sans-serif"
+
+LAYOUT_BASE = dict(
+    font=dict(family=FUENTE, size=12, color=COLOR_TEXTO),
+    plot_bgcolor="white",
+    paper_bgcolor="white",
+    margin=dict(l=50, r=30, t=60, b=60),
+    legend=dict(orientation="h", yanchor="bottom", y=-0.25, x=0),
+    hoverlabel=dict(font_family=FUENTE),
+)
+
+
+def _apply(fig: go.Figure, titulo: str, y_titulo: str = "") -> go.Figure:
+    fig.update_layout(title=dict(text=titulo, font=dict(size=16)), **LAYOUT_BASE)
+    fig.update_yaxes(showgrid=False, zeroline=False, title=y_titulo,
+                     showline=True, linecolor=COLOR_GRID)
+    fig.update_xaxes(showgrid=False, zeroline=False, showline=True, linecolor=COLOR_GRID)
+    return fig
+
+
+# ==============================================================================
+# PIVOTEO DEL HISTÓRICO LARGO
+# ==============================================================================
+def _obj(hist: pd.DataFrame, objeto: str, metrica: str | None = None,
+         corte: str | None = None) -> pd.DataFrame:
+    d = hist[hist["OBJETO"] == objeto]
+    if metrica:
+        d = d[d["METRICA"] == metrica]
+    if corte:
+        d = d[d["FECHA_CORTE"].astype(str) == str(corte)]
+    return d.copy()
+
+
+# ==============================================================================
+# GRÁFICOS (equivalentes a los charts de la hoja Presentacion)
+# ==============================================================================
+def fig_serie_metricas(hist: pd.DataFrame) -> go.Figure:
+    """Métricas y Metas: Huella (miles Tn) e Intensidad por corte."""
+    d = _obj(hist, "Resumen_Bloques")
+    d = d[d["DIM_1"] == "TOTAL"]
+    h = d[d["METRICA"] == "Huella (miles Tn)"].groupby("FECHA_CORTE")["VALOR"].sum()
+    i = d[d["METRICA"] == "Intensidad-M"].groupby("FECHA_CORTE")["VALOR"].sum()
+    fig = go.Figure()
+    fig.add_bar(x=h.index, y=h.values, name="Huella (miles Tn CO2)",
+                marker_color=PALETA[0],
+                text=[f"{v:,.1f}" for v in h.values], textposition="outside")
+    fig.add_scatter(x=i.index, y=i.values, name="Intensidad (Tn CO2 / USD MM)",
+                    yaxis="y2", mode="lines+markers",
+                    line=dict(color=PALETA[3], width=3), marker=dict(size=9))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False))
+    return _apply(fig, "Métricas y Metas — evolución por corte")
+
+
+def fig_bloques_apilado(hist: pd.DataFrame, corte: str, metrica: str) -> go.Figure:
+    """Huella / Intensidad apilada por bloque de estrategia (BU, TD, ALT)."""
+    d = _obj(hist, "Resumen_Bloques", metrica, corte)
+    d = d[d["DIM_1"] != "TOTAL"]
+    fig = go.Figure()
+    for k, (_, r) in enumerate(d.iterrows()):
+        fig.add_bar(x=[corte], y=[r["VALOR"]], name=r["DIM_1"],
+                    marker_color=PALETA[k % len(PALETA)])
+    total = d["VALOR"].sum()
+    fig.update_layout(barmode="stack",
+                      annotations=[dict(x=corte, y=total, text=f"{total:,.0f}",
+                                        showarrow=False, yshift=12,
+                                        font=dict(size=13, color=COLOR_TEXTO))])
+    return _apply(fig, f"{metrica} por estrategia — {corte}")
+
+
+def fig_contribuyentes(hist: pd.DataFrame, corte: str, objeto: str,
+                       titulo: str, top_n: int = 15) -> go.Figure:
+    d = _obj(hist, objeto, "Huella", corte)
+    d = d.groupby("DIM_1")["VALOR"].sum().sort_values(ascending=True).tail(top_n)
+    fig = go.Figure(go.Bar(x=d.values, y=d.index, orientation="h",
+                           marker_color=PALETA[0],
+                           text=[f"{v:,.0f}" for v in d.values],
+                           textposition="outside"))
+    return _apply(fig, titulo, "")
+
+
+def fig_soberanos(hist: pd.DataFrame, corte: str) -> go.Figure:
+    h = _obj(hist, "Soberanos", "Huella", corte).groupby("DIM_1")["VALOR"].sum()
+    a = _obj(hist, "Soberanos", "Inv MM$", corte).groupby("DIM_1")["VALOR"].sum()
+    idx = h.sort_values(ascending=False).index
+    fig = go.Figure()
+    fig.add_bar(x=idx, y=h.reindex(idx).values, name="Huella (Tn CO2)",
+                marker_color=PALETA[0])
+    fig.add_scatter(x=idx, y=a.reindex(idx).values, name="AUM (USD MM)",
+                    yaxis="y2", mode="markers",
+                    marker=dict(size=12, color=PALETA[3], symbol="diamond"))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False))
+    return _apply(fig, f"Exposición soberana por emisor — {corte}")
+
+
+def fig_aum_composicion(hist: pd.DataFrame, corte: str) -> go.Figure:
+    d = _obj(hist, "AUM_por_Rank", "Inv MM$", corte).groupby("DIM_1")["VALOR"].sum()
+    d = d[d > 0].sort_values(ascending=False)
+    fig = go.Figure(go.Pie(labels=d.index, values=d.values, hole=0.45,
+                           marker=dict(colors=PALETA * 3),
+                           textinfo="label+percent"))
+    fig.update_layout(**LAYOUT_BASE, title=dict(
+        text=f"Composición del AUM por Rank_rt — {corte}", font=dict(size=16)))
+    return fig
+
+
+def fig_estrategia_plus1(hist: pd.DataFrame, corte: str) -> go.Figure:
+    d = _obj(hist, "Estrategia_x_Plus1", "Huella", corte)
+    piv = d.pivot_table(index="DIM_1", columns="DIM_2", values="VALOR",
+                        aggfunc="sum", fill_value=0)
+    fig = go.Figure()
+    for k, c in enumerate(piv.columns):
+        fig.add_bar(x=piv.index, y=piv[c].values, name=str(c),
+                    marker_color=PALETA[k % len(PALETA)])
+    fig.update_layout(barmode="stack")
+    tot = piv.sum(axis=1)
+    fig.update_layout(annotations=[
+        dict(x=i, y=v, text=f"{v:,.0f}", showarrow=False, yshift=12)
+        for i, v in tot.items()])
+    return _apply(fig, f"Huella por Estrategia × Plus_1 — {corte}")
+
+
+# ==============================================================================
+# ENSAMBLADO HTML CON SELECTORES DINÁMICOS
+# ==============================================================================
+CSS = """
+<style>
+ body{font-family:Segoe UI,Calibri,sans-serif;background:#F7F9FB;margin:0;color:#1F2933}
+ header{background:#0B3C5D;color:#fff;padding:18px 28px}
+ header h1{margin:0;font-size:20px;font-weight:600}
+ header p{margin:4px 0 0;font-size:12px;opacity:.8}
+ .controles{display:flex;gap:22px;flex-wrap:wrap;padding:16px 28px;background:#fff;
+   border-bottom:1px solid #E5EAF0;position:sticky;top:0;z-index:10}
+ .control{display:flex;flex-direction:column;gap:6px}
+ .control label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#5A6B7B}
+ select{min-width:190px;padding:7px 10px;border:1px solid #CFD8E3;border-radius:6px;
+   background:#fff;font-family:inherit;font-size:13px}
+ select[multiple]{height:104px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));
+   gap:18px;padding:22px 28px}
+ .card{background:#fff;border:1px solid #E5EAF0;border-radius:10px;padding:10px;
+   box-shadow:0 1px 3px rgba(11,60,93,.06)}
+ .card.full{grid-column:1/-1}
+ .oculto{display:none}
+ footer{padding:14px 28px;font-size:11px;color:#8A99A8}
+</style>
+"""
+
+JS = """
+<script>
+function aplicarFiltros(){
+  const corte = document.getElementById('selCorte').value;
+  document.querySelectorAll('[data-corte]').forEach(el=>{
+    el.classList.toggle('oculto', el.dataset.corte !== corte && el.dataset.corte !== 'ALL');
+  });
+  const sel = document.getElementById('selBloques');
+  const activos = Array.from(sel.selectedOptions).map(o=>o.value);
+  document.querySelectorAll('[data-plotly]').forEach(div=>{
+    const gd = div.querySelector('.js-plotly-plot') || div;
+    if(!gd.data) return;
+    const vis = gd.data.map(t => activos.length===0 || activos.includes(t.name) ? true : 'legendonly');
+    Plotly.restyle(gd, {visible: vis});
+  });
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('selCorte').addEventListener('change', aplicarFiltros);
+  document.getElementById('selBloques').addEventListener('change', aplicarFiltros);
+  aplicarFiltros();
+});
+</script>
+"""
+
+
+def construir_dashboard(ruta_historico: str | Path = SALIDA_HISTORICO,
+                        ruta_salida: str | Path = SALIDA_DASHBOARD) -> Path:
+    hist = HistoricoExporter(str(ruta_historico)).cargar_historico()
+    if hist.empty:
+        raise ValueError("El histórico está vacío: ejecutar M11 primero.")
+    hist["FECHA_CORTE"] = hist["FECHA_CORTE"].astype(str)
+    cortes = sorted(hist["FECHA_CORTE"].unique(), reverse=True)
+    bloques = sorted(_obj(hist, "Resumen_Bloques")["DIM_1"].unique().tolist())
+    bloques = [b for b in bloques if b != "TOTAL"]
+
+    partes: list[str] = []
+    primero = True
+
+    def render(fig: go.Figure, corte: str = "ALL", full: bool = False) -> str:
+        nonlocal primero
+        html = pio.to_html(fig, include_plotlyjs=primero, full_html=False,
+                           config={"displayModeBar": False, "responsive": True})
+        primero = False
+        cls = "card full" if full else "card"
+        return f'<div class="{cls}" data-corte="{corte}" data-plotly>{html}</div>'
+
+    # Serie temporal (transversal a todos los cortes)
+    partes.append(render(fig_serie_metricas(hist), "ALL", full=True))
+
+    # Bloques por corte
+    for c in cortes:
+        partes.append(render(fig_bloques_apilado(hist, c, "Huella"), c))
+        partes.append(render(fig_bloques_apilado(hist, c, "Intensidad-M"), c))
+        partes.append(render(fig_aum_composicion(hist, c), c))
+        partes.append(render(fig_estrategia_plus1(hist, c), c))
+        partes.append(render(fig_soberanos(hist, c), c, full=True))
+        partes.append(render(fig_contribuyentes(
+            hist, c, "Contrib_BU_TD", f"Mayores contribuyentes BU + TD — {c}"), c))
+        partes.append(render(fig_contribuyentes(
+            hist, c, "Contrib_General", f"Mayores contribuyentes (general) — {c}"), c))
+
+    opciones_corte = "".join(f'<option value="{c}">{c}</option>' for c in cortes)
+    opciones_bloque = "".join(f'<option value="{b}" selected>{b}</option>' for b in bloques)
+
+    html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Huella de Carbono — Dashboard</title>{CSS}</head><body>
+<header>
+  <h1>Huella de Carbono e Intensidad — Portafolio de Inversiones</h1>
+  <p>AFP Integra · Multifondos 1, 2 y 3 · generado automáticamente desde el pipeline Python</p>
+</header>
+<div class="controles">
+  <div class="control"><label>Fecha de corte</label>
+    <select id="selCorte">{opciones_corte}</select></div>
+  <div class="control"><label>Bloques / series (selección múltiple)</label>
+    <select id="selBloques" multiple>{opciones_bloque}</select></div>
+</div>
+<div class="grid">{''.join(partes)}</div>
+<footer>Fuente: Tabla de Valorización de Instrumentos (BD Huella con Proxies).
+Reemplaza íntegramente la hoja «Presentacion».</footer>
+{JS}</body></html>"""
+
+    ruta = Path(ruta_salida)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(html, encoding="utf-8")
+    print(f"[M14] Dashboard -> {ruta}")
+    return ruta
+
+
+if __name__ == "__main__":
+    construir_dashboard()
