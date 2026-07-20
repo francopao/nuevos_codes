@@ -1,0 +1,262 @@
+# -*- coding: utf-8 -*-
+"""
+Extraccion automatizada del Directorio (Junta Directiva) de empresas
+desde el portal SMV (Bp_Directorio).
+
+Flujo por empresa:
+    1. Abre la URL de memorias del SMV (misma ficha de busqueda de emisor).
+    2. Escribe el nombre de la empresa en el buscador y dispara la busqueda.
+    3. En la ficha del emisor, hace click en el boton "Directorio"
+       (id = btnDirectorio) en vez de "Memoria".
+    4. Espera la tabla de directorio (id = MainContent_gvdirectorio).
+    5. Extrae cada fila: Nombre del Personal, Nacionalidad, Documento de
+       Identidad, Cargo, Fecha de Inicio, Independiente.
+    6. Consolida todas las empresas en un unico CSV/Excel guardado en la
+       misma carpeta base del codigo de referencia (RUTA_BASE).
+
+Restricciones de diseno:
+    - No usa xlwings ni win32com (cuelgan el kernel).
+    - Es un archivo completo, ejecutable por celdas (# %%) en Spyder.
+    - Comentarios en espaniol.
+
+Dependencias (env fran36):
+    pip install selenium openpyxl
+    # Selenium >= 4.6 auto-gestiona el chromedriver (Selenium Manager).
+"""
+
+# %% ===========================  IMPORTS  ====================================
+import os
+import re
+import csv
+import unicodedata
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, StaleElementReferenceException,
+)
+
+
+# %% ===========================  PARAMETROS  =================================
+
+URL_SMV = "https://www.smv.gob.pe/SIMV/Bp_Memorias?op=bq12"
+
+# Ruta base donde se guarda el consolidado. Debe coincidir con la carpeta del
+# codigo de referencia (Descargar_Memoria_SMV.py). Ajustar si cambia la maquina.
+RUTA_BASE = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\39. Dashboard - Gobierno Corporativo\Python"
+
+NOMBRE_ARCHIVO_SALIDA = "Directorio_Consolidado.csv"
+
+# Ejecutar el navegador visible (False) o sin ventana (True).
+HEADLESS = False
+
+# Lista de empresas. El segundo valor es el nombre con el que se guarda en el
+# consolidado (util para FOSSAL -> HOCHSCHILD MINING PERU).
+EMPRESAS = [
+    ("COMPAÑIA DE MINAS BUENAVENTURA S.A.A.", "COMPAÑIA DE MINAS BUENAVENTURA S.A.A."),
+    ("MINSUR S.A.", "MINSUR S.A."),
+    ("VOLCAN COMPAÑIA MINERA S.A.A.", "VOLCAN COMPAÑIA MINERA S.A.A."),
+    ("NEXA RESOURCES PERU S.A.A.", "NEXA RESOURCES PERU S.A.A."),
+    ("ORYGEN PERU S.A.A.", "ORYGEN PERU S.A.A."),
+    ("PLUZ ENERGIA PERU S.A.A.", "PLUZ ENERGIA PERU S.A.A."),
+    ("ENGIE ENERGIA PERU S.A.A.", "ENGIE ENERGIA PERU S.A.A."),
+    ("FERREYCORP S.A.A.", "FERREYCORP S.A.A."),
+    ("AENZA S.A.A.", "AENZA S.A.A."),
+    ("UNACEM CORP SOCIEDAD ANONIMA ABIERTA - UNACEM CORP S.A.A.", "UNACEM CORP S.A.A."),
+    ("CEMENTOS PACASMAYO S.A.A.", "CEMENTOS PACASMAYO S.A.A."),
+    ("INRETAIL PERU CORP.", "INRETAIL PERU CORP"),
+    ("ALICORP S.A.A.", "ALICORP S.A.A."),
+    ("CREDICORP LTD.", "CREDICORP LTD"),
+    ("INTERCORP FINANCIAL SERVICES INC.", "INTERCORP FINANCIAL SERVICES INC"),
+    ("BANCO BBVA PERU", "BANCO BBVA PERU"),
+    ("EMPRESA EDITORA EL COMERCIO S.A.", "EMPRESA EDITORA EL COMERCIO S.A."),
+    ("FOSSAL S.A.A.", "HOCHSCHILD MINING PERU"),   # se busca FOSSAL, se guarda con otro nombre
+]
+
+# Timeouts (segundos)
+TIMEOUT_BUSQUEDA = 25     # espera a que cargue la tabla tras buscar/click
+
+
+# %% ======================  UTILIDADES DE TEXTO  ============================
+
+def _norm(texto):
+    """Normaliza texto: mayusculas, sin tildes, sin espacios redundantes."""
+    if texto is None:
+        return ""
+    t = unicodedata.normalize("NFKD", str(texto))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+# %% ======================  CONFIGURACION DEL DRIVER  ======================
+
+def iniciar_driver():
+    """Crea un Chrome WebDriver (Selenium Manager gestiona el chromedriver)."""
+    options = webdriver.ChromeOptions()
+    if HEADLESS:
+        options.add_argument("--headless=new")
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+    driver = webdriver.Chrome(options=options)
+    return driver
+
+
+# %% ======================  BUSQUEDA DE EMPRESA  ===========================
+
+def buscar_empresa_y_abrir_directorio(driver, wait, nombre):
+    """Flujo de navegacion del SMV:
+        1. Abre la pagina.
+        2. Escribe la razon social en el buscador de emisor (txtSearch).
+        3. Click en 'Buscar Empresa' (ibtnB -> buscar1()).
+        4. Espera la pagina del emisor y hace click en el boton 'Directorio'
+           (btnDirectorio) en vez de 'Memoria'.
+        5. Espera la grilla de directorio con datos.
+    Devuelve True si la tabla de resultados quedo presente con datos.
+    """
+    driver.get(URL_SMV)
+
+    # 1) Input de busqueda de emisor (txtSearch).
+    campo = wait.until(EC.presence_of_element_located((By.ID, "txtSearch")))
+    driver.execute_script("arguments[0].value = arguments[1];", campo, nombre)
+
+    # 2) Click en el boton-imagen 'Buscar Empresa' (ibtnB -> buscar1()).
+    boton = wait.until(EC.element_to_be_clickable((By.ID, "ibtnB")))
+    driver.execute_script("arguments[0].click();", boton)
+
+    # 3) Esperar a que cargue la ficha del emisor y aparezca el boton Directorio.
+    try:
+        btn_dir = WebDriverWait(driver, TIMEOUT_BUSQUEDA).until(
+            EC.element_to_be_clickable((By.ID, "btnDirectorio")))
+    except TimeoutException:
+        return False  # no se encontro la empresa / no cargo la ficha del emisor
+
+    # 4) Ir a la seccion 'Directorio'.
+    driver.execute_script("arguments[0].click();", btn_dir)
+
+    # 5) Esperar a que la grilla de directorio cargue con datos.
+    try:
+        WebDriverWait(driver, TIMEOUT_BUSQUEDA).until(_grilla_tiene_datos)
+        return True
+    except TimeoutException:
+        return False
+
+
+def _grilla_tiene_datos(driver):
+    """True si la tabla gvdirectorio existe y tiene al menos una fila con
+    celdas de datos (descarta la cabecera)."""
+    try:
+        tabla = driver.find_element(By.ID, "MainContent_gvdirectorio")
+    except NoSuchElementException:
+        return False
+    filas = tabla.find_elements(By.XPATH, ".//tr")
+    for f in filas:
+        celdas = f.find_elements(By.XPATH, "./td")
+        if len(celdas) >= 6:
+            return True
+    return False
+
+
+# %% ======================  LECTURA DE LA TABLA  ===========================
+
+def leer_directorio(driver, nombre_empresa):
+    """Lee la grilla MainContent_gvdirectorio y devuelve una lista de dicts
+    con los datos de cada integrante del directorio."""
+    integrantes = []
+    try:
+        tabla = driver.find_element(By.ID, "MainContent_gvdirectorio")
+        filas = tabla.find_elements(By.XPATH, ".//tr")
+    except (NoSuchElementException, StaleElementReferenceException):
+        return integrantes
+
+    for fila in filas:
+        try:
+            celdas = fila.find_elements(By.XPATH, "./td")
+            if len(celdas) < 6:
+                continue  # fila de cabecera
+
+            integrantes.append({
+                "Empresa": nombre_empresa,
+                "Nombre del Personal": _norm(celdas[0].text),
+                "Nacionalidad": _norm(celdas[1].text),
+                "Documento de Identidad": _norm(celdas[2].text),
+                "Cargo": _norm(celdas[3].text),
+                "Fecha de Inicio": _norm(celdas[4].text),
+                "Independiente": _norm(celdas[5].text),
+            })
+        except StaleElementReferenceException:
+            continue
+
+    return integrantes
+
+
+# %% ======================  PROCESO POR EMPRESA  ===========================
+
+def procesar_empresa(driver, nombre_busqueda, nombre_guardado):
+    """Ejecuta el flujo completo para una empresa. Devuelve la lista de
+    integrantes del directorio (puede ser vacia)."""
+    print(f"\n=== {nombre_guardado}  (buscando: '{nombre_busqueda}') ===")
+    wait = WebDriverWait(driver, TIMEOUT_BUSQUEDA)
+
+    if not buscar_empresa_y_abrir_directorio(driver, wait, nombre_busqueda):
+        print("   [!] La busqueda no devolvio resultados (revisar nombre o modal).")
+        return []
+
+    integrantes = leer_directorio(driver, nombre_guardado)
+    print(f"   Integrantes del directorio extraidos: {len(integrantes)}")
+    return integrantes
+
+
+# %% ======================  GUARDADO DE RESULTADOS  =========================
+
+def guardar_csv(registros, ruta_salida):
+    """Guarda la lista consolidada de registros en un CSV (utf-8-sig para
+    que Excel muestre bien las tildes/eñes)."""
+    if not registros:
+        print("   [!] No hay registros para guardar.")
+        return
+    columnas = ["Empresa", "Nombre del Personal", "Nacionalidad",
+                "Documento de Identidad", "Cargo", "Fecha de Inicio",
+                "Independiente"]
+    with open(ruta_salida, "w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=columnas)
+        writer.writeheader()
+        writer.writerows(registros)
+
+
+# %% ======================  EJECUCION PRINCIPAL  ===========================
+
+def main():
+    os.makedirs(RUTA_BASE, exist_ok=True)
+    driver = iniciar_driver()
+    todos_los_registros = []
+    try:
+        for nombre_busqueda, nombre_guardado in EMPRESAS:
+            try:
+                todos_los_registros.extend(
+                    procesar_empresa(driver, nombre_busqueda, nombre_guardado))
+            except Exception as e:
+                print(f"   [!!] Fallo general en {nombre_guardado}: {e}")
+    finally:
+        driver.quit()
+
+    ruta_salida = os.path.join(RUTA_BASE, NOMBRE_ARCHIVO_SALIDA)
+    guardar_csv(todos_los_registros, ruta_salida)
+
+    print("\n" + "=" * 70)
+    print("RESUMEN")
+    print("=" * 70)
+    print(f"Total de registros extraidos: {len(todos_los_registros)}")
+    print(f"Archivo consolidado: {ruta_salida}")
+    print(f"Fecha de ejecucion: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+
+# %% ======================  PUNTO DE ENTRADA  ==============================
+if __name__ == "__main__":
+    main()
