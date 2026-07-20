@@ -1,0 +1,1235 @@
+# -*- coding: utf-8 -*-
+"""
+juntas_reporte.py - Genera el dashboard HTML interactivo y el reporte Word
+                    de Juntas de Accionistas a partir de BD_Juntas_Accionistas.xlsx
+
+AFP Integra - Mesa de Inversiones / Bottom-Up
+Entorno: fran36 (Anaconda). I/O exclusivamente con openpyxl.
+
+Toda la parametria (empresas, temas, decisiones, motivos, especialidades, sectores,
+colores, textos del wording) vive en el Excel. Este archivo no contiene nada
+que el usuario deba editar para operar el proceso.
+
+Uso:
+    python juntas_reporte.py
+    python juntas_reporte.py --anio 2026
+    python juntas_reporte.py --anio 2026 --trimestre T1 --solo-dashboard
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import io
+import json
+import os
+import sys
+from collections import Counter, OrderedDict, defaultdict
+from datetime import datetime, date
+
+import openpyxl
+
+# ============================================================================
+# CONFIG - unica seccion con rutas. Todo lo demas sale del Excel.
+# ============================================================================
+RUTA_BD = r"Z:\Mesa de Inversiones\Bottom-Up\0 Juntas de Accionistas\BD_Juntas_Accionistas.xlsx"
+CARPETA_SALIDA = r"Z:\Mesa de Inversiones\Bottom-Up\0 Juntas de Accionistas\Dashboard Python\Salidas"
+RUTA_LOGO = r"Z:\Mesa de Inversiones\Bottom-Up\0 Juntas de Accionistas\Dashboard Python\Inputs\logo_integra.png"
+
+# fallback para pruebas locales
+if not os.path.exists(RUTA_BD):
+    RUTA_BD = "BD_Juntas_Accionistas.xlsx"
+    CARPETA_SALIDA = "."
+    RUTA_LOGO = "logo_integra.png"
+
+
+# ============================================================================
+# 1. LECTURA DEL EXCEL
+# ============================================================================
+def _filas(ws, fila_encabezado, columnas):
+    """Devuelve lista de dicts leyendo un bloque de columnas contiguo.
+    Corta en la primera fila donde la primera columna esta vacia."""
+    salida = []
+    col_ini = columnas[0]
+    for i in range(fila_encabezado + 1, ws.max_row + 1):
+        primero = ws.cell(i, col_ini).value
+        if primero is None or str(primero).strip() == "":
+            if i > fila_encabezado + 1:
+                break
+            continue
+        salida.append({j: ws.cell(i, j).value for j in columnas})
+    return salida
+
+
+def _txt(v):
+    return "" if v is None else str(v).strip()
+
+
+def cargar_bd(ruta=RUTA_BD):
+    """Lee las 4 hojas del Excel y devuelve (registros, param)."""
+    if not os.path.exists(ruta):
+        sys.exit(f"[ERROR] No se encuentra la base de datos:\n  {ruta}")
+
+    wb = openpyxl.load_workbook(ruta, data_only=True, read_only=False)
+    for hoja in ("Registro", "Parametria", "Catalogos", "Textos"):
+        if hoja not in wb.sheetnames:
+            sys.exit(f"[ERROR] Falta la hoja '{hoja}' en {os.path.basename(ruta)}")
+
+    # ---- Parametria: empresas
+    pa = wb["Parametria"]
+    empresas = {}
+    for f in _filas(pa, 3, list(range(1, 9))):
+        empresas[_txt(f[1])] = {
+            "abrev": _txt(f[2]), "sector": _txt(f[3]), "ticker": _txt(f[4]),
+            "isin": _txt(f[5]), "cod_sbs": _txt(f[6]), "activo": _txt(f[7]).upper() == "SI",
+        }
+
+    # ---- Catalogos
+    ct = wb["Catalogos"]
+    temas = OrderedDict()
+    for f in _filas(ct, 3, [1, 2, 3]):
+        temas[_txt(f[1])] = {"cod_sbs": _txt(f[2]), "orden": f[3] or 999}
+
+    decisiones = OrderedDict()
+    for f in _filas(ct, 3, [5, 6, 7]):
+        decisiones[_txt(f[5])] = {
+            "cuenta": _txt(f[6]).upper() == "SI",
+            "color": "#" + _txt(f[7]).lstrip("#"),
+        }
+
+    tipos = OrderedDict()
+    for f in _filas(ct, 3, [9, 10, 11]):
+        tipos[_txt(f[9])] = {"etiqueta": _txt(f[10]), "orden": f[11] or 999}
+
+    motivos = OrderedDict()
+    for f in _filas(ct, 3, [13, 14]):
+        motivos[_txt(f[13])] = _txt(f[14])
+
+    especialidades = OrderedDict()
+    for f in _filas(ct, 3, [18, 19]):
+        especialidades[_txt(f[18])] = f[19] or 999
+
+    sectores = OrderedDict()
+    for f in _filas(ct, 3, [21, 22, 23]):
+        sectores[_txt(f[21])] = {"color": "#" + _txt(f[22]).lstrip("#"), "orden": f[23] or 999}
+
+    responsables = {}
+    for f in _filas(ct, 3, [25, 26, 27]):
+        responsables[_txt(f[25])] = {"doi": _txt(f[26]), "tipo": _txt(f[27])}
+
+    # ---- Config (bloque clave/valor a partir de la fila 25, columnas A/B)
+    config = {}
+    for i in range(25, 35):
+        k = _txt(ct.cell(i, 1).value)
+        if k and k == k.replace(" ", "_") or k.startswith(("Color", "Nombre", "Titulo", "Pie", "Min")):
+            config[k] = _txt(ct.cell(i, 2).value)
+
+    # ---- Textos
+    tx = wb["Textos"]
+    textos = {}
+    for f in _filas(tx, 3, [1, 2]):
+        textos[_txt(f[1])] = _txt(f[2])
+
+    # ---- Registro
+    rg = wb["Registro"]
+    COLS = ["empresa", "tipo_junta", "fecha", "punto", "texto_agenda", "tema", "decision",
+            "motivo", "justificacion", "director", "independencia", "esp1", "esp2",
+            "firma_auditora", "pct_aprob", "responsable", "comentario",
+            "junta_id", "punto_uid", "sector", "anio", "trimestre", "es_director",
+            "origen", "cargado_el", "estado", "editado"]
+    registros = []
+    for i in range(2, rg.max_row + 1):
+        if not _txt(rg.cell(i, 1).value):
+            continue
+        r = {c: rg.cell(i, j + 1).value for j, c in enumerate(COLS)}
+        for c in COLS:
+            if c not in ("fecha", "pct_aprob", "anio"):
+                r[c] = _txt(r[c])
+        # fallback si el Excel no trae las formulas calculadas (openpyxl sin recalcular)
+        # tolera fechas escritas como texto
+        if isinstance(r["fecha"], str) and r["fecha"]:
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    r["fecha"] = datetime.strptime(r["fecha"][:19], fmt)
+                    break
+                except ValueError:
+                    continue
+        if not r["junta_id"]:
+            emp = empresas.get(r["empresa"], {})
+            fch = r["fecha"]
+            if isinstance(fch, (datetime, date)):
+                r["junta_id"] = f"{emp.get('abrev','?')}|{fch:%Y%m%d}|{r['tipo_junta']}"
+        if not r["sector"]:
+            r["sector"] = empresas.get(r["empresa"], {}).get("sector", "SIN SECTOR")
+        if not r["anio"] and isinstance(r["fecha"], (datetime, date)):
+            r["anio"] = r["fecha"].year
+        if not r["trimestre"] and isinstance(r["fecha"], (datetime, date)):
+            r["trimestre"] = f"T{(r['fecha'].month - 1) // 3 + 1}"
+        if not r["es_director"]:
+            r["es_director"] = "SI" if r["director"] else "NO"
+        r["_fila"] = i
+        registros.append(r)
+
+    wb.close()
+
+    param = {"empresas": empresas, "temas": temas, "decisiones": decisiones,
+             "tipos": tipos, "motivos": motivos, "especialidades": especialidades,
+             "sectores": sectores, "responsables": responsables,
+             "config": config, "textos": textos}
+    return registros, param
+
+
+# ============================================================================
+# 2. VALIDACION - falla ruidosamente, nunca en silencio
+# ============================================================================
+def validar(registros, param):
+    errores, avisos = [], []
+    temas, decis, emps = param["temas"], param["decisiones"], param["empresas"]
+
+    for r in registros:
+        f = r["_fila"]
+        if not r["tema"]:
+            errores.append(f"Fila {f}: sin Tema ({r['empresa']} {r['punto']})")
+        elif r["tema"] not in temas:
+            errores.append(f"Fila {f}: Tema '{r['tema']}' no esta en Catalogos")
+        if not r["decision"]:
+            errores.append(f"Fila {f}: sin Decision ({r['empresa']} {r['punto']})")
+        elif r["decision"] not in decis:
+            errores.append(f"Fila {f}: Decision '{r['decision']}' no esta en Catalogos")
+        if r["empresa"] not in emps:
+            errores.append(f"Fila {f}: Empresa '{r['empresa']}' no esta en Parametria")
+        if not isinstance(r["fecha"], (datetime, date)):
+            errores.append(f"Fila {f}: Fecha invalida ({r['fecha']!r})")
+        if r["decision"] == "En Contra" and not r["motivo"]:
+            avisos.append(f"Fila {f}: voto En Contra sin Motivo")
+        if r["director"] and not r["independencia"]:
+            avisos.append(f"Fila {f}: director sin Independencia")
+        if r["director"] and not r["esp1"]:
+            avisos.append(f"Fila {f}: director sin Especialidad")
+
+    if avisos:
+        print(f"\n[AVISOS] {len(avisos)}")
+        for a in avisos[:20]:
+            print("  -", a)
+        if len(avisos) > 20:
+            print(f"  ... y {len(avisos)-20} mas")
+    if errores:
+        print(f"\n[ERRORES] {len(errores)} - el proceso se detiene")
+        for e in errores[:30]:
+            print("  -", e)
+        if len(errores) > 30:
+            print(f"  ... y {len(errores)-30} mas")
+        sys.exit(1)
+    print(f"[OK] Validacion: {len(registros)} filas, sin errores bloqueantes.")
+
+
+# ============================================================================
+# 3. AGREGACIONES - una funcion por chart del reporte
+# ============================================================================
+def _computables(registros, param):
+    """Filas que suman a los conteos (excluye Cabecera, No Asistimos, etc.)."""
+    d = param["decisiones"]
+    return [r for r in registros if d.get(r["decision"], {}).get("cuenta", False)]
+
+
+def agregar(registros, param, tipo_junta):
+    """Devuelve el bloque completo de metricas para un tipo de junta (JOA/JGA)."""
+    sub = [r for r in registros if r["tipo_junta"] == tipo_junta]
+    comp = _computables(sub, param)
+    if not sub:
+        return None
+
+    juntas = {r["junta_id"] for r in sub}
+    emp_por_sector = defaultdict(set)
+    juntas_por_sector = defaultdict(set)
+    for r in sub:
+        emp_por_sector[r["sector"]].add(r["empresa"])
+        juntas_por_sector[r["sector"]].add(r["junta_id"])
+
+    # -- Chart sectores (treemap del PDF: "Rectangulo 3 / 7")
+    orden_sec = param["sectores"]
+    sectores = []
+    total_j = len(juntas)
+    for s in sorted(juntas_por_sector, key=lambda x: orden_sec.get(x, {}).get("orden", 999)):
+        sectores.append({
+            "sector": s,
+            "empresas": len(emp_por_sector[s]),
+            "juntas": len(juntas_por_sector[s]),
+            "pct": len(juntas_por_sector[s]) / total_j if total_j else 0,
+            "color": orden_sec.get(s, {}).get("color", "#BFBFBF"),
+        })
+
+    # -- Chart 1: barras apiladas Tema x Decision
+    decis_activas = [d for d, v in param["decisiones"].items() if v["cuenta"]]
+    matriz = defaultdict(lambda: defaultdict(int))
+    for r in comp:
+        matriz[r["tema"]][r["decision"]] += 1
+    temas_ord = sorted(matriz, key=lambda t: sum(matriz[t].values()))
+    barras = {
+        "temas": temas_ord,
+        "series": [{"nombre": d,
+                    "color": param["decisiones"][d]["color"],
+                    "datos": [matriz[t].get(d, 0) for t in temas_ord]}
+                   for d in decis_activas
+                   if any(matriz[t].get(d, 0) for t in temas_ord)],
+    }
+
+    # -- Chart 2: votos en contra por tema
+    contras = [r for r in comp if r["decision"] == "En Contra"]
+    c_tema = Counter(r["tema"] for r in contras)
+    contra_tema = [{"tema": t, "n": n} for t, n in c_tema.most_common()]
+
+    # -- Chart de motivos (solo los ligados a Eleccion y Numero de Directores)
+    map_motivo = param["motivos"]
+    c_mot_dir = Counter(r["motivo"] for r in contras
+                        if map_motivo.get(r["motivo"], "") == "Eleccion y Numero de Directores")
+    motivos_dir = [{"motivo": m, "n": n} for m, n in c_mot_dir.most_common()]
+
+    # -- Directores votados a favor
+    dirs_fav = [r for r in comp if r["es_director"] == "SI" and r["decision"] == "A Favor"]
+    c_ind = Counter(r["independencia"] for r in dirs_fav if r["independencia"])
+    independencia = [{"tipo": k, "n": v} for k, v in c_ind.most_common()]
+
+    c_exp = Counter()
+    for r in dirs_fav:
+        for e in (r["esp1"], r["esp2"]):
+            if e:
+                c_exp[e] += 1
+    orden_e = param["especialidades"]
+    experiencia = [{"esp": e, "n": n}
+                   for e, n in sorted(c_exp.items(), key=lambda kv: (-kv[1], orden_e.get(kv[0], 999)))]
+
+    # -- Tabla de detalle (equivalente al rango B85:B257)
+    detalle = defaultdict(lambda: defaultdict(list))
+    for r in sorted(sub, key=lambda x: (x["empresa"], x["fecha"] or date.min, x["punto"])):
+        clave_f = r["fecha"].strftime("%d/%m/%Y") if isinstance(r["fecha"], (datetime, date)) else "s/f"
+        detalle[r["empresa"]][clave_f].append({
+            "punto": r["punto"], "texto": r["texto_agenda"], "decision": r["decision"],
+            "justificacion": r["justificacion"], "motivo": r["motivo"],
+        })
+    tabla = [{"empresa": e, "fechas": [{"fecha": f, "puntos": p} for f, p in fs.items()]}
+             for e, fs in detalle.items()]
+
+    return {
+        "tipo": tipo_junta,
+        "etiqueta": param["tipos"].get(tipo_junta, {}).get("etiqueta", tipo_junta),
+        "n_juntas": total_j,
+        "n_empresas": len({r["empresa"] for r in sub}),
+        "n_puntos": len(comp),
+        "n_contra": len(contras),
+        "n_dir_fav": len(dirs_fav),
+        "sectores": sectores,
+        "barras": barras,
+        "contra_tema": contra_tema,
+        "motivos_dir": motivos_dir,
+        "independencia": independencia,
+        "experiencia": experiencia,
+        "tabla": tabla,
+    }
+
+
+# ============================================================================
+# 4. WORDING DINAMICO - plantillas del Excel + reglas de redaccion
+# ============================================================================
+def _lista_es(items):
+    """['a','b','c'] -> 'a, b y c'  (redaccion en espaniol)"""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " y " + items[-1]
+
+
+def _pct(x):
+    return f"{round(x * 100)}%"
+
+
+MESES = ["enero","febrero","marzo","abril","mayo","junio",
+         "julio","agosto","setiembre","octubre","noviembre","diciembre"]
+
+
+def _fecha_es(d):
+    return f"{d.day} de {MESES[d.month-1]} de {d.year}"
+
+
+def _plural(n, sing, plur):
+    return sing if n == 1 else plur
+
+
+def redactar(bloque, param, periodo):
+    """Genera los parrafos del Word segun las plantillas editables de la hoja Textos."""
+    T = param["textos"]
+    inst = param["config"].get("Nombre_Institucion", "AFP Integra")
+    out = {}
+
+    if bloque is None:
+        return {"sin_datos": T.get("sin_datos", "Sin registros.")}
+
+    # --- sector: cuantos sectores hacen falta para superar el 50%
+    secs = sorted(bloque["sectores"], key=lambda s: -s["pct"])
+    acum, top = 0.0, []
+    for s in secs:
+        top.append(s["sector"])
+        acum += s["pct"]
+        if acum >= 0.5:
+            break
+    nj, ne = bloque["n_juntas"], bloque["n_empresas"]
+    if bloque["tipo"] == "JOA":
+        larga = _plural(nj, "junta obligatoria anual de accionistas",
+                            "juntas obligatorias anuales de accionistas")
+    else:
+        larga = _plural(nj, "junta general de accionistas", "juntas generales de accionistas")
+    out["sector"] = T["sector"].format(
+        periodo=periodo, n_juntas=nj, junta_larga=larga,
+        n_empresas=ne, pct_top=_pct(acum), sectores_top=_lista_es(top))
+    # concordancia cuando hay una sola junta o una sola empresa
+    if ne == 1:
+        out["sector"] = out["sector"].replace("de 1 empresas", "de 1 empresa")
+    if nj == 1:
+        out["sector"] = out["sector"].replace("dichas juntas", "dicha junta")
+        out["sector"] = out["sector"].replace("corresponden a los sectores", "corresponde al sector")
+    if bloque["n_puntos"] == 1:
+        pass
+
+    # --- temas: los "no recurrentes" son los que aparecen en <=2 puntos
+    conteo = {t: sum(s["datos"][i] for s in bloque["barras"]["series"])
+              for i, t in enumerate(bloque["barras"]["temas"])}
+    raros = [t for t, n in sorted(conteo.items(), key=lambda kv: kv[1]) if n <= 2][:3]
+    tema_top = max(conteo, key=conteo.get) if conteo else ""
+    if bloque["n_contra"] == 1:
+        T = dict(T)
+        T["contras"] = T["contras"].replace("{n_contra} votos en contra", "1 voto en contra")
+        T["contras"] = T["contras"].replace("Los temas donde concentramos los votos en contra fueron",
+                                            "El tema donde emitimos el voto en contra fue")
+    out["temas"] = T["temas"].format(
+        n_puntos=bloque["n_puntos"],
+        temas_raros=_lista_es(raros) if raros else "ninguno adicional",
+        tema_top=tema_top)
+
+    # --- votos en contra
+    if bloque["n_contra"]:
+        out["contras"] = T["contras"].format(
+            n_contra=bloque["n_contra"], institucion=inst,
+            temas_contra=_lista_es([c["tema"] for c in bloque["contra_tema"][:3]]))
+    else:
+        out["contras"] = f"No emitimos votos en contra durante el {periodo}."
+
+    # --- votos en contra ligados a directores
+    if bloque["motivos_dir"]:
+        n_md = sum(m["n"] for m in bloque["motivos_dir"])
+        plantilla = T["contras_dir"]
+        if n_md == 1:
+            plantilla = plantilla.replace("{n_contra_dir} votos en contra", "1 voto en contra")
+            plantilla = plantilla.replace("La mayor parte de los votos en contra se emitieron",
+                                          "El voto en contra se emitio")
+        out["contras_dir"] = plantilla.format(
+            n_contra_dir=n_md,
+            motivo_top=_lista_es([m["motivo"].lower() for m in bloque["motivos_dir"][:2]]),
+            motivos_lista=_lista_es([m["motivo"] for m in bloque["motivos_dir"]]))
+    else:
+        out["contras_dir"] = ""
+
+    # --- independencia
+    nd = bloque["n_dir_fav"]
+    if nd:
+        n_ind = next((i["n"] for i in bloque["independencia"] if i["tipo"] == "Independiente"), 0)
+        if n_ind == nd:
+            frase = "todos ellos calificaban como independientes"
+        elif n_ind == 0:
+            frase = "ninguno de ellos calificaba como independiente"
+        else:
+            frase = (f"{n_ind} de ellos {_plural(n_ind,'calificaba','calificaban')} "
+                     f"como {_plural(n_ind,'independiente','independientes')} ({_pct(n_ind/nd)})")
+        out["independencia"] = T["independencia"].format(
+            n_dir=nd, n_indep=n_ind, pct_indep=_pct(n_ind / nd), frase_indep=frase)
+
+        if bloque["experiencia"]:
+            tot_e = sum(e["n"] for e in bloque["experiencia"])
+            e0 = bloque["experiencia"][0]
+            out["experiencia"] = T["experiencia"].format(
+                n_dir=nd, esp_top=e0["esp"], pct_esp_top=_pct(e0["n"] / tot_e))
+        else:
+            out["experiencia"] = ""
+    else:
+        out["independencia"] = ""
+        out["experiencia"] = ""
+
+    return out
+
+
+# ============================================================================
+# 5. DASHBOARD HTML INTERACTIVO
+# ============================================================================
+def generar_html(registros, param, ruta_salida):
+    """Dashboard autocontenido: filtra en el navegador, sin dependencias locales."""
+    datos = []
+    for r in registros:
+        datos.append({
+            "emp": r["empresa"], "sec": r["sector"], "tj": r["tipo_junta"],
+            "anio": int(r["anio"]) if r["anio"] else 0, "tri": r["trimestre"],
+            "jid": r["junta_id"],
+            "fec": r["fecha"].strftime("%d/%m/%Y") if isinstance(r["fecha"], (datetime, date)) else "",
+            "pto": r["punto"], "txt": r["texto_agenda"], "tema": r["tema"],
+            "dec": r["decision"], "mot": r["motivo"], "jus": r["justificacion"],
+            "dir": r["director"], "ind": r["independencia"],
+            "e1": r["esp1"], "e2": r["esp2"],
+        })
+
+    cfg = param["config"]
+    meta = {
+        "decisiones": {k: v for k, v in param["decisiones"].items()},
+        "sectores": {k: v["color"] for k, v in param["sectores"].items()},
+        "orden_sector": {k: v["orden"] for k, v in param["sectores"].items()},
+        "motivos": param["motivos"],
+        "tipos": {k: v["etiqueta"] for k, v in param["tipos"].items()},
+        "esp_orden": param["especialidades"],
+        "primario": cfg.get("Color_Primario", "1E2E6E"),
+        "secundario": cfg.get("Color_Secundario", "00AECB"),
+        "acento": cfg.get("Color_Acento", "E3E829"),
+        "institucion": cfg.get("Nombre_Institucion", "AFP Integra"),
+        "titulo": cfg.get("Titulo_Reporte", "REPORTE DE JUNTAS DE ACCIONISTAS"),
+        "pie": cfg.get("Pie_Pagina", ""),
+    }
+
+    html = PLANTILLA_HTML.replace("__DATOS__", json.dumps(datos, ensure_ascii=False))
+    html = html.replace("__META__", json.dumps(meta, ensure_ascii=False))
+    html = html.replace("__GENERADO__", datetime.now().strftime("%d/%m/%Y %H:%M"))
+
+    with open(ruta_salida, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    print(f"[OK] Dashboard  -> {ruta_salida}")
+
+
+PLANTILLA_HTML = r"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Dashboard Juntas de Accionistas</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#1E2E6E;padding:22px 30px}
+h1{font-size:22px;font-weight:bold;color:#1E2E6E;margin-bottom:2px}
+.sub{font-size:12px;color:#6b7280;margin-bottom:18px}
+.filtros{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;
+  border:1px solid #e5e7eb;border-left:4px solid #00AECB;padding:12px 16px;margin-bottom:20px;background:#fafcfd}
+.filtros label{display:block;font-size:11px;color:#6b7280;margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px}
+select{font-family:inherit;font-size:13px;padding:6px 10px;border:1px solid #d1d5db;background:#fff;color:#1E2E6E;min-width:130px}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:22px}
+.kpi{border:1px solid #e5e7eb;border-top:3px solid #00AECB;padding:12px 14px}
+.kpi .n{font-size:26px;font-weight:bold;color:#1E2E6E;line-height:1.1}
+.kpi .l{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin-top:3px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}
+.card{border:1px solid #e5e7eb;padding:14px 16px}
+.card.full{grid-column:1/-1}
+.card h2{font-size:13px;font-weight:bold;color:#00AECB;margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
+.wrap{position:relative;height:300px}
+.wrap.alto{height:420px}
+.tree{display:flex;flex-wrap:wrap;gap:3px}
+.tile{color:#fff;padding:10px 12px;min-height:74px;display:flex;flex-direction:column;justify-content:space-between}
+.tile b{font-size:16px}.tile span{font-size:11px;opacity:.92}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:#1E2E6E;color:#fff;text-align:left;padding:7px 9px;font-size:11px;text-transform:uppercase;letter-spacing:.3px}
+td{padding:6px 9px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+tr.emp td{background:#eef2fa;font-weight:bold;color:#1E2E6E}
+tr.fec td{background:#f7f9fc;font-size:11px;color:#6b7280}
+.pill{display:inline-block;padding:2px 8px;font-size:11px;color:#fff;white-space:nowrap}
+.jus{font-size:11px;color:#6b7280;font-style:italic}
+.vacio{padding:40px;text-align:center;color:#9ca3af;font-size:13px}
+footer{margin-top:26px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style></head><body>
+
+<h1 id="titulo"></h1>
+<div class="sub" id="subtitulo"></div>
+
+<div class="filtros">
+  <div><label>Año</label><select id="fAnio"></select></div>
+  <div><label>Trimestre</label><select id="fTri"></select></div>
+  <div><label>Tipo de junta</label><select id="fTipo"></select></div>
+  <div><label>Sector</label><select id="fSec"></select></div>
+  <div><label>Empresa</label><select id="fEmp"></select></div>
+</div>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="grid">
+  <div class="card full"><h2>Votación por tema de agenda</h2><div class="wrap alto"><canvas id="c1"></canvas></div></div>
+  <div class="card full"><h2>Distribución por sector</h2><div class="tree" id="tree"></div></div>
+  <div class="card"><h2>Votos en contra por tema</h2><div class="wrap"><canvas id="c2"></canvas></div></div>
+  <div class="card"><h2>Motivos de voto en contra (directores)</h2><div class="wrap"><canvas id="c6"></canvas></div></div>
+  <div class="card"><h2>Independencia de directores</h2><div class="wrap"><canvas id="c11"></canvas></div></div>
+  <div class="card"><h2>Experiencia de directores</h2><div class="wrap"><canvas id="c9"></canvas></div></div>
+  <div class="card full"><h2>Detalle por empresa</h2><div id="tabla"></div></div>
+</div>
+
+<footer id="pie"></footer>
+
+<script>
+const DATOS = __DATOS__;
+const META  = __META__;
+const GEN   = "__GENERADO__";
+const P="#"+META.primario, S="#"+META.secundario, A="#"+META.acento;
+const PALETA=[P,S,A,"#5B6DAE","#3E9FBF","#7FC9DB","#A9BCE0","#BFBFBF","#2F4380","#89D6E6","#C8CE3F","#8A93B8","#4C6FA5"];
+let charts={};
+
+document.getElementById("titulo").textContent=META.titulo;
+document.getElementById("pie").textContent=META.pie+"  ·  Generado "+GEN;
+
+function unicos(campo){return [...new Set(DATOS.map(d=>d[campo]).filter(v=>v!==""&&v!==0))];}
+function llenar(id,vals,etiqueta,mapa){
+  const s=document.getElementById(id);
+  s.innerHTML='<option value="">'+etiqueta+'</option>';
+  vals.forEach(v=>{const o=document.createElement("option");o.value=v;
+    o.textContent=mapa&&mapa[v]?mapa[v]:v;s.appendChild(o);});
+  s.onchange=render;
+}
+llenar("fAnio",unicos("anio").sort((a,b)=>b-a),"Todos");
+llenar("fTri",["T1","T2","T3","T4"],"Todos");
+llenar("fTipo",unicos("tj"),"Todas",META.tipos);
+llenar("fSec",unicos("sec").sort((a,b)=>(META.orden_sector[a]||99)-(META.orden_sector[b]||99)),"Todos");
+llenar("fEmp",unicos("emp").sort(),"Todas");
+
+function filtrar(){
+  const a=fAnio.value,t=fTri.value,tj=fTipo.value,se=fSec.value,em=fEmp.value;
+  return DATOS.filter(d=>(!a||d.anio==a)&&(!t||d.tri==t)&&(!tj||d.tj==tj)&&(!se||d.sec==se)&&(!em||d.emp==em));
+}
+const cuenta=d=>META.decisiones[d.dec]&&META.decisiones[d.dec].cuenta;
+
+function pinta(id,cfg){
+  if(charts[id])charts[id].destroy();
+  charts[id]=new Chart(document.getElementById(id),cfg);
+}
+const SIN={responsive:true,maintainAspectRatio:false};
+
+function render(){
+  const F=filtrar(), C=F.filter(cuenta);
+  const juntas=new Set(F.map(d=>d.jid));
+  const contras=C.filter(d=>d.dec==="En Contra");
+  const dirsFav=C.filter(d=>d.dir&&d.dec==="A Favor");
+
+  // ---- KPIs
+  document.getElementById("kpis").innerHTML=[
+    [juntas.size,"Juntas"],[new Set(F.map(d=>d.emp)).size,"Empresas"],
+    [C.length,"Puntos votados"],[contras.length,"Votos en contra"],
+    [dirsFav.length,"Directores a favor"]
+  ].map(k=>`<div class="kpi"><div class="n">${k[0]}</div><div class="l">${k[1]}</div></div>`).join("");
+
+  if(!F.length){
+    document.getElementById("tabla").innerHTML='<div class="vacio">No hay registros para esta combinación de filtros.</div>';
+    document.getElementById("tree").innerHTML='<div class="vacio">Sin datos</div>';
+    Object.values(charts).forEach(c=>c.destroy());charts={};
+    return;
+  }
+
+  // ---- Chart 1: barras apiladas tema x decision
+  const m={};C.forEach(d=>{(m[d.tema]=m[d.tema]||{})[d.dec]=(m[d.tema][d.dec]||0)+1;});
+  const temas=Object.keys(m).sort((x,y)=>tot(m[x])-tot(m[y]));
+  function tot(o){return Object.values(o).reduce((a,b)=>a+b,0);}
+  const decs=Object.keys(META.decisiones).filter(k=>META.decisiones[k].cuenta
+              &&temas.some(t=>m[t][k]));
+  pinta("c1",{type:"bar",data:{labels:temas,datasets:decs.map(k=>({
+      label:k,backgroundColor:META.decisiones[k].color,data:temas.map(t=>m[t][k]||0)}))},
+    options:{...SIN,indexAxis:"y",scales:{x:{stacked:true,grid:{display:false}},
+      y:{stacked:true,grid:{display:false},ticks:{font:{size:11}}}},
+      plugins:{legend:{position:"bottom",labels:{boxWidth:12,font:{size:11}}},
+        datalabels:false}}});
+
+  // ---- Treemap de sectores
+  const bySec={};F.forEach(d=>{const o=bySec[d.sec]=bySec[d.sec]||{e:new Set(),j:new Set()};
+    o.e.add(d.emp);o.j.add(d.jid);});
+  const tj=juntas.size;
+  document.getElementById("tree").innerHTML=Object.keys(bySec)
+    .sort((a,b)=>bySec[b].j.size-bySec[a].j.size).map(s=>{
+      const o=bySec[s],pc=tj?Math.round(o.j.size/tj*100):0;
+      const w=Math.max(14,Math.min(46,pc*1.5+14));
+      return `<div class="tile" style="background:${META.sectores[s]||"#BFBFBF"};flex:1 1 ${w}%">
+        <span>Empresas: ${o.e.size}</span><div><b>${pc}%</b><br><span>${s}</span></div></div>`;
+    }).join("");
+
+  // ---- Chart 2: contras por tema
+  dona("c2",cont(contras,"tema"));
+  // ---- Chart 6: motivos ligados a eleccion de directores
+  const md=contras.filter(d=>META.motivos[d.mot]==="Eleccion y Numero de Directores");
+  dona("c6",cont(md,"mot"),true);
+  // ---- Chart 11: independencia
+  dona("c11",cont(dirsFav.filter(d=>d.ind),"ind"),true);
+  // ---- Chart 9: experiencia
+  const ex={};dirsFav.forEach(d=>{[d.e1,d.e2].forEach(e=>{if(e)ex[e]=(ex[e]||0)+1;});});
+  dona("c9",ex,true);
+
+  tablaDetalle(F);
+}
+
+function cont(arr,campo){const o={};arr.forEach(d=>{if(d[campo])o[d[campo]]=(o[d[campo]]||0)+1;});return o;}
+function dona(id,obj,anillo){
+  const k=Object.keys(obj).sort((a,b)=>obj[b]-obj[a]);
+  if(!k.length){if(charts[id])charts[id].destroy();
+    const cv=document.getElementById(id);cv.getContext("2d").clearRect(0,0,cv.width,cv.height);return;}
+  const t=k.reduce((a,x)=>a+obj[x],0);
+  pinta(id,{type:anillo?"doughnut":"pie",
+    data:{labels:k,datasets:[{data:k.map(x=>obj[x]),backgroundColor:PALETA,borderColor:"#fff",borderWidth:2}]},
+    options:{...SIN,cutout:anillo?"52%":0,plugins:{legend:{position:"right",
+      labels:{boxWidth:12,font:{size:11},generateLabels:ch=>k.map((l,i)=>({
+        text:l+"  "+Math.round(obj[l]/t*100)+"%",fillStyle:PALETA[i%PALETA.length],index:i}))}},
+      tooltip:{callbacks:{label:c=>c.label+": "+c.raw+" ("+Math.round(c.raw/t*100)+"%)"}}}}});
+}
+
+function tablaDetalle(F){
+  const g={};
+  F.forEach(d=>{(g[d.emp]=g[d.emp]||{})[d.fec]=(g[d.emp][d.fec]||[]);g[d.emp][d.fec].push(d);});
+  let h='<table><thead><tr><th style="width:70px">Punto</th><th>Tema de agenda</th>'
+       +'<th style="width:140px">Votación</th></tr></thead><tbody>';
+  Object.keys(g).sort().forEach(e=>{
+    h+=`<tr class="emp"><td colspan="3">${e}</td></tr>`;
+    Object.keys(g[e]).sort().forEach(f=>{
+      h+=`<tr class="fec"><td colspan="3">${f}</td></tr>`;
+      g[e][f].sort((a,b)=>a.pto.localeCompare(b.pto,undefined,{numeric:true})).forEach(d=>{
+        const col=(META.decisiones[d.dec]||{}).color||"#BFBFBF";
+        const nota=d.jus||d.mot?`<div class="jus">${d.jus||d.mot}</div>`:"";
+        h+=`<tr><td>${d.pto}</td><td>${d.txt}${nota}</td>
+            <td><span class="pill" style="background:${col}">${d.dec}</span></td></tr>`;
+      });
+    });
+  });
+  document.getElementById("tabla").innerHTML=h+"</tbody></table>";
+}
+
+document.getElementById("subtitulo").textContent=
+  META.institucion+"  ·  "+DATOS.length+" puntos de agenda registrados";
+render();
+</script></body></html>"""
+
+
+# ============================================================================
+# 6a. GRAFICOS NATIVOS DE OFFICE (editables desde Word)
+# ============================================================================
+# A diferencia de una imagen, estos graficos se editan en Word:
+# clic derecho > Editar datos abre la hoja de calculo embebida, y se puede
+# cambiar tipo de grafico, colores, valores y etiquetas como en Excel.
+
+_CT_CHART = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+_CT_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_RT_CHART = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+_RT_PACK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package"
+_n_chart = [0]
+
+
+def _gp(hexcolor):
+    """Relleno solido sin borde para una serie o un punto."""
+    from openpyxl.chart.shapes import GraphicalProperties
+    g = GraphicalProperties(solidFill=str(hexcolor).lstrip("#"))
+    g.ln.noFill = True
+    return g
+
+
+def agregar_grafico(doc, tipo, categorias, series, colores=None,
+                    ancho_cm=16.0, alto_cm=8.0, apilado=False,
+                    horizontal=False, hueco=55, leyenda="r", parrafo=None):
+    """
+    tipo      : 'barras' | 'torta' | 'dona'
+    categorias: lista de etiquetas
+    series    : [{'nombre': str, 'datos': [num, ...]}, ...]
+    colores   : lista HEX. En barras aplica por serie; en torta/dona por punto.
+    parrafo   : si se pasa un parrafo existente, el grafico se inserta ahi;
+                si es None, se agrega al final del documento.
+    """
+    from docx.opc.part import Part
+    from docx.opc.packuri import PackURI
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsmap
+    from docx.shared import Cm
+    from openpyxl.chart import BarChart, PieChart, DoughnutChart, Reference, Series
+    from openpyxl.chart.marker import DataPoint
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.xml.functions import tostring
+
+    if not categorias or not series:
+        return None
+
+    _n_chart[0] += 1
+    n = _n_chart[0]
+
+    # ---- libro embebido que Word abre con 'Editar datos'
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Datos"
+    ws.cell(1, 1, "Categoria")
+    for j, s in enumerate(series, 2):
+        ws.cell(1, j, s["nombre"])
+    for i, c in enumerate(categorias, 2):
+        ws.cell(i, 1, str(c))
+        for j, s in enumerate(series, 2):
+            ws.cell(i, j, s["datos"][i - 2])
+    nfilas = len(categorias) + 1
+
+    # ---- definicion del grafico
+    if tipo == "barras":
+        ch = BarChart()
+        ch.type = "bar" if horizontal else "col"
+        ch.grouping = "stacked" if apilado else "clustered"
+        if apilado:
+            ch.overlap = 100
+        ch.gapWidth = 55
+        for j, s in enumerate(series, 2):
+            ser = Series(Reference(ws, min_col=j, min_row=1, max_row=nfilas),
+                         title_from_data=True)
+            if colores:
+                ser.graphicalProperties = _gp(colores[(j - 2) % len(colores)])
+            ch.series.append(ser)
+        ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=nfilas))
+        ch.y_axis.majorGridlines = None
+        ch.x_axis.majorGridlines = None
+        ch.y_axis.delete = False
+        ch.x_axis.delete = False
+    else:
+        ch = DoughnutChart(holeSize=hueco) if tipo == "dona" else PieChart()
+        ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=nfilas),
+                    titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=nfilas))
+        if colores:
+            pts = []
+            for i in range(len(categorias)):
+                dp = DataPoint(idx=i)
+                dp.graphicalProperties = _gp(colores[i % len(colores)])
+                pts.append(dp)
+            ch.series[0].data_points = pts
+
+    ch.dataLabels = DataLabelList()
+    ch.dataLabels.showVal = (tipo == "barras")
+    ch.dataLabels.showPercent = (tipo != "barras")
+    ch.dataLabels.showSerName = False
+    ch.dataLabels.showCatName = False
+    ch.dataLabels.showLegendKey = False
+    if leyenda:
+        ch.legend.position = leyenda
+        ch.legend.overlay = False
+    else:
+        ch.legend = None
+
+    # ---- partes del paquete OOXML
+    arbol = ch._write()
+    arbol = arbol.getroot() if hasattr(arbol, "getroot") else arbol
+    xml_chart = tostring(arbol).decode("utf-8")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    parte_xlsx = Part(PackURI(f"/word/embeddings/Datos_grafico{n}.xlsx"),
+                      _CT_XLSX, buf.read(), doc.part.package)
+    parte_chart = Part(PackURI(f"/word/charts/chart{n}.xml"),
+                       _CT_CHART, b"", doc.part.package)
+    rid_datos = parte_chart.relate_to(parte_xlsx, _RT_PACK)
+
+    # externalData es lo que habilita 'Editar datos' en Word
+    ns_r = (' xmlns:r="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships"')
+    xml_chart = xml_chart.replace("<chartSpace ", "<chartSpace" + ns_r + " ", 1)
+    xml_chart = xml_chart.replace(
+        "</chartSpace>",
+        f'<externalData r:id="{rid_datos}">'
+        f'<autoUpdate val="0"/></externalData></chartSpace>')
+    parte_chart._blob = xml_chart.encode("utf-8")
+    rid = doc.part.relate_to(parte_chart, _RT_CHART)
+
+    decls = " ".join(f'xmlns:{p}="{u}"' for p, u in nsmap.items()
+                     if p in ("w", "wp", "a", "r"))
+    cx, cy = int(Cm(ancho_cm)), int(Cm(alto_cm))
+    xml = (
+        f'<w:p {decls}><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>'
+        f'<wp:inline distT="0" distB="0" distL="0" distR="0">'
+        f'<wp:extent cx="{cx}" cy="{cy}"/>'
+        f'<wp:docPr id="{1000 + n}" name="Grafico {n}"/>'
+        f'<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/'
+        f'drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/'
+        f'drawingml/2006/chart" r:id="{rid}"/></a:graphicData></a:graphic>'
+        f'</wp:inline></w:drawing></w:r></w:p>')
+    el = parse_xml(xml)
+    if parrafo is not None:
+        parrafo._p.addnext(el)
+    else:
+        doc.element.body.append(el)
+    return rid
+
+
+# ---- treemap de sectores: no existe como grafico nativo de Office,
+# ---- se mantiene como imagen para replicar el rectangulo del reporte.
+def _png_sectores(bloque, param):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    secs = sorted(bloque["sectores"], key=lambda s: -s["pct"])
+    fig, ax = plt.subplots(figsize=(8.2, 2.5))
+    x = 0.0
+    for s in secs:
+        w = max(s["pct"], .05)
+        ax.add_patch(plt.Rectangle((x, 0), w * .98, 1, color=s["color"]))
+        ax.text(x + w * .49, .70, f"Empresas: {s['empresas']}", ha="center",
+                color="white", fontsize=8)
+        ax.text(x + w * .49, .34, s["sector"], ha="center", color="white",
+                fontsize=8, fontweight="bold")
+        ax.text(x + w * .49, .14, _pct(s["pct"]), ha="center", color="white", fontsize=8)
+        x += w
+    ax.set_xlim(0, max(x, 1)); ax.set_ylim(0, 1); ax.axis("off")
+    fig.tight_layout()
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=170); plt.close(fig)
+    buf.seek(0); return buf
+
+
+
+# ============================================================================
+# 6b. REPORTE WORD - mismo orden y estilo que el reporte publicado
+# ============================================================================
+def _sombrear(celda, hex_color):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    celda._tc.get_or_add_tcPr().append(
+        parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:fill="{hex_color}"/>'))
+
+
+def _barra_izquierda(parrafo, hex_color, grosor=28):
+    """Barra vertical de color al inicio del parrafo, como en el reporte."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    parrafo._p.get_or_add_pPr().append(parse_xml(
+        f'<w:pBdr {nsdecls("w")}><w:left w:val="single" w:sz="{grosor}" '
+        f'w:space="8" w:color="{hex_color}"/></w:pBdr>'))
+
+
+def _sin_bordes(tabla):
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+    tabla._tbl.tblPr.append(parse_xml(
+        f'<w:tblBorders {nsdecls("w")}>' +
+        "".join(f'<w:{b} w:val="none" w:sz="0" w:color="FFFFFF"/>'
+                for b in ("top", "left", "bottom", "right",
+                          "insideH", "insideV")) +
+        '</w:tblBorders>'))
+
+
+def generar_word(bloques, param, periodo, ruta_salida):
+    from docx import Document
+    from docx.shared import Pt, Inches, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
+    cfg = param["config"]
+    hx = lambda k, d: cfg.get(k, d).lstrip("#")
+    NAV = RGBColor(*bytes.fromhex(hx("Color_Primario", "1E2E6E")))
+    CYN = RGBColor(*bytes.fromhex(hx("Color_Secundario", "00AECB")))
+    AMA = hx("Color_Acento", "E3E829")
+    GRIS = RGBColor(0x6B, 0x72, 0x80)
+    PAL = [param["sectores"][s]["color"] for s in param["sectores"]] or ["#1E2E6E"]
+    PAL_DEC = [v["color"] for v in param["decisiones"].values() if v["cuenta"]]
+
+    doc = Document()
+    st = doc.styles["Normal"]
+    st.font.name = "Arial"
+    st.font.size = Pt(10)
+    st.font.color.rgb = NAV
+    sec = doc.sections[0]
+    sec.top_margin = Cm(2.2)
+    sec.bottom_margin = Cm(2.0)
+    sec.left_margin = Cm(2.2)
+    sec.right_margin = Cm(2.2)
+
+    # ---- logo en el encabezado de todas las paginas
+    if os.path.exists(RUTA_LOGO):
+        h = sec.header.paragraphs[0]
+        h.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        try:
+            h.add_run().add_picture(RUTA_LOGO, width=Inches(1.55))
+        except Exception as e:
+            print(f"[AVISO] No se pudo insertar el logo: {e}")
+    else:
+        print(f"[AVISO] No se encontro el logo en {RUTA_LOGO}")
+
+    # ---- pie de pagina
+    pie = sec.footer.paragraphs[0]
+    pie.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    rp = pie.add_run(cfg.get("Pie_Pagina", ""))
+    rp.font.size = Pt(7.5)
+    rp.font.color.rgb = CYN
+    rp.bold = True
+
+    def parr(txt, size=10, color=None, bold=False, just=True, space=8, after=None):
+        if not txt:
+            return None
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(space)
+        p.paragraph_format.space_before = Pt(0)
+        if just:
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        r = p.add_run(txt)
+        r.font.size = Pt(size)
+        r.font.color.rgb = color if color is not None else NAV
+        r.bold = bold
+        return p
+
+    def titulo_seccion(txt):
+        """Titulo tipo 'a. Juntas Obligatorias Anuales (JOAs) - 2025'."""
+        from docx.oxml import parse_xml
+        from docx.oxml.ns import nsdecls
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(6)
+        p.paragraph_format.space_after = Pt(12)
+        r = p.add_run(txt)
+        r.font.size = Pt(16)
+        r.font.color.rgb = CYN
+        r.bold = True
+        p._p.get_or_add_pPr().append(parse_xml(
+            f'<w:pBdr {nsdecls("w")}><w:bottom w:val="single" w:sz="8" '
+            f'w:space="4" w:color="{hx("Color_Primario","1E2E6E")}"/></w:pBdr>'))
+        return p
+
+    def subtitulo(txt, size=12):
+        """Subtitulo con la barra amarilla a la izquierda."""
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(10)
+        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.left_indent = Pt(6)
+        r = p.add_run(txt)
+        r.font.size = Pt(size)
+        r.font.color.rgb = CYN
+        r.bold = True
+        _barra_izquierda(p, AMA)
+        return p
+
+    def vineta(txt):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(8)
+        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.left_indent = Pt(10)
+        r = p.add_run("\u25b8  " + txt)
+        r.font.size = Pt(11)
+        r.font.color.rgb = CYN
+        return p
+
+    # ================= PORTADA =================
+    for _ in range(6):
+        doc.add_paragraph()
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(cfg.get("Titulo_Reporte", "Reporte de Juntas de Accionistas"))
+    r.font.size = Pt(30)
+    r.font.color.rgb = CYN
+    r.bold = True
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(periodo)
+    r.font.size = Pt(30)
+    r.font.color.rgb = CYN
+    r.bold = True
+    for _ in range(5):
+        doc.add_paragraph()
+
+    # caja gris con el texto introductorio
+    caja = doc.add_table(rows=1, cols=1)
+    caja.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _sin_bordes(caja)
+    cel = caja.rows[0].cells[0]
+    _sombrear(cel, "D9DDE3")
+    cel.paragraphs[0].paragraph_format.space_after = Pt(6)
+    r = cel.paragraphs[0].add_run(param["textos"].get("intro", "").format(
+        institucion=cfg.get("Nombre_Institucion", "AFP Integra"), periodo=periodo))
+    r.font.size = Pt(9.5)
+    r.font.color.rgb = NAV
+    cel.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    pn = cel.add_paragraph()
+    rn = pn.add_run("*El reporte ha sido elaborado con la informacion disponible al "
+                    + _fecha_es(datetime.now()) + ".")
+    rn.font.size = Pt(7.5)
+    rn.font.color.rgb = NAV
+    doc.add_page_break()
+
+    # ================= SECCIONES =================
+    letras = "abcdefghij"
+    for idx, bloque in enumerate(bloques):
+        if bloque is None:
+            continue
+        w = redactar(bloque, param, periodo)
+        tj = bloque["tipo"]
+        titulo_seccion(f"{letras[idx]}. {bloque['etiqueta']} - {periodo}")
+
+        # ---- 1. distribucion por sector (treemap: se mantiene como imagen)
+        subtitulo(f"Total de {tj}s y Distribucion por Sector")
+        parr(w["sector"])
+        doc.add_picture(_png_sectores(bloque, param), width=Inches(6.3))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # ---- 2. votacion por tema de agenda (barras apiladas, editable)
+        subtitulo(f"Votacion por Tema de Agenda en {tj}s")
+        b = bloque["barras"]
+        agregar_grafico(doc, "barras", b["temas"], b["series"],
+                        colores=[s["color"] for s in b["series"]],
+                        apilado=True, horizontal=True, leyenda="b",
+                        ancho_cm=16.5,
+                        alto_cm=max(6.5, 0.72 * len(b["temas"]) + 2))
+        parr(w["temas"])
+
+        # ---- 3. votos en contra (torta, editable)
+        if bloque["contra_tema"]:
+            subtitulo(f"Votos en Contra en {tj}s")
+            parr(w["contras"])
+            agregar_grafico(doc, "torta",
+                            [c["tema"] for c in bloque["contra_tema"]],
+                            [{"nombre": "Votos en contra",
+                              "datos": [c["n"] for c in bloque["contra_tema"]]}],
+                            colores=PAL, ancho_cm=15, alto_cm=7.5)
+
+        # ---- 4. directores
+        if bloque["n_dir_fav"] or bloque["motivos_dir"]:
+            subtitulo(f"Votacion respecto a directores en {tj}s:")
+
+            if bloque["motivos_dir"]:
+                vineta("Votos en contra")
+                parr(w["contras_dir"])
+                agregar_grafico(doc, "dona",
+                                [m["motivo"] for m in bloque["motivos_dir"]],
+                                [{"nombre": "Motivos",
+                                  "datos": [m["n"] for m in bloque["motivos_dir"]]}],
+                                colores=PAL, ancho_cm=15, alto_cm=7.5)
+
+            if bloque["independencia"]:
+                vineta("Independencia")
+                parr(w["independencia"])
+                agregar_grafico(doc, "dona",
+                                [i["tipo"] for i in bloque["independencia"]],
+                                [{"nombre": "Independencia",
+                                  "datos": [i["n"] for i in bloque["independencia"]]}],
+                                colores=PAL, ancho_cm=15, alto_cm=7.5)
+
+            if bloque["experiencia"]:
+                vineta("Experiencia")
+                parr(w["experiencia"])
+                agregar_grafico(doc, "dona",
+                                [e["esp"] for e in bloque["experiencia"]],
+                                [{"nombre": "Experiencia",
+                                  "datos": [e["n"] for e in bloque["experiencia"]]}],
+                                colores=PAL, ancho_cm=15, alto_cm=7.5)
+
+        # ---- 5. detalle por empresa
+        doc.add_page_break()
+        subtitulo(f"Votacion por empresa en {tj}s {periodo}", size=13)
+        p = doc.add_paragraph()
+        p.paragraph_format.space_after = Pt(6)
+        r = p.add_run(f"{tj} {periodo}")
+        r.font.size = Pt(13)
+        r.font.color.rgb = CYN
+
+        tb = doc.add_table(rows=1, cols=2)
+        tb.autofit = False
+        _sin_bordes(tb)
+        for c, t, anc in zip(tb.rows[0].cells, ("Temas de Agenda", "Votacion"),
+                             (Cm(11.2), Cm(5.6))):
+            c.width = anc
+            _sombrear(c, AMA)
+            rr = c.paragraphs[0].add_run(t)
+            rr.bold = True
+            rr.font.size = Pt(9)
+            rr.font.color.rgb = NAV
+
+        alterna = False
+        for e in bloque["tabla"]:
+            fe = tb.add_row().cells
+            fe[0].width, fe[1].width = Cm(11.2), Cm(5.6)
+            for c in fe:
+                _sombrear(c, AMA)
+            rr = fe[0].paragraphs[0].add_run(e["empresa"])
+            rr.bold = True
+            rr.font.size = Pt(9)
+            rr.font.color.rgb = NAV
+            for f in e["fechas"]:
+                fd = tb.add_row().cells
+                fd[0].width, fd[1].width = Cm(11.2), Cm(5.6)
+                for c in fd:
+                    _sombrear(c, "EDF29A")
+                rr = fd[0].paragraphs[0].add_run(f["fecha"])
+                rr.bold = True
+                rr.font.size = Pt(9)
+                rr.font.color.rgb = NAV
+                for pto in f["puntos"]:
+                    alterna = not alterna
+                    fl = tb.add_row().cells
+                    fl[0].width, fl[1].width = Cm(11.2), Cm(5.6)
+                    for c in fl:
+                        _sombrear(c, "E8EDF0" if alterna else "F7F9FA")
+                    r1 = fl[0].paragraphs[0].add_run(
+                        f"{pto['punto']}.  {pto['texto']}")
+                    r1.font.size = Pt(8)
+                    r1.font.color.rgb = NAV
+                    voto = pto["decision"]
+                    if pto["decision"] == "En Contra" and pto["motivo"]:
+                        voto += (f". En linea con la Politica de Votacion de "
+                                 f"{cfg.get('Nombre_Institucion','AFP Integra')} "
+                                 f"({pto['motivo'].lower()})")
+                    fl[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    r2 = fl[1].paragraphs[0].add_run(voto)
+                    r2.font.size = Pt(8)
+                    r2.font.color.rgb = (CYN if pto["decision"] == "En Contra" else NAV)
+
+        if idx < len(bloques) - 1:
+            doc.add_page_break()
+
+    doc.save(ruta_salida)
+    print(f"[OK] Word       -> {ruta_salida}")
+
+
+# ============================================================================
+# 7. MAIN
+# ============================================================================
+def main():
+    ap = argparse.ArgumentParser(description="Dashboard y reporte de Juntas de Accionistas")
+    ap.add_argument("--bd", default=RUTA_BD, help="ruta al Excel de la BD")
+    ap.add_argument("--anio", type=int, default=None, help="filtra el Word a un anio")
+    ap.add_argument("--trimestre", default=None, help="T1 | T2 | T3 | T4")
+    ap.add_argument("--salida", default=CARPETA_SALIDA)
+    ap.add_argument("--solo-dashboard", action="store_true")
+    ap.add_argument("--solo-word", action="store_true")
+    args = ap.parse_args()
+
+    print("=" * 70)
+    print("JUNTAS DE ACCIONISTAS - generacion de reportes")
+    print("=" * 70)
+
+    registros, param = cargar_bd(args.bd)
+    print(f"[OK] BD leida: {len(registros)} filas, {len(param['empresas'])} empresas parametrizadas.")
+    validar(registros, param)
+
+    os.makedirs(args.salida, exist_ok=True)
+    sello = datetime.now().strftime("%Y%m%d_%H%M")
+
+    # --- El dashboard siempre lleva la data completa; los filtros son del navegador.
+    if not args.solo_word:
+        generar_html(registros, param,
+                     os.path.join(args.salida, f"Dashboard_Juntas_{sello}.html"))
+
+    if not args.solo_dashboard:
+        sub = registros
+        etiquetas = []
+        if args.anio:
+            sub = [r for r in sub if r["anio"] == args.anio]
+            etiquetas.append(str(args.anio))
+        if args.trimestre:
+            sub = [r for r in sub if r["trimestre"] == args.trimestre.upper()]
+            etiquetas.append(args.trimestre.upper())
+        periodo = " - ".join(etiquetas) if etiquetas else "periodo completo"
+
+        if not sub:
+            sys.exit(f"[ERROR] No hay registros para {periodo}.")
+
+        orden = sorted(param["tipos"], key=lambda t: param["tipos"][t]["orden"])
+        bloques = [agregar(sub, param, t) for t in orden]
+        bloques = [b for b in bloques if b]
+        if not bloques:
+            sys.exit("[ERROR] No hay juntas computables en el periodo.")
+
+        nom = f"Reporte_Juntas_{periodo.replace(' - ','_').replace(' ','_')}_{sello}.docx"
+        generar_word(bloques, param, periodo, os.path.join(args.salida, nom))
+
+    print("=" * 70)
+    print("Listo.")
+
+
+if __name__ == "__main__":
+    main()
