@@ -1,0 +1,102 @@
+Con gusto. Te doy el antes y el después literal, con las líneas de alrededor para que las ubiques.
+
+## Cambio 2 — la línea que define `agregar_grafico`
+
+Busca en tu archivo estas tres líneas (están juntas, una debajo de otra):
+
+```python
+def agregar_grafico(doc, tipo, categorias, series, colores=None,
+                    ancho_cm=16.0, alto_cm=8.0, apilado=False,
+                    horizontal=False, hueco=55, leyenda="r", parrafo=None):
+```
+
+Reemplaza esas tres líneas por estas cuatro:
+
+```python
+def agregar_grafico(doc, tipo, categorias, series, colores=None,
+                    ancho_cm=16.0, alto_cm=8.0, apilado=False,
+                    horizontal=False, hueco=55, leyenda="r",
+                    color_etiqueta="FFFFFF", size_cat=800, parrafo=None):
+```
+
+Lo único que cambia es la tercera línea: se parte en dos y aparecen `color_etiqueta` y `size_cat`. Todo lo demás queda igual.
+
+## Cambio 3 — cuatro retoques dentro de esa misma función
+
+Los cuatro están abajo de la línea que acabas de modificar. Van en orden de aparición.
+
+**3a.** Busca esta línea suelta:
+
+```python
+        ch.gapWidth = 55
+```
+
+Cámbiala por:
+
+```python
+        ch.gapWidth = 45
+```
+
+**3b.** Unas líneas más abajo busca estas dos:
+
+```python
+        ch.y_axis.delete = False
+        ch.x_axis.delete = False
+```
+
+Reemplázalas por:
+
+```python
+        ch.y_axis.delete = True    # el eje de valores se omite, como en el reporte
+        ch.x_axis.delete = False
+```
+
+Solo cambia la primera de las dos: `False` pasa a `True`.
+
+**3c.** Busca este bloque:
+
+```python
+        ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=nfilas),
+                    titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=nfilas))
+        if colores:
+```
+
+Agrega una línea nueva entre `ch.set_categories(...)` y `if colores:`, de modo que quede así:
+
+```python
+        ch.add_data(Reference(ws, min_col=2, min_row=1, max_row=nfilas),
+                    titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=2, max_row=nfilas))
+        ch.varyColors = False
+        if colores:
+```
+
+Cuidado con la sangría: `ch.varyColors = False` lleva ocho espacios al inicio, los mismos que la línea de arriba.
+
+**3d.** Busca este bloque, que está más abajo:
+
+```python
+    rid_datos = parte_chart.relate_to(parte_xlsx, _RT_PACK)
+
+    # externalData es lo que habilita 'Editar datos' en Word
+```
+
+Inserta dos líneas nuevas en el medio, para que quede así:
+
+```python
+    rid_datos = parte_chart.relate_to(parte_xlsx, _RT_PACK)
+
+    # estilo del reporte (fuentes, etiquetas, ejes, sin titulo automatico)
+    xml_chart = _formatear_xml(xml_chart, tipo, color_etiqueta, size_cat)
+
+    # externalData es lo que habilita 'Editar datos' en Word
+```
+
+Aquí la sangría es de cuatro espacios, igual que la línea `rid_datos`.
+
+---
+
+Ese es todo el cambio: dos funciones nuevas del mensaje anterior, más estos cuatro retoques. Nada fuera del bloque de gráficos se toca.
+
+Si prefieres no editar a mano, dime y te paso el archivo completo ya armado y probado — es un solo `.py` que reemplaza al que tienes.
