@@ -1,0 +1,44 @@
+Voy a inspeccionar los archivos antes de proponer nada.Ya tengo el mapa completo de los cuatro archivos. Antes de la propuesta, el diagnóstico duro:
+
+## Qué encontré
+
+| Archivo | Hallazgo relevante |
+|---|---|
+| `Propuestas de JGA 2026` | 27 hojas: 1 `Cover` + 24 hojas-empresa + `GFC`/`CHUCK`/`NO_JOAs` vacías. El `Cover` tiene **dos bloques** (GFC fila 6, CHUCK fila 16) con encabezados repetidos. Las hojas-empresa tienen la tabla en `B4:F*` pero el 6º header cambia (`% A favor` en Aenza, `Comentario Renzo` en Volcan). `Volcan` y `Volcan 10.06.26` son la misma empresa, distinta junta. El tipo de junta (JOA/JGA) solo vive en el **título A1**, no en un campo. |
+| `Dashboard Juntas Histórico` | `BD` tiene 1,303 filas, 39 columnas, y **ya contiene 2021–2026** (no es solo 2021-2024). Está sucia: `Propuesta de Voto` tiene 15 variantes para 4 valores reales (`A Favor`/`A favor`/`A Favor ` = 643 filas), `Año` guardado como **texto**, 136 filas con `Resumido` vacío (filas-cabecera de puntos con subpuntos). Experiencia de directores está en **14 columnas booleanas** (pésimo para Python). `Parametría` existe pero solo con Nombre/Ticker/ISIN/Sector. |
+| `Oficio SBS` | Es una **proyección** de la misma data: `Tema de Agenda` como código numérico (1001–10xx en `Matriz de Eventos`), voto como `F/C/A`, junta como `JGA/JGO/AP/D`. No es una fuente, es un output. |
+| PDF 2024 | Los 6 charts son todos derivables de `BD`. Ojo: el PDF dice **"Industriales y Construcción"** y `BD` dice **"Materiales y Construcción"** — sectores desalineados entre fuente y reporte. |
+
+**El cuello de botella real** no es el formato: es que la columna `Resumido` la infiere un humano leyendo la columna C. Eso es lo primero que hay que mover aguas arriba.
+
+---
+
+## Propuesta: modelo de 3 tablas + parametría, un solo archivo para siempre
+
+En vez de 1 hoja por empresa por año, **3 tablas planas** que no crecen en ancho ni en número de hojas:Ahora la plantilla concreta. La construyo con validaciones desplegables, tabla de ejemplo y parametría editable:## Cómo resuelve cada problema que planteaste
+
+**Trimestralidad y multi-año sin archivo nuevo.** `Año` y `Trimestre` son fórmula desde `Fecha`. Una empresa con 4 juntas en el año son 4 filas en `Juntas`; una con cero juntas simplemente no aparece — no hay hoja vacía tipo `NO_JOAs` que mantener. La tabla no cambia de forma nunca.
+
+**El caso "Volcan" vs "Volcan 10.06.26".** Deja de ser una excepción. `Junta_ID = TICKER-AAAA-TIPO-N` genera `VOLCAN-2026-JOA-1` y `VOLCAN-2026-JGA-1`, ambas apuntando a `Empresa_ID = VOLCAN`. Dos juntas, una empresa, cero ambigüedad.
+
+**El cuello de botella de `Resumido`.** Esta es la decisión de diseño que más te ahorra. Hoy capturas texto libre y después alguien lo lee y decide el tema — eso es irreproducible y no automatizable con confianza. En `Puntos`, `Tema_Canonico` es un desplegable contra `P_Temas`, elegido por quien captura, que es la persona que ya leyó el documento. El tema se decide una vez, en el momento en que la información es más fresca. Python solo lee la etiqueta.
+
+Sí se puede intentar clasificar con NLP la columna C actual, y para migrar los 1,303 registros históricos vale la pena. Pero como proceso permanente no lo recomiendo: los textos de agenda varían mucho entre empresas y un error de clasificación se propaga silencioso al reporte que se publica a afiliados. El desplegable cuesta 3 segundos por punto y es auditable.
+
+**Filas cabecera.** Las 136 filas con `Resumido` vacío de tu BD son puntos como `03.Elección de directores titulares` que tienen subpuntos. En vez de dejarlas nulas, van con `Decision = "Cabecera"`. Python las filtra explícitamente y tú puedes verificar que el filtro funciona — hoy no distingues entre "cabecera" y "alguien olvidó llenarlo".
+
+**Experiencia de directores.** Las 14 columnas booleanas de la BD colapsan a `Experiencia_1` y `Experiencia_2` contra `P_Experiencia`. Agregar una especialidad nueva es una fila en la parametría, no una columna nueva en la BD. Si algún director necesita 3 tags, se agrega `Experiencia_3` — pero de tus datos, ninguno pasa de 2.
+
+**El Oficio SBS deja de ser trabajo.** Le puse una columna `Cod_SBS` a `P_Temas`. Una vez mapeados los 17 temas canónicos a los códigos 1001–10xx de la hoja `Matriz de Eventos`, el Anexo 1 se genera con un `merge` y una traducción de `A Favor→F`, `En Contra→C`, `Abstención→A`. Hoy es una transcripción manual de la misma información.
+
+## Lo que tienes que decidir antes de que escriba código
+
+Tres cosas donde no quiero asumir por ti:
+
+**Sectores desalineados.** `BD` usa "Materiales y Construcción"; el PDF publicado 2024 usa "Industriales y Construcción". Como el PDF es el documento público, mi inclinación es que el canónico sea el del PDF y que `P_Empresas` se ajuste. Pero eso rompe comparabilidad con la serie histórica, así que es tu llamada.
+
+**Quién captura.** El archivo `Propuestas de JGA 2026` lo llenan varias personas (GFC, CHUCK, LA, RMN, DJ, RS — están en la columna Responsable). Si ellos siguen usando hojas por empresa y tú consolidas, el problema del `Resumido` no desaparece, solo se muda. La propuesta funciona de verdad solo si ellos capturan directo en `Puntos`. Si eso es políticamente inviable, la alternativa es agregar una sola columna `Tema` con desplegable a las hojas-empresa actuales y que Python las consolide — menos limpio, pero elimina el 80% del trabajo manual sin pedirle a nadie que cambie de formato.
+
+**Migración de 2021–2025.** Son 1,303 filas con voto en 15 variantes de texto. La normalización de `Propuesta de Voto` es mecánica (regex + strip). La reasignación de `Junta_ID` también. Lo único que requiere revisión humana son las filas donde `Resumido` está vacío y no es cabecera.
+
+Dime tu postura en esas tres y armo el pipeline: `01_migrar_historico.py`, `02_validar.py`, `03_dashboard.py`, `04_word.py`, `05_anexo_sbs.py` — openpyxl, comentarios en español, entorno `fran36`.
