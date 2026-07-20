@@ -1,0 +1,448 @@
+# =============================================================================
+#  PARCHES PARA huella_pipeline.py
+#  Aplicar en orden. Cada parche indica QUÉ buscar y QUÉ poner en su lugar.
+#  No es un script ejecutable: es el conjunto de bloques a pegar.
+# =============================================================================
+
+
+# =============================================================================
+# PARCHE 1 — CONFIG: workbook único + rutas de inputs
+# -----------------------------------------------------------------------------
+# DÓNDE: en el Módulo 0 (clase Config), donde hoy se arma `path_workbook` con
+#        f"Reporte de la Huella(Región) con Proxies - {semestre}.xlsm".
+# QUÉ HACER: reemplazar esa derivación por las constantes de abajo y por el
+#        método from_semestre recortado. El semestre YA NO forma parte del
+#        nombre del archivo; solo se usa para elegir hojas y para etiquetar
+#        el corte en el histórico.
+# =============================================================================
+
+INPUTS_DIR_DEFAULT = REPORTES_ROOT_DEFAULT + r"\Python\Inputs"
+
+# Único workbook de entrada: query + hojas input (Parametria, BD(MSCI),
+# Perdieron Huella, Proxies, Cálculo Caja, Tipo de Cambio, MKT).
+NOMBRE_WORKBOOK = "BD Huella con Proxies - Propuesta Franco.xlsm"
+NOMBRE_COMPARABLES = "Comparables MSCI - Huella.xlsx"
+
+HOJA_MKT = "MKT"
+FILA_HEADERS_MKT = 2          # tickers en la fila 2; datos desde la fila 3
+COL_FECHA_EFECTIVA_MKT = "B"  # col A = EOMONTH(B,-1)+1 ; la fecha válida es B
+
+
+# --- dentro de Config, reemplazar la construcción de rutas: -------------------
+    @property
+    def path_workbook(self) -> str:
+        return str(Path(self.inputs_dir) / NOMBRE_WORKBOOK)
+
+    @property
+    def path_comparables(self) -> str:
+        return str(Path(self.inputs_dir) / NOMBRE_COMPARABLES)
+
+# --- y en __init__ / from_semestre, fijar inputs_dir: ------------------------
+#     self.inputs_dir = inputs_dir or INPUTS_DIR_DEFAULT
+#
+# ELIMINAR: cualquier referencia a `path_base_msci` como archivo aparte si la
+# hoja BD(MSCI) ya vive dentro del workbook único. Si aún lees Base MSCI de un
+# archivo externo, déjalo; solo el workbook del reporte cambia de nombre.
+
+
+# =============================================================================
+# PARCHE 2 — CÁLCULO CAJA: patrimonio, AUM y CERO ajuste de caja
+# -----------------------------------------------------------------------------
+# DÓNDE: Módulo 2 (CajaLoader).
+# QUÉ HACER: agregar los métodos de abajo a la clase. Replican K4:K10 de la
+#        hoja. Confirmado: la col AB de Valorización es solo un lookup de la
+#        col F (PATRIMONIO) por PORTAFOLIO — no hay ningún ajuste de caja.
+# ADEMÁS: BORRAR la función `leer_caja_adicional` y todas sus llamadas, y en
+#        run_pipeline pasar `caja_adicional_mm=0.0` (o quitar el parámetro).
+# =============================================================================
+
+    # --- agregar dentro de CajaLoader -----------------------------------------
+    PORTAFOLIOS_MULTIFONDO = ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]
+
+    def patrimonio_multifondos(self) -> float:
+        """K7 = SUM(K4:K6): patrimonio en soles de los fondos 1, 2 y 3."""
+        m = self.as_map()
+        return float(sum(m.get(p, 0.0) or 0.0 for p in self.PORTAFOLIOS_MULTIFONDO))
+
+    def aum_multifondos_mm(self, usd_rate: float) -> float:
+        """K10 = (K7 / TC) / 1e6 -> AUM en USD millones. Denominador oficial."""
+        if not usd_rate:
+            return 0.0
+        return self.patrimonio_multifondos() / float(usd_rate) / 1_000_000
+
+# NOTA sobre Intensidad-M: en el Excel es Huella/$AT$4 y AT4 está HARDCODEADO
+# (11,322.67). El valor correcto es AT5 = aum_multifondos_mm(). En el
+# ValorizacionBuilder, calcular:
+#     self.df[V_INTENSIDAD_M] = self.df[V_HUELLA] / aum_multifondos_mm
+# en vez de usar cualquier constante.
+
+
+# =============================================================================
+# PARCHE 3 — NUEVO MÓDULO: ComparablesLoader
+# -----------------------------------------------------------------------------
+# DÓNDE: insertar como módulo nuevo, después del MarketCapLoader.
+# QUÉ HACE: lee "Comparables MSCI - Huella.xlsx". Cada hoja = un semestre.
+# =============================================================================
+
+# ISIN -> ticker de Market Cap (equivalencias confirmadas)
+ISIN_A_TICKER = {
+    "US4642873909": "ILF US Equity",
+    "US4642882819": "EMB US Equity",
+    "US4642882579": "ACWI US Equity",
+    "US4642862514": "CEMB US Equity",
+}
+TICKER_A_ALIAS = {
+    "ILF US Equity": "ILF", "EMB US Equity": "EMB",
+    "ACWI US Equity": "ACWI", "CEMB US Equity": "CEMB",
+}
+
+
+class ComparablesLoader:
+    """Intensidad de carbono de los ETF comparables (ACWI, ILF, CEMB, EMB)."""
+
+    COL_ISIN = "FUND_ISIN"
+    COL_INTENSIDAD = "FUND_FINANCED_CARBON_EMISSIONS"   # <- ver NOTA abajo
+    COL_INTENSIDAD_ALT = "FUND_WEIGHTED_AVG_SOV_CARBON_INTEN"
+
+    def __init__(self, cfg: "Config", usar_columna_sov: bool = False,
+                 verbose: bool = True):
+        self.cfg = cfg
+        self.col_valor = (self.COL_INTENSIDAD_ALT if usar_columna_sov
+                          else self.COL_INTENSIDAD)
+        self.verbose = verbose
+        self.intensidades: Dict[str, float] = {}   # alias -> intensidad
+
+    def _elegir_hoja(self, hojas: List[str]) -> str:
+        """Hoja del semestre; si no existe exacta, la más reciente <= semestre."""
+        s = str(self.cfg.semestre)
+        if s in hojas:
+            return s
+        candidatas = sorted([h for h in hojas if h.isdigit() and h <= s])
+        if candidatas:
+            if self.verbose:
+                print(f"  [Comparables] [AVISO] no existe la hoja {s}; "
+                      f"se usa {candidatas[-1]}.")
+            return candidatas[-1]
+        raise KeyError(f"Comparables: ninguna hoja utilizable para {s}. "
+                       f"Hojas disponibles: {hojas}")
+
+    def build(self) -> "ComparablesLoader":
+        ruta = self.cfg.path_comparables
+        if not FsPath(ruta).exists():
+            if self.verbose:
+                print(f"  [Comparables] [AVISO] no se encuentra {ruta}")
+            return self
+        hojas = pd.ExcelFile(ruta, engine="openpyxl").sheet_names
+        hoja = self._elegir_hoja(hojas)
+        df = pd.read_excel(ruta, sheet_name=hoja, engine="openpyxl")
+        df.columns = [str(c).strip() for c in df.columns]
+        for _, r in df.iterrows():
+            isin = str(r.get(self.COL_ISIN, "")).strip()
+            ticker = ISIN_A_TICKER.get(isin)
+            if not ticker:
+                continue
+            val = pd.to_numeric(r.get(self.col_valor), errors="coerce")
+            if pd.notna(val):
+                self.intensidades[TICKER_A_ALIAS[ticker]] = float(val)
+        if self.verbose:
+            print(f"  [Comparables] hoja {hoja} | {len(self.intensidades)} "
+                  f"comparables: {self.intensidades}")
+        return self
+
+
+# =============================================================================
+# PARCHE 4 — MarketCapLoader: leer la hoja MKT DEL WORKBOOK, no de Market Cap.xlsx
+# -----------------------------------------------------------------------------
+# DÓNDE: reemplazar el cuerpo del MarketCapLoader existente.
+# REGLA CONFIRMADA: se toma la fila cuya col B (fecha efectiva) cae en el
+#        cierre del semestre (30-jun o 31-dic). Los valores YA están en
+#        USD millones -> no dividir ni multiplicar por nada.
+# =============================================================================
+
+class MarketCapLoader:
+    """AUM de los benchmarks desde la hoja MKT del workbook único."""
+
+    def __init__(self, cfg: "Config", verbose: bool = True):
+        self.cfg = cfg
+        self.verbose = verbose
+        self.aum: Dict[str, float] = {}      # alias (ILF/EMB/ACWI/CEMB) -> USD MM
+        self.fecha_usada = None
+
+    def _fecha_cierre(self) -> pd.Timestamp:
+        s = str(self.cfg.semestre)
+        anio, mm = int(s[:4]), int(s[4:6])
+        return (pd.Timestamp(anio, 6, 30) if mm == 6 else pd.Timestamp(anio, 12, 31))
+
+    def build(self) -> "MarketCapLoader":
+        df = pd.read_excel(self.cfg.path_workbook, sheet_name=HOJA_MKT,
+                           skiprows=FILA_HEADERS_MKT - 1, engine="openpyxl")
+        df.columns = [str(c).strip() for c in df.columns]
+        col_fecha = df.columns[1]                      # col B
+        df[col_fecha] = pd.to_datetime(df[col_fecha], errors="coerce")
+        objetivo = self._fecha_cierre()
+
+        validas = df[df[col_fecha].notna() & (df[col_fecha] <= objetivo)]
+        if validas.empty:
+            if self.verbose:
+                print(f"  [MarketCap] [AVISO] sin filas <= {objetivo.date()}")
+            return self
+        fila = validas.loc[validas[col_fecha].idxmax()]
+        self.fecha_usada = fila[col_fecha]
+
+        for ticker, alias in TICKER_A_ALIAS.items():
+            if ticker in df.columns:
+                v = pd.to_numeric(fila.get(ticker), errors="coerce")
+                if pd.notna(v):
+                    self.aum[alias] = float(v)          # ya viene en USD MM
+        if self.verbose:
+            print(f"  [MarketCap] fila {self.fecha_usada.date()} | AUM MM: {self.aum}")
+        return self
+
+
+# =============================================================================
+# PARCHE 5 — PresentacionBuilder: métrica oficial + 3 objetos nuevos
+# =============================================================================
+
+# --- 5.a  METRICAS: incluir 'Intensidad' como métrica principal ---------------
+# REEMPLAZAR la línea:
+#     METRICAS = [COL["huella"], COL["intensidad_m"], COL["inv"]]
+# POR:
+METRICAS = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+
+# 'Intensidad' (CO2-H x Weight) es la oficial del comité.
+# 'Intensidad-M' (Huella / AUM) queda mapeada como métrica secundaria.
+
+
+# --- 5.b  Mapa emisor soberano -> país (tabla AM54:AN70 de la hoja) ----------
+PAIS_POR_EMISOR_SOBERANO = {
+    "Gobierno Central": "Perú",
+    "Gobierno de los Estados Unidos": "EEUU",
+    "Gobierno de Brasil": "Brasil",
+    "Gobierno de Colombia": "Colombia",
+    "Gobierno de Mexico": "Mexico",
+    "Gobierno de México": "México",
+    "Gobierno de Australia": "Australia",
+    "Gobierno del Reino Unido": "UK",
+    "Gobierno de Chile": "Chile",
+    "Gobierno de Sudáfrica": "Sudáfrica",
+    "Fondo Mi Vivienda": "Fondo Mi Vivienda",
+    "Banco de la Nación": "Banco de la Nación",
+    "Vanguard - Extended Duration Treasury ETF": "EEUU",
+    "BlackRock - iShares -20+ Year Treasury Bond ETF": "EEUU",
+}
+
+
+# --- 5.c  AGREGAR estos tres métodos dentro de la clase PresentacionBuilder ---
+
+    # ---------------------------------------------------------------------
+    # Charts 52 y 63: Huella / Intensidad por categoría, partido MSCI vs Proxies
+    # Categorías: Materials, Utilities, Otros, RF, RF Proxies, ETF Sobs,
+    #             RV, Alts. Réplica exacta del bloque DN53:DU68.
+    # ---------------------------------------------------------------------
+    def sector_msci_vs_proxies(self, sector_lookup: dict | None = None) -> pd.DataFrame:
+        """sector_lookup: {Nombre -> Sector}, de Parametria col O -> col P."""
+        sector_lookup = sector_lookup or {}
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"]]
+
+        def suma(sub) -> dict:
+            return {m: float(sub[m].sum()) for m in met}
+
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        for sub in (bu_msci, bu_prox):
+            sub["__sector"] = sub[COL["nombre"]].map(sector_lookup).fillna("Otros")
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        filas = []
+
+        def agrega(bloque, categoria, sub):
+            filas.append({"Bloque": bloque, "Categoria": categoria, **suma(sub)})
+
+        for bloque, base in (("MSCI", bu_msci), ("Proxies", bu_prox)):
+            tot = suma(base)
+            for cat in ("Materials", "Utilities"):
+                agrega(bloque, cat, base[base["__sector"].eq(cat)])
+            # "Otros" = resto del bloque BU (misma lógica DQ60 = DQ53-(DQ56+DQ58))
+            usados = base[base["__sector"].isin(["Materials", "Utilities"])]
+            filas.append({"Bloque": bloque, "Categoria": "Otros",
+                          **{m: tot[m] - float(usados[m].sum()) for m in met}})
+
+        agrega("MSCI", "RF", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("Proxies", "RF Proxies",
+               td_prox[td_prox[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("MSCI", "RV", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+        agrega("Proxies", "RV Proxies",
+               td_prox[td_prox[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+        agrega("Proxies", "Alts", alt)
+
+        out = pd.DataFrame(filas)
+        out["Categoria"] = pd.Categorical(
+            out["Categoria"],
+            ["Materials", "Utilities", "Otros", "RF", "RF Proxies",
+             "ETF Sobs", "RV", "Alts"], ordered=True)
+        return out.sort_values(["Categoria", "Bloque"], ignore_index=True)
+
+    # ---------------------------------------------------------------------
+    # Charts 49, 48 y 39: portafolio vs benchmarks
+    # huella comparable = Intensidad del ETF x AUM del ETF (USD MM). Sin escalar.
+    # ---------------------------------------------------------------------
+    def comparables(self, intensidades: dict, aum_mm: dict) -> pd.DataFrame:
+        d = _sin_huella_cero(self.df)
+        filas = [{"Serie": "Integra",
+                  COL["huella"]: float(d[COL["huella"]].sum()),
+                  COL["intensidad"]: float(d[COL["intensidad"]].sum()),
+                  "AUM MM": float(d[COL["inv"]].sum())}]
+        for alias, inten in (intensidades or {}).items():
+            aum = float((aum_mm or {}).get(alias, 0.0))
+            filas.append({"Serie": alias,
+                          COL["huella"]: aum * float(inten),
+                          COL["intensidad"]: float(inten),
+                          "AUM MM": aum})
+        return pd.DataFrame(filas)
+
+    # ---------------------------------------------------------------------
+    # Chart 58 (y 55 / 57): soberanos por país, top 4 + "Otros"
+    # ---------------------------------------------------------------------
+    def soberanos_por_pais(self, top_n: int = 4) -> pd.DataFrame:
+        sob = self.soberanos()
+        sob["Pais"] = sob[COL["nombre"]].map(PAIS_POR_EMISOR_SOBERANO).fillna("Otros")
+        met = [COL["huella"], COL["intensidad"], COL["inv"]]
+        out = (sob.groupby("Pais", dropna=False)[met].sum()
+                  .sort_values(COL["huella"], ascending=False).reset_index())
+        if len(out) > top_n:
+            cabeza = out.head(top_n).copy()
+            resto = out.tail(len(out) - top_n)
+            cabeza.loc[len(cabeza)] = {"Pais": "Otros",
+                                       **{m: float(resto[m].sum()) for m in met}}
+            out = cabeza
+        return out.reset_index(drop=True)
+
+
+# --- 5.d  Registrar los objetos nuevos en build_all() ------------------------
+# DENTRO de build_all(), agregar al dict `o` ANTES del bucle que hace
+# v.insert(0, "FECHA_CORTE", ...):
+#
+#     o["Sector_MSCI_Proxies"] = self.sector_msci_vs_proxies(self.sector_lookup)
+#     o["Comparables"]         = self.comparables(self.intensidades_comp, self.aum_comp)
+#     o["Soberanos_Por_Pais"]  = self.soberanos_por_pais()
+#
+# Y en __init__ de PresentacionBuilder agregar los parámetros:
+#
+#     def __init__(self, df_valorizacion, fecha_corte,
+#                  sector_lookup=None, intensidades_comp=None, aum_comp=None):
+#         ...
+#         self.sector_lookup     = sector_lookup or {}
+#         self.intensidades_comp = intensidades_comp or {}
+#         self.aum_comp          = aum_comp or {}
+#
+# (quitar el parámetro caja_adicional_mm y los dos bloques que lo usaban en
+#  aum_por_rank() y aum_rank_x_plus1(); ya no hay ajuste de caja).
+
+
+# =============================================================================
+# PARCHE 6 — run_pipeline: cablear los loaders nuevos
+# -----------------------------------------------------------------------------
+# DÓNDE: en run_pipeline, donde hoy se instancia PresentacionBuilder.
+# =============================================================================
+
+    comp = ComparablesLoader(cfg, verbose=verbose).build()
+    mkt = MarketCapLoader(cfg, verbose=verbose).build()
+
+    pres = PresentacionBuilder(
+        val, cfg.semestre,
+        sector_lookup=ctx.get("sector_lookup", {}),
+        intensidades_comp=comp.intensidades,
+        aum_comp=mkt.aum,
+    )
+
+
+# =============================================================================
+# PARCHE 7 — DASHBOARD: cuatro gráficos nuevos
+# -----------------------------------------------------------------------------
+# 7.a  Agregar estas funciones JS dentro del bloque JS_DASHBOARD, justo antes
+#      de la función render().
+# =============================================================================
+
+JS_NUEVOS_GRAFICOS = """
+// --- Charts 52 y 63: categoría x (MSCI vs Proxies), comparando dos cortes ---
+function sectorMsciProxies(div, metrica, cAct, cCmp){
+  const ORDEN = ['Materials','Utilities','Otros','RF','RF Proxies',
+                 'ETF Sobs','RV','Alts'];
+  const pick = (corte, bloque) => {
+    const m = new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Sector_MSCI_Proxies' || r.METRICA!==metrica) continue;
+      if(String(r.FECHA_CORTE)!==String(corte) || r.DIM_2!==bloque) continue;
+      m.set(r.DIM_1, (m.get(r.DIM_1)||0) + (+r.VALOR||0));
+    }
+    return ORDEN.map(k=>m.get(k)||0);
+  };
+  const traces = [
+    {type:'bar', name:cAct+' · MSCI',    x:ORDEN, y:pick(cAct,'MSCI'),
+     marker:{color:'#00AECB'}, offsetgroup:'a', legendgroup:'a'},
+    {type:'bar', name:cAct+' · Proxies', x:ORDEN, y:pick(cAct,'Proxies'),
+     marker:{color:'#61E8FF'}, offsetgroup:'a', legendgroup:'a'},
+    {type:'bar', name:cCmp+' · MSCI',    x:ORDEN, y:pick(cCmp,'MSCI'),
+     marker:{color:'#ACD7CA'}, offsetgroup:'b', legendgroup:'b'},
+    {type:'bar', name:cCmp+' · Proxies', x:ORDEN, y:pick(cCmp,'Proxies'),
+     marker:{color:'#E3F2ED'}, offsetgroup:'b', legendgroup:'b'}
+  ];
+  const lay = LAYOUT();
+  lay.barmode='relative';                 // apila dentro de cada offsetgroup
+  lay.yaxis.title = metrica;
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+// --- Charts 49 / 48 / 39: Integra vs benchmarks (ACWI, ILF, CEMB, EMB) ------
+function comparables(div, metrica, cAct, cCmp){
+  const a = agg('Comparables', metrica, cAct);
+  const b = agg('Comparables', metrica, cCmp);
+  const ORDEN = ['Integra','ACWI','ILF','CEMB','EMB'];
+  const keys = ORDEN.filter(k=>a.has(k)||b.has(k));
+  const ya = keys.map(k=>a.get(k)||0), yb = keys.map(k=>b.get(k)||0);
+  const lay = LAYOUT(); lay.barmode='group'; lay.yaxis.title=metrica;
+  Plotly.react(div, [
+    {type:'bar', name:cAct, x:keys, y:ya, marker:{color:C_ACT},
+     text:ya.map(fmt), textposition:'outside', cliponaxis:false},
+    {type:'bar', name:cCmp+' (comparación)', x:keys, y:yb, marker:{color:C_CMP},
+     text:yb.map(fmt), textposition:'outside', cliponaxis:false}
+  ], lay, OPTS);
+}
+
+// --- Chart 58: soberanos por país (top 4 + Otros) ---------------------------
+function soberanosPais(div, metrica, cAct, cCmp){
+  barrasComparadas(div, '', 'Soberanos_Por_Pais', metrica, cAct, cCmp,
+                   {y:metrica});
+}
+"""
+
+# 7.b  DENTRO de render(), agregar estas llamadas:
+#
+#     sectorMsciProxies('gSector52','Huella',     cAct, cCmp);
+#     sectorMsciProxies('gSector63','Intensidad', cAct, cCmp);
+#     comparables('gComp49','Huella',     cAct, cCmp);
+#     comparables('gComp48','Intensidad', cAct, cCmp);
+#     soberanosPais('gSobPais','Huella',  cAct, cCmp);
+#
+# 7.c  DENTRO de construir_dashboard(), agregar a la lista `tarjetas`:
+#
+#     ("gSector52", "Huella por categoría — MSCI vs Proxies (Chart 52)", True),
+#     ("gSector63", "Intensidad por categoría — MSCI vs Proxies (Chart 63)", True),
+#     ("gComp49",   "Huella: Integra vs benchmarks (Chart 49 / 39)", False),
+#     ("gComp48",   "Intensidad: Integra vs benchmarks (Chart 48)", False),
+#     ("gSobPais",  "Huella soberana por país (Chart 58)", False),
+#
+# 7.d  Y concatenar el bloque nuevo al JS:
+#
+#     js = (JS_DASHBOARD.replace("</script>", JS_NUEVOS_GRAFICOS + "</script>")
+#           .replace("__DATA__", datos_js)
+#           .replace("__CFG__", json.dumps(cfg_js, ensure_ascii=False)))
