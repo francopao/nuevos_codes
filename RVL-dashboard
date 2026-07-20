@@ -1,0 +1,799 @@
+"""
+build_rvl_dashboard.py
+=======================
+Genera un dashboard HTML interactivo (autocontenido, sin dependencias externas)
+a partir del export de la hoja "BD" de Rendimiento RVL.xlsm (Mesa de Inversiones
+- AFP Integra), replicando las hojas "Resumen", "Rendimiento" y "Posicionamiento",
+mas tres vistas nuevas:
+
+    1. Ranking de Alpha vs. Sistema por accion
+    2. Mapa de over/underweight (peso portafolio vs. benchmark) por accion
+    3. Serie historica de retorno acumulado por instrumento (multi-seleccion)
+
+Uso:
+    python build_rvl_dashboard.py --input BD_output4.xlsx --output dashboard.html
+
+Requiere: openpyxl  (pip install openpyxl --break-system-packages)
+"""
+
+import argparse
+import datetime
+import json
+import openpyxl
+
+
+# ---------------------------------------------------------------------------
+# 1. PALETA INSTITUCIONAL (AFP Integra / Grupo SURA)
+# ---------------------------------------------------------------------------
+# Interpretada del theme oficial ("SURA") y de los colores srgbClr usados con
+# mayor frecuencia en las diapositivas del Comite de Inversiones adjunto.
+# Los colores marcados como "fuera de paleta" no aparecen en el theme/deck;
+# se agregan por convencion financiera (rojo para perdidas) o de utilidad
+# (grises neutros), y quedan aislados en COLORS['extra'] para que sean faciles
+# de reemplazar si la Mesa ya tiene un estandar propio para ellos.
+COLORS = {
+    # Paleta institucional (theme "SURA" + colores recurrentes del PPTX)
+    "navy":       "#1F497D",  # color mas usado en el deck (texto/headers)
+    "navy_dark":  "#002060",  # navy oscuro, usado en tablas/encabezados
+    "indigo":     "#1E2E6E",  # acento oscuro alterno
+    "teal":       "#3494BA",  # acento (cercano a accent3 del theme #00AEC7)
+    "gold":       "#FFC000",  # acento calido (resaltados, KPIs)
+    "sky_light":  "#CEDBE6",  # fondo/bordes suaves
+    "sky_paler":  "#D4EAF3",  # hover / fondos muy claros
+    "green":      "#78BE20",  # accent6 del theme SURA (uso: positivo)
+    "white":      "#FFFFFF",
+    # Fuera de la paleta institucional (agregados por convencion, no del PPTX)
+    "extra": {
+        "red":      "#C0392B",  # perdidas / alpha o gap negativo
+        "red_soft": "#E74C3C",
+        "gray":     "#8B93A0",  # texto secundario / neutro
+        "gray_bg":  "#F4F6F8",  # fondo de secciones sobre blanco
+        "border":   "#E3E8EE",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# 2. EXTRACCION DE DATOS
+# ---------------------------------------------------------------------------
+
+def _val(v):
+    if isinstance(v, datetime.datetime):
+        return v.strftime("%Y-%m-%d")
+    return v
+
+
+def load_workbook(path):
+    return openpyxl.load_workbook(path, data_only=True, read_only=True)
+
+
+def extract_resumen(wb):
+    ws = wb["Resumen"]
+    rows = {i + 1: r for i, r in enumerate(
+        ws.iter_rows(min_row=1, max_row=133, max_col=20, values_only=True))}
+
+    def fund_block(row, start):
+        return {"label": row[start], "day": row[start + 1], "wtd": row[start + 2],
+                "mtd": row[start + 3], "aggr": row[start + 4]}
+
+    retorno, alpha = {}, {}
+    for fund, start in [("F1", 1), ("F2", 7), ("F3", 13)]:
+        retorno[fund], alpha[fund] = {}, {}
+        for r in range(27, 34):
+            b = fund_block(rows[r], start)
+            if b["label"]:
+                retorno[fund][b["label"]] = {k: b[k] for k in ("day", "wtd", "mtd", "aggr")}
+        for r in range(36, 42):
+            b = fund_block(rows[r], start)
+            if b["label"]:
+                alpha[fund][b["label"]] = {k: b[k] for k in ("day", "wtd", "mtd", "aggr")}
+
+    top5, bottom5 = {}, {}
+    for fund, start in [("F1", 1), ("F2", 7), ("F3", 13)]:
+        hdr = rows[45]
+        cols = [hdr[start + i] for i in range(5)]
+        t5, b5 = [], []
+        for r in range(46, 51):
+            row = rows[r]
+            name = row[start]
+            if not name:
+                continue
+            t5.append({"rank": row[start - 1] if start > 1 else row[0], "nombre": name,
+                       "aggr": row[start + 1], "c1": row[start + 2], "c2": row[start + 3], "c3": row[start + 4]})
+        for r in range(55, 60):
+            row = rows[r]
+            name = row[start]
+            if not name:
+                continue
+            b5.append({"rank": row[start - 1] if start > 1 else row[0], "nombre": name,
+                       "aggr": row[start + 1], "c1": row[start + 2], "c2": row[start + 3], "c3": row[start + 4]})
+        top5[fund] = {"cols": cols, "rows": t5}
+        bottom5[fund] = {"cols": cols, "rows": b5}
+
+    sector_pos = {}
+    for fund, start in [("F1", 2), ("F2", 8), ("F3", 14)]:
+        sp = []
+        for r in range(64, 70):
+            row = rows[r]
+            sector = row[start]
+            if not sector:
+                continue
+            sp.append({"sector": sector, "portafolio": row[start + 1],
+                       "sistema": row[start + 2], "benchmark": row[start + 3]})
+        sector_pos[fund] = sp
+
+    return {
+        "fecha_inicio": _val(rows[4][3]), "fecha_corte": _val(rows[4][9]),
+        "retorno": retorno, "alpha": alpha, "top5": top5, "bottom5": bottom5,
+        "sector_pos": sector_pos,
+    }
+
+
+def extract_rendimiento(wb):
+    """Sectores > acciones con YTD por fondo (4 cortes) + Alpha vs Sistema por accion."""
+    ws = wb["Rendimiento"]
+    data = list(ws.iter_rows(min_row=1, max_row=109, max_col=52, values_only=True))
+    fecha_corte = _val(data[6][5])
+    dates = [_val(data[6][c]) for c in (7, 8, 9, 10)]
+
+    ret_starts = {"F1": 12, "F2": 16, "F3": 20}         # YTD retorno por fecha
+    alpha_sis_idx = {"F1": 33, "F2": 41, "F3": 49}      # Alpha vs SIS-Fn (ultimo corte)
+
+    sectors, current = [], None
+    for r in range(8, 109):
+        if r - 1 >= len(data):
+            break
+        row = data[r - 1]
+        tag, ticker_id, name_or_sector, ticker = row[0], row[3], row[4], row[5]
+
+        if ticker_id == "Total" or name_or_sector == "Del Benchmark":
+            current = {"sector": name_or_sector, "ytd": {}, "stocks": []}
+            for fund, start in ret_starts.items():
+                current["ytd"][fund] = {d: row[start + i] for i, d in enumerate(dates)}
+            sectors.append(current)
+        elif tag == "Ret_IN_" and current is not None and name_or_sector:
+            stock = {"nombre": name_or_sector, "ticker": ticker, "codigo": ticker_id,
+                     "sector": current["sector"], "ytd": {}, "alpha_sis": {}}
+            for fund, start in ret_starts.items():
+                stock["ytd"][fund] = {d: row[start + i] for i, d in enumerate(dates)}
+                stock["alpha_sis"][fund] = row[alpha_sis_idx[fund]]
+            current["stocks"].append(stock)
+
+    return {"fecha_corte": fecha_corte, "dates": dates, "sectors": sectors}
+
+
+def extract_posicionamiento(wb):
+    """Sectores > acciones con pesos IN/HA/PF/RI/SIS por fondo + benchmark (para gaps)."""
+    ws = wb["Posicionamiento"]
+    data = list(ws.iter_rows(min_row=1, max_row=108, max_col=23, values_only=True))
+    fecha_corte = _val(data[5][5])
+    w_starts = {"F1": 7, "F2": 12, "F3": 17}
+    tipos = ["IN", "HA", "PF", "RI", "SIS"]
+
+    sectors, current = [], None
+    for r in range(7, 108):
+        if r - 1 >= len(data):
+            break
+        row = data[r - 1]
+        tag, ticker_id, name_or_sector, ticker = row[0], row[3], row[4], row[5]
+
+        if ticker_id == "Total" or name_or_sector == "Del Benchmark":
+            current = {"sector": name_or_sector, "weights": {}, "benchmark": row[22], "stocks": []}
+            for fund, start in w_starts.items():
+                current["weights"][fund] = {t: row[start + i] for i, t in enumerate(tipos)}
+            sectors.append(current)
+        elif tag == "weight_IN_" and current is not None and name_or_sector:
+            stock = {"nombre": name_or_sector, "ticker": ticker, "codigo": ticker_id,
+                     "sector": current["sector"], "weights": {}, "benchmark": row[22]}
+            for fund, start in w_starts.items():
+                stock["weights"][fund] = {t: row[start + i] for i, t in enumerate(tipos)}
+            current["stocks"].append(stock)
+
+    return {"fecha_corte": fecha_corte, "tipos": tipos, "sectors": sectors}
+
+
+def extract_series_historicas(wb, codigos, fecha_inicio, funds=("F1", "F2", "F3")):
+    """
+    Retorno acumulado diario por instrumento y fondo, desde `fecha_inicio` (str
+    'YYYY-MM-DD') hasta el ultimo dato disponible en la hoja BD. Usa las columnas
+    'Ret_IN_F{n}_O_{codigo}' (retorno NO acumulado diario), y las cumula en
+    Python: cum[t] = prod(1+r) - 1. Solo se piden las columnas de los
+    instrumentos presentes en Rendimiento/Posicionamiento para mantener el
+    JSON liviano (evita cargar las ~7,700 columnas de BD).
+    """
+    ws = wb["BD"]
+    header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    name_to_idx = {h: i for i, h in enumerate(header) if h}
+
+    wanted = {}  # idx -> (codigo, fund)
+    for codigo in codigos:
+        for fund in funds:
+            col = f"Ret_IN_{fund}_O_{codigo}"
+            idx = name_to_idx.get(col)
+            if idx is not None:
+                wanted[idx] = (codigo, fund)
+
+    fecha_dt = datetime.datetime.strptime(fecha_inicio, "%Y-%m-%d")
+    series = {codigo: {f: [] for f in funds} for codigo in codigos}
+    cum = {codigo: {f: 1.0 for f in funds} for codigo in codigos}
+    dates_out = []
+
+    max_col = max(wanted.keys(), default=0) + 1
+    for row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+        fecha = row[0]
+        if not isinstance(fecha, datetime.datetime) or fecha < fecha_dt:
+            continue
+        dates_out.append(_val(fecha))
+        for idx, (codigo, fund) in wanted.items():
+            r = row[idx] if idx < len(row) else None
+            r = r if isinstance(r, (int, float)) else 0.0
+            cum[codigo][fund] *= (1 + r)
+            series[codigo][fund].append(round(cum[codigo][fund] - 1, 6))
+
+    return {"dates": dates_out, "series": series}
+
+
+# ---------------------------------------------------------------------------
+# 3. ENSAMBLADO
+# ---------------------------------------------------------------------------
+
+def build(input_path, output_path, historial_desde=None):
+    wb = load_workbook(input_path)
+
+    resumen = extract_resumen(wb)
+    rendimiento = extract_rendimiento(wb)
+    posicionamiento = extract_posicionamiento(wb)
+
+    codigos = sorted({s["codigo"] for sec in rendimiento["sectors"] for s in sec["stocks"]
+                       if sec["sector"] != "Del Benchmark"
+                       and isinstance(s["codigo"], str) and s["codigo"].isdigit()})
+    nombres = {s["codigo"]: f'{s["nombre"]} {s["ticker"] or ""}'.strip()
+               for sec in rendimiento["sectors"] for s in sec["stocks"]}
+
+    fecha_desde = historial_desde or resumen.get("fecha_inicio") or "2026-01-01"
+    historicas = extract_series_historicas(wb, codigos, fecha_desde)
+
+    data_blob = json.dumps({
+        "resumen": resumen, "rendimiento": rendimiento, "posicionamiento": posicionamiento,
+        "historicas": historicas, "nombres": nombres, "colors": COLORS,
+    }, ensure_ascii=False)
+
+    html = HTML_TEMPLATE.replace("__DATA__", data_blob)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"OK -> {output_path} ({len(html):,} bytes) | "
+          f"{len(codigos)} instrumentos | historial desde {fecha_desde} "
+          f"({len(historicas['dates'])} fechas)")
+
+
+# ---------------------------------------------------------------------------
+# 4. TEMPLATE HTML (fondo blanco, paleta Integra, todo autocontenido)
+# ---------------------------------------------------------------------------
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RVL &mdash; Monitor de Rentabilidad y Posicionamiento</title>
+<style>
+  :root{
+    --navy:#1F497D; --navy-dark:#002060; --indigo:#1E2E6E; --teal:#3494BA;
+    --gold:#FFC000; --sky:#CEDBE6; --sky-pale:#D4EAF3; --green:#78BE20;
+    --red:#C0392B; --gray:#8B93A0; --gray-bg:#F4F6F8; --border:#E3E8EE;
+    --bg:#FFFFFF; --text:#1B2733;
+    --sans:'Segoe UI',-apple-system,'Helvetica Neue',Arial,sans-serif;
+    --mono:'Consolas','SF Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);}
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-thumb{background:var(--sky);border-radius:6px;}
+  .app{max-width:1440px;margin:0 auto;padding:0 22px 60px;}
+
+  header.top{display:flex;align-items:baseline;justify-content:space-between;
+    padding:24px 0 16px;border-bottom:2px solid var(--navy);margin-bottom:18px;flex-wrap:wrap;gap:10px;}
+  header.top .brand{display:flex;align-items:baseline;gap:12px;}
+  header.top .mark{font-family:var(--mono);font-weight:700;font-size:12.5px;letter-spacing:.12em;
+    color:#fff;background:var(--navy);padding:4px 8px;border-radius:3px;}
+  header.top h1{font-size:19px;font-weight:600;margin:0;color:var(--navy-dark);}
+  header.top .meta{font-family:var(--mono);font-size:11.5px;color:var(--gray);text-align:right;}
+
+  nav.tabs{display:flex;gap:2px;margin-bottom:20px;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+  nav.tabs button{background:none;border:none;color:var(--gray);font-family:var(--sans);font-size:13px;
+    font-weight:600;padding:10px 14px;cursor:pointer;border-bottom:3px solid transparent;}
+  nav.tabs button:hover{color:var(--navy);}
+  nav.tabs button.active{color:var(--navy-dark);border-bottom-color:var(--gold);}
+
+  .view{display:none;} .view.active{display:block;}
+
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap;}
+  .segctl{display:flex;background:var(--gray-bg);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+  .segctl button{background:none;border:none;color:var(--navy);font-family:var(--mono);font-size:12px;
+    font-weight:700;padding:7px 14px;cursor:pointer;border-right:1px solid var(--border);}
+  .segctl button:last-child{border-right:none;}
+  .segctl button.active{background:var(--navy);color:#fff;}
+
+  .multisel{position:relative;}
+  .multisel > .label{background:var(--gray-bg);border:1px solid var(--border);border-radius:6px;
+    color:var(--navy);font-family:var(--sans);font-size:12.5px;font-weight:600;padding:7px 12px;cursor:pointer;}
+  .multisel .panel{display:none;position:absolute;top:110%;left:0;background:#fff;border:1px solid var(--border);
+    border-radius:6px;box-shadow:0 8px 20px rgba(31,73,125,.14);padding:8px;z-index:20;min-width:190px;max-height:260px;overflow:auto;}
+  .multisel.open .panel{display:block;}
+  .multisel label.opt{display:flex;align-items:center;gap:7px;font-size:12.5px;padding:4px 6px;border-radius:4px;cursor:pointer;}
+  .multisel label.opt:hover{background:var(--gray-bg);}
+  .multisel input[type=checkbox]{accent-color:var(--navy);}
+
+  .search{background:#fff;border:1px solid var(--border);border-radius:6px;color:var(--text);
+    font-family:var(--sans);font-size:13px;padding:7px 12px;min-width:220px;outline:none;}
+  .search:focus{border-color:var(--teal);}
+  .hint{font-size:11.5px;color:var(--gray);font-family:var(--mono);}
+
+  section.block{background:#fff;border:1px solid var(--border);border-radius:8px;padding:18px 20px;
+    margin-bottom:20px;box-shadow:0 1px 3px rgba(31,73,125,.05);}
+  section.block h2{font-size:12.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--navy-dark);
+    margin:0 0 14px;font-weight:700;display:flex;align-items:center;gap:8px;}
+  section.block h2 .dot{width:7px;height:7px;border-radius:50%;background:var(--gold);}
+
+  .kpirow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:20px;}
+  .kpi{background:var(--gray-bg);border:1px solid var(--border);border-radius:8px;padding:14px 16px;}
+  .kpi .l{font-size:10.5px;color:var(--gray);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;}
+  .kpi .v{font-family:var(--mono);font-size:20px;font-weight:700;margin-top:4px;}
+
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px;}
+  thead th{text-align:right;font-weight:600;color:var(--navy-dark);font-size:11px;text-transform:uppercase;
+    letter-spacing:.03em;padding:7px 10px;border-bottom:2px solid var(--border);cursor:pointer;
+    user-select:none;white-space:nowrap;}
+  thead th:first-child,thead th.left{text-align:left;}
+  thead th:hover{color:var(--teal);}
+  thead th .arrow{opacity:0;font-size:9px;margin-left:3px;color:var(--gold);}
+  thead th.sorted .arrow{opacity:1;}
+  tbody td{padding:5px 10px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;}
+  tbody td:first-child,tbody td.left{text-align:left;font-family:var(--sans);color:var(--text);font-size:12.5px;}
+  tbody tr:hover td{background:var(--sky-pale);}
+  tbody tr.sector-row td{background:var(--gray-bg);font-weight:700;color:var(--navy-dark);
+    border-top:1px solid var(--border);cursor:pointer;}
+  tbody tr.sector-row td:first-child::before{content:'\25BE ';color:var(--gold);}
+  tbody tr.sector-row.collapsed td:first-child::before{content:'\25B8 ';}
+  tbody tr.stock-row.hidden{display:none;}
+  tbody tr.stock-row td:first-child{padding-left:22px;color:var(--gray);}
+  tbody tr.stock-row td.ticker{color:var(--gray);font-size:11px;}
+
+  .cell-val{position:relative;display:inline-block;min-width:64px;padding:2px 6px;border-radius:3px;}
+  .bar{position:relative;} .bar .fill{position:absolute;top:0;bottom:0;left:0;border-radius:3px;opacity:.35;z-index:0;}
+  .bar span{position:relative;z-index:1;}
+  .bar.center .fill{left:50%;} /* usado en mapa over/underweight, se ajusta en JS */
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+  @media (max-width:900px){.grid2,.grid3{grid-template-columns:1fr;}}
+
+  .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--gray);margin-top:10px;flex-wrap:wrap;}
+  .legend .swatch{width:24px;height:8px;border-radius:2px;}
+
+  svg.chart{width:100%;height:340px;background:#fff;}
+  svg.chart .axis{stroke:var(--border);stroke-width:1;}
+  svg.chart .gridline{stroke:var(--border);stroke-width:1;stroke-dasharray:2,3;}
+  svg.chart text{font-family:var(--mono);font-size:10px;fill:var(--gray);}
+  svg.chart .zeroline{stroke:var(--gray);stroke-width:1;}
+
+  footer.foot{margin-top:30px;padding-top:16px;border-top:1px solid var(--border);
+    font-family:var(--mono);font-size:11px;color:var(--gray);text-align:center;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand"><span class="mark">MESA &middot; RVL</span>
+      <h1>Monitor de Rentabilidad &amp; Posicionamiento</h1></div>
+    <div class="meta">Corte: <b id="fechaCorte">&mdash;</b><br>Fuente: Rendimiento RVL.xlsm &middot; hoja BD</div>
+  </header>
+
+  <nav class="tabs">
+    <button data-view="resumen" class="active">Resumen</button>
+    <button data-view="rendimiento">Rendimiento</button>
+    <button data-view="posicionamiento">Posicionamiento</button>
+    <button data-view="alpha">Ranking Alpha</button>
+    <button data-view="gap">Over/Underweight</button>
+    <button data-view="historico">Serie Historica</button>
+  </nav>
+
+  <div id="view-resumen" class="view active"></div>
+  <div id="view-rendimiento" class="view"></div>
+  <div id="view-posicionamiento" class="view"></div>
+  <div id="view-alpha" class="view"></div>
+  <div id="view-gap" class="view"></div>
+  <div id="view-historico" class="view"></div>
+
+  <footer class="foot">Generado por build_rvl_dashboard.py &middot; uso interno Mesa de Inversiones &middot; AFP Integra</footer>
+</div>
+
+<script id="DATA" type="application/json">__DATA__</script>
+<script>
+const DATA = JSON.parse(document.getElementById('DATA').textContent);
+const RES = DATA.resumen, REND = DATA.rendimiento, POS = DATA.posicionamiento,
+      HIST = DATA.historicas, NOMBRES = DATA.nombres;
+const C = { pos:'var(--green)', neg:'var(--red)', navy:'var(--navy)', teal:'var(--teal)', gold:'var(--gold)' };
+
+function pct(v, dec=2){
+  if(v===null||v===undefined||typeof v!=='number'||isNaN(v)) return '&mdash;';
+  return (v*100).toFixed(dec)+'%';
+}
+function colorFor(v, scale=0.15){
+  if(typeof v!=='number'||isNaN(v)) return null;
+  const t = Math.max(-1, Math.min(1, v/scale));
+  if(t>=0) return `rgba(120,190,32,${0.10+0.35*t})`;   // verde institucional
+  return `rgba(192,57,43,${0.10+0.35*(-t)})`;           // rojo (fuera de paleta)
+}
+function valCell(v, opts={}){
+  const dec = opts.dec ?? 2, scale = opts.scale ?? 0.15;
+  const bg = colorFor(v, scale);
+  const txt = (typeof v==='number'&&v<0) ? 'color:var(--red)' : (typeof v==='number'&&v>0 ? 'color:var(--green)':'color:var(--gray)');
+  return `<span class="cell-val" style="background:${bg||'transparent'};${txt}">${pct(v,dec)}</span>`;
+}
+function barCell(v, max, color){
+  const w = max>0 ? Math.min(100, Math.max(0,(v/max)*100)) : 0;
+  return `<span class="cell-val bar"><span class="fill" style="width:${w}%;background:${color}"></span><span>${pct(v,2)}</span></span>`;
+}
+function gapCell(v, maxAbs){
+  const half = Math.min(50, Math.abs(v)/maxAbs*50);
+  const color = v>=0 ? 'var(--navy)' : 'var(--red)';
+  const left = v>=0 ? 50 : 50-half;
+  return `<span class="cell-val bar" style="min-width:110px">
+    <span class="fill" style="left:${left}%;width:${half}%;background:${color}"></span>
+    <span>${pct(v,2)}</span></span>`;
+}
+document.getElementById('fechaCorte').textContent = RES.fecha_corte || '\u2014';
+
+document.querySelectorAll('nav.tabs button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('view-'+btn.dataset.view).classList.add('active');
+  });
+});
+
+/* ---------------- Multi-select generico ---------------- */
+function buildMultiSelect(container, label, options, selected, onChange){
+  const wrap = document.createElement('div');
+  wrap.className = 'multisel';
+  wrap.innerHTML = `<div class="label">${label} (${selected.length}/${options.length}) \u25BE</div>
+    <div class="panel">${options.map(o=>`<label class="opt"><input type="checkbox" value="${o}" ${selected.includes(o)?'checked':''}> ${o}</label>`).join('')}</div>`;
+  container.appendChild(wrap);
+  wrap.querySelector('.label').addEventListener('click', (e)=>{ wrap.classList.toggle('open'); e.stopPropagation(); });
+  document.addEventListener('click', (e)=>{ if(!wrap.contains(e.target)) wrap.classList.remove('open'); });
+  wrap.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      const chosen = [...wrap.querySelectorAll('input:checked')].map(c=>c.value);
+      wrap.querySelector('.label').textContent = `${label} (${chosen.length}/${options.length}) \u25BE`;
+      onChange(chosen);
+    });
+  });
+  return wrap;
+}
+
+/* ==================================================================
+   RESUMEN (identico en estructura al monitor original)
+   ================================================================== */
+(function(){
+  const el = document.getElementById('view-resumen');
+  const funds = ['F1','F2','F3'];
+  function kpis(){
+    let html = '<div class="kpirow">';
+    funds.forEach(f=>{
+      const inRet = RES.retorno[f]['IN'];
+      html += `<div class="kpi"><div class="l">${f} &middot; IN Aggr.</div><div class="v" style="color:${inRet.aggr>=0?'var(--green)':'var(--red)'}">${pct(inRet.aggr)}</div></div>`;
+    });
+    return html+'</div>';
+  }
+  function matrix(title, obj){
+    let html = `<section class="block"><h2><span class="dot"></span>${title}</h2><div class="grid3">`;
+    funds.forEach(f=>{
+      const rows = obj[f];
+      html += `<div><div class="hint" style="margin-bottom:6px">${f}</div><table><thead><tr><th class="left">Tipo</th><th>Day</th><th>WTD</th><th>MTD</th><th>Aggr.</th></tr></thead><tbody>`;
+      Object.keys(rows).forEach(k=>{
+        const r = rows[k];
+        html += `<tr><td class="left">${k}</td><td>${valCell(r.day,{scale:.02})}</td><td>${valCell(r.wtd,{scale:.03})}</td><td>${valCell(r.mtd,{scale:.06})}</td><td>${valCell(r.aggr,{scale:.15})}</td></tr>`;
+      });
+      html += `</tbody></table></div>`;
+    });
+    return html+'</div></section>';
+  }
+  function performers(title, obj){
+    let html = `<section class="block"><h2><span class="dot"></span>${title}</h2><div class="grid3">`;
+    funds.forEach(f=>{
+      const d = obj[f];
+      html += `<div><div class="hint" style="margin-bottom:6px">${f}</div><table><thead><tr><th class="left">${d.cols[0]}</th><th>${d.cols[1]}</th><th>${d.cols[2]}</th><th>${d.cols[3]}</th><th>${d.cols[4]}</th></tr></thead><tbody>`;
+      d.rows.forEach(r=>{
+        html += `<tr><td class="left">${r.nombre}</td><td>${valCell(r.aggr,{scale:.3})}</td><td>${valCell(r.c1,{scale:.03})}</td><td>${valCell(r.c2,{scale:.03})}</td><td>${valCell(r.c3,{scale:.03})}</td></tr>`;
+      });
+      html += `</tbody></table></div>`;
+    });
+    return html+'</div></section>';
+  }
+  function sectorPos(){
+    let html = `<section class="block"><h2><span class="dot"></span>Posicionamiento Sectorial</h2><div class="grid3">`;
+    funds.forEach(f=>{
+      const rows = RES.sector_pos[f];
+      const max = Math.max(...rows.map(r=>Math.max(r.portafolio||0,r.sistema||0,r.benchmark||0)));
+      html += `<div><div class="hint" style="margin-bottom:6px">${f} &middot; peso sectorial</div><table><thead><tr><th class="left">Sector</th><th>Portafolio</th><th>Sistema</th><th>Benchmark</th></tr></thead><tbody>`;
+      rows.forEach(r=>{
+        html += `<tr><td class="left">${r.sector}</td><td>${barCell(r.portafolio,max,'var(--gold)')}</td><td>${barCell(r.sistema,max,'var(--teal)')}</td><td>${barCell(r.benchmark,max,'var(--gray)')}</td></tr>`;
+      });
+      html += `</tbody></table></div>`;
+    });
+    return html+'</div><div class="legend"><span class="swatch" style="background:var(--gold)"></span>Portafolio <span class="swatch" style="background:var(--teal)"></span>Sistema <span class="swatch" style="background:var(--gray)"></span>Benchmark</div></section>';
+  }
+  el.innerHTML = kpis()+matrix('Retorno &middot; Day / WTD / MTD / Aggr.', RES.retorno)
+    + matrix('Alpha vs. Benchmarks', RES.alpha)
+    + performers('Top 5 Performers vs. Sistema (ex Integra)', RES.top5)
+    + performers('Bottom 5 Performers vs. Sistema (ex Integra)', RES.bottom5)
+    + sectorPos();
+})();
+
+/* ==================================================================
+   TABLA AGRUPADA POR SECTOR (Rendimiento / Posicionamiento) - reutilizable
+   ================================================================== */
+function buildGroupedView(containerId, dataset, opts){
+  const el = document.getElementById(containerId);
+  const funds = ['F1','F2','F3'];
+  let currentFund = 'F1', sortKey=null, sortDir=1;
+  let selectedSectors = dataset.sectors.filter(s=>s.sector!=='Total').map(s=>s.sector);
+
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  const segwrap = document.createElement('div'); segwrap.className='segctl'; segwrap.id=containerId+'-fund';
+  segwrap.innerHTML = funds.map((f,i)=>`<button data-f="${f}" class="${i===0?'active':''}">${f}</button>`).join('');
+  toolbar.appendChild(segwrap);
+  buildMultiSelect(toolbar, 'Sectores', selectedSectors.slice(), selectedSectors, (chosen)=>{ selectedSectors=chosen; render(); });
+  const search = document.createElement('input'); search.className='search'; search.id=containerId+'-search'; search.placeholder='Buscar ticker o nombre...';
+  toolbar.appendChild(search);
+  const hint = document.createElement('span'); hint.className='hint';
+  hint.textContent = `${dataset.sectors.length} sectores \u00b7 ${dataset.sectors.reduce((a,s)=>a+s.stocks.length,0)} instrumentos`;
+  toolbar.appendChild(hint);
+
+  const section = document.createElement('section'); section.className='block';
+  section.innerHTML = `<h2><span class="dot"></span>${opts.title} &mdash; corte ${dataset.fecha_corte}</h2><div class="tablewrap"></div>`;
+  el.appendChild(toolbar); el.appendChild(section);
+  const wrap = section.querySelector('.tablewrap');
+
+  function render(){
+    const cols = opts.columns;
+    let html = `<table><thead><tr><th class="left">Instrumento</th>`;
+    cols.forEach(c=>html+=`<th data-key="${c.key}">${c.label}<span class="arrow">\u25BC</span></th>`);
+    html += `</tr></thead><tbody>`;
+    dataset.sectors.forEach((sec,si)=>{
+      if(sec.sector==='Total' || !selectedSectors.includes(sec.sector)) return;
+      const sectorVal = opts.sectorRow(sec, currentFund);
+      html += `<tr class="sector-row" data-sec="${si}"><td>${sec.sector}</td>`;
+      cols.forEach(c=>{ html += `<td>${opts.cellFmt(sectorVal[c.key], c, true)}</td>`; });
+      html += `</tr>`;
+      let stocks = sec.stocks.slice();
+      if(sortKey){
+        stocks.sort((a,b)=>{
+          const va = opts.rowVal(a,currentFund)[sortKey] ?? -Infinity;
+          const vb = opts.rowVal(b,currentFund)[sortKey] ?? -Infinity;
+          return (va-vb)*sortDir;
+        });
+      }
+      stocks.forEach(st=>{
+        const rv = opts.rowVal(st, currentFund);
+        html += `<tr class="stock-row" data-sec="${si}" data-name="${(st.nombre+' '+st.ticker).toLowerCase()}"><td>${st.nombre} <span class="ticker">${st.ticker||''}</span></td>`;
+        cols.forEach(c=>{ html += `<td>${opts.cellFmt(rv[c.key], c, false)}</td>`; });
+        html += `</tr>`;
+      });
+    });
+    html += `</tbody></table>`;
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('thead th[data-key]').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const k = th.dataset.key;
+        if(sortKey===k){ sortDir*=-1; } else { sortKey=k; sortDir=-1; }
+        wrap.querySelectorAll('thead th').forEach(t=>t.classList.remove('sorted'));
+        th.classList.add('sorted'); th.querySelector('.arrow').textContent = sortDir===1?'\u25B2':'\u25BC';
+        render();
+      });
+    });
+    wrap.querySelectorAll('tr.sector-row').forEach(tr=>{
+      tr.addEventListener('click', ()=>{
+        tr.classList.toggle('collapsed');
+        wrap.querySelectorAll(`tr.stock-row[data-sec="${tr.dataset.sec}"]`).forEach(r=>r.classList.toggle('hidden'));
+      });
+    });
+    applyFilter();
+  }
+  function applyFilter(){
+    const q = search.value.trim().toLowerCase();
+    wrap.querySelectorAll('tr.stock-row').forEach(r=>{ r.style.display = (!q || r.dataset.name.includes(q)) ? '' : 'none'; });
+  }
+  segwrap.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      segwrap.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active'); currentFund=b.dataset.f; render();
+    });
+  });
+  search.addEventListener('input', applyFilter);
+  render();
+}
+
+buildGroupedView('view-rendimiento', REND, {
+  title: 'Rendimiento por sector e instrumento (YTD)',
+  columns: REND.dates.map((d,i)=>({key:'d'+i, label:d})),
+  sectorRow: (sec,fund)=>{ const y=sec.ytd[fund]; const o={}; REND.dates.forEach((d,i)=>o['d'+i]=y[d]); return o; },
+  rowVal: (st,fund)=>{ const y=st.ytd[fund]; const o={}; REND.dates.forEach((d,i)=>o['d'+i]=y[d]); return o; },
+  cellFmt: (v,c,isSector)=> valCell(v,{scale:isSector?.06:.12}),
+});
+
+buildGroupedView('view-posicionamiento', POS, {
+  title: 'Posicionamiento (pesos) por sector e instrumento',
+  columns: POS.tipos.map(t=>({key:t, label:t})),
+  sectorRow: (sec,fund)=> sec.weights[fund],
+  rowVal: (st,fund)=> st.weights[fund],
+  cellFmt: (v,c,isSector)=> barCell(v, isSector?1:0.35, 'var(--gold)'),
+});
+
+/* ==================================================================
+   NUEVO 1: RANKING DE ALPHA VS. SISTEMA POR ACCION
+   ================================================================== */
+(function(){
+  const el = document.getElementById('view-alpha');
+  const funds = ['F1','F2','F3'];
+  let currentFund = 'F1';
+  const allStocks = REND.sectors.filter(s=>s.sector!=='Del Benchmark').flatMap(s=>s.stocks);
+  let selectedSectors = [...new Set(allStocks.map(s=>s.sector))];
+
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  const seg = document.createElement('div'); seg.className='segctl';
+  seg.innerHTML = funds.map((f,i)=>`<button data-f="${f}" class="${i===0?'active':''}">${f}</button>`).join('');
+  toolbar.appendChild(seg);
+  buildMultiSelect(toolbar, 'Sectores', selectedSectors.slice(), selectedSectors, (c)=>{selectedSectors=c; render();});
+  el.appendChild(toolbar);
+
+  const section = document.createElement('section'); section.className='block';
+  section.innerHTML = `<h2><span class="dot"></span>Ranking de Alpha vs. Sistema por accion</h2><div class="hint" style="margin-bottom:10px">Ordenado de mayor a menor alpha (retorno de la accion en el portafolio menos el retorno del Sistema, al ultimo corte)</div><div class="tablewrap"></div>`;
+  el.appendChild(section);
+  const wrap = section.querySelector('.tablewrap');
+
+  function render(){
+    let stocks = allStocks.filter(s=>selectedSectors.includes(s.sector));
+    stocks = stocks.map(s=>({...s, a: s.alpha_sis[currentFund]}))
+                    .filter(s=>typeof s.a === 'number')
+                    .sort((a,b)=>b.a-a.a);
+    const maxAbs = Math.max(0.001, ...stocks.map(s=>Math.abs(s.a)));
+    let html = `<table><thead><tr><th class="left">Instrumento</th><th class="left">Sector</th><th>Alpha vs. Sistema (${currentFund})</th></tr></thead><tbody>`;
+    stocks.forEach(s=>{
+      html += `<tr><td class="left">${s.nombre} <span class="ticker">${s.ticker||''}</span></td><td class="left" style="color:var(--gray);font-size:11.5px">${s.sector}</td><td>${barCell(Math.max(s.a,0), maxAbs, s.a>=0?'var(--green)':'var(--red)') }</td></tr>`;
+    });
+    html += `</tbody></table>`;
+    wrap.innerHTML = html;
+  }
+  seg.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click', ()=>{ seg.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); currentFund=b.dataset.f; render(); });
+  });
+  render();
+})();
+
+/* ==================================================================
+   NUEVO 2: MAPA DE OVER/UNDERWEIGHT (peso portafolio vs. benchmark)
+   ================================================================== */
+(function(){
+  const el = document.getElementById('view-gap');
+  const funds = ['F1','F2','F3'];
+  let currentFund = 'F1';
+  const allStocks = POS.sectors.filter(s=>s.sector!=='Del Benchmark').flatMap(s=>s.stocks);
+  let selectedTipos = ['IN'];
+  let selectedSectors = [...new Set(allStocks.map(s=>s.sector))];
+
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  const seg = document.createElement('div'); seg.className='segctl';
+  seg.innerHTML = funds.map((f,i)=>`<button data-f="${f}" class="${i===0?'active':''}">${f}</button>`).join('');
+  toolbar.appendChild(seg);
+  buildMultiSelect(toolbar, 'Tipos', POS.tipos.slice(), selectedTipos, (c)=>{selectedTipos=c.length?c:['IN']; render();});
+  buildMultiSelect(toolbar, 'Sectores', selectedSectors.slice(), selectedSectors, (c)=>{selectedSectors=c; render();});
+  el.appendChild(toolbar);
+
+  const section = document.createElement('section'); section.className='block';
+  section.innerHTML = `<h2><span class="dot"></span>Over / Underweight vs. Benchmark</h2><div class="hint" style="margin-bottom:10px">Peso en el portafolio menos peso en el benchmark, por tipo de fondo seleccionado. Azul = sobreponderado, rojo = subponderado.</div><div class="tablewrap"></div>`;
+  el.appendChild(section);
+  const wrap = section.querySelector('.tablewrap');
+
+  function render(){
+    const stocks = allStocks.filter(s=>selectedSectors.includes(s.sector));
+    let html = `<table><thead><tr><th class="left">Instrumento</th><th class="left">Sector</th>`;
+    selectedTipos.forEach(t=>html+=`<th>${t}</th>`);
+    html += `</tr></thead><tbody>`;
+    const gaps = {};
+    selectedTipos.forEach(t=>{ gaps[t] = stocks.map(s=>(s.weights[currentFund][t]||0) - (s.benchmark||0)); });
+    const maxAbs = Math.max(0.001, ...selectedTipos.flatMap(t=>gaps[t].map(Math.abs)));
+    stocks.forEach((s,i)=>{
+      html += `<tr><td class="left">${s.nombre} <span class="ticker">${s.ticker||''}</span></td><td class="left" style="color:var(--gray);font-size:11.5px">${s.sector}</td>`;
+      selectedTipos.forEach(t=>{ html += `<td>${gapCell(gaps[t][i], maxAbs)}</td>`; });
+      html += `</tr>`;
+    });
+    html += `</tbody></table>`;
+    wrap.innerHTML = html;
+  }
+  seg.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click', ()=>{ seg.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); currentFund=b.dataset.f; render(); });
+  });
+  render();
+})();
+
+/* ==================================================================
+   NUEVO 3: SERIE HISTORICA DE RETORNO ACUMULADO POR INSTRUMENTO
+   ================================================================== */
+(function(){
+  const el = document.getElementById('view-historico');
+  const funds = ['F1','F2','F3'];
+  let currentFund = 'F1';
+  const codigos = Object.keys(HIST.series);
+  const palette = ['var(--navy)','var(--teal)','var(--gold)','var(--green)','var(--red)','var(--indigo)'];
+  let selected = codigos.slice(0, Math.min(3, codigos.length));
+
+  const toolbar = document.createElement('div'); toolbar.className='toolbar';
+  const seg = document.createElement('div'); seg.className='segctl';
+  seg.innerHTML = funds.map((f,i)=>`<button data-f="${f}" class="${i===0?'active':''}">${f}</button>`).join('');
+  toolbar.appendChild(seg);
+  buildMultiSelect(toolbar, 'Instrumentos', codigos.map(c=>NOMBRES[c]||c), selected.map(c=>NOMBRES[c]||c),
+    (chosenNames)=>{ selected = codigos.filter(c=>chosenNames.includes(NOMBRES[c]||c)); render(); });
+  el.appendChild(toolbar);
+
+  const section = document.createElement('section'); section.className='block';
+  section.innerHTML = `<h2><span class="dot"></span>Retorno acumulado por instrumento (${HIST.dates[0]||''} &rarr; ${HIST.dates[HIST.dates.length-1]||''})</h2><div class="chartwrap"></div><div class="legend"></div>`;
+  el.appendChild(section);
+  const chartwrap = section.querySelector('.chartwrap');
+  const legend = section.querySelector('.legend');
+
+  function render(){
+    const W=1000,H=340,padL=50,padR=16,padT=16,padB=26;
+    const dates = HIST.dates;
+    if(!dates.length || !selected.length){ chartwrap.innerHTML='<div class="hint">Sin datos para el rango/fondo seleccionado.</div>'; legend.innerHTML=''; return; }
+    const series = selected.map(c=>HIST.series[c][currentFund]||[]);
+    const allVals = series.flat().filter(v=>typeof v==='number');
+    const maxV = Math.max(0.02, ...allVals), minV = Math.min(-0.02, ...allVals);
+    const x = i => padL + (i/(dates.length-1))*(W-padL-padR);
+    const y = v => padT + (1-(v-minV)/(maxV-minV))*(H-padT-padB);
+
+    let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+    [0,0.25,0.5,0.75,1].forEach(f=>{
+      const yy = padT + f*(H-padT-padB);
+      svg += `<line class="gridline" x1="${padL}" x2="${W-padR}" y1="${yy}" y2="${yy}"/>`;
+      const val = maxV - f*(maxV-minV);
+      svg += `<text x="4" y="${yy+3}">${(val*100).toFixed(1)}%</text>`;
+    });
+    svg += `<line class="zeroline" x1="${padL}" x2="${W-padR}" y1="${y(0)}" y2="${y(0)}"/>`;
+    series.forEach((s,si)=>{
+      if(!s.length) return;
+      let path = s.map((v,i)=> (i===0?'M':'L') + x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ');
+      svg += `<path d="${path}" fill="none" stroke="${palette[si%palette.length]}" stroke-width="1.8"/>`;
+    });
+    const step = Math.max(1, Math.floor(dates.length/8));
+    for(let i=0;i<dates.length;i+=step){
+      svg += `<text x="${x(i)}" y="${H-8}" text-anchor="middle">${dates[i].slice(5)}</text>`;
+    }
+    svg += `</svg>`;
+    chartwrap.innerHTML = svg;
+    legend.innerHTML = selected.map((c,i)=>{
+      const last = HIST.series[c][currentFund]?.slice(-1)[0];
+      return `<span class="swatch" style="background:${palette[i%palette.length]}"></span>${NOMBRES[c]||c} (${pct(last)})`;
+    }).join('  ');
+  }
+  seg.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click', ()=>{ seg.querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); currentFund=b.dataset.f; render(); });
+  });
+  render();
+})();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", required=True, help="Ruta al export de BD (ej. BD_output4.xlsx)")
+    parser.add_argument("--output", default="dashboard.html", help="Ruta del HTML de salida")
+    parser.add_argument("--historial-desde", default=None,
+                         help="Fecha YYYY-MM-DD desde la que se arma la serie historica (default: fecha_inicio del Resumen)")
+    args = parser.parse_args()
+    build(args.input, args.output, args.historial_desde)
