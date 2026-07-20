@@ -1,0 +1,83 @@
+Estructuralmente los charts están bien; el problema es que salen con el formato por defecto de Word: fuente Calibri, etiquetas negras sobre relleno azul oscuro, título automático y ejes visibles. Voy a inyectar el formato en el XML.Solo cambian tres cosas dentro del bloque de gráficos. Te doy los reemplazos exactos.
+
+**1. Agrega estas dos funciones nuevas justo antes de `def agregar_grafico(`:**
+
+```python
+def _txpr(size=900, color="1E2E6E", bold=0):
+    """Bloque de formato de texto reutilizable (Arial, color corporativo)."""
+    return (f'<txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="{size}" '
+            f'b="{bold}"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+            f'<a:latin typeface="Arial"/></a:defRPr></a:pPr>'
+            f'<a:endParaRPr lang="es-PE"/></a:p></txPr>')
+
+
+def _formatear_xml(xml, tipo, color_etiqueta, size_cat):
+    """Aplica el estilo del reporte al XML del grafico.
+
+    Word usa su formato por defecto (Calibri, etiquetas negras, titulo
+    automatico, bordes) si el XML no lo especifica. Aqui se inyecta el
+    formato respetando el orden que exige el esquema OOXML.
+    """
+    A = ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    if "xmlns:a=" not in xml.split(">")[0]:
+        xml = xml.replace("<chartSpace ", "<chartSpace" + A + " ", 1)
+
+    # sin esquinas redondeadas y sin titulo automatico
+    xml = xml.replace("<chart>", '<roundedCorners val="0"/><chart>'
+                                 '<autoTitleDeleted val="1"/>', 1)
+
+    # etiquetas de datos: color legible, negrita, centradas en la barra
+    pos = '<dLblPos val="ctr"/>' if tipo == "barras" else ""
+    xml = xml.replace(
+        "<dLbls><showLegendKey",
+        "<dLbls>" + _txpr(850, color_etiqueta, 1) + pos + "<showLegendKey")
+
+    # ejes: tipografia corporativa, sin linea de eje
+    xml = xml.replace("<crossAx", _txpr(size_cat) +
+                      '<spPr><a:ln><a:noFill/></a:ln></spPr>' + "<crossAx")
+
+    # leyenda y fuente general del grafico
+    xml = xml.replace("</legend>", _txpr(850) + "</legend>")
+    xml = xml.replace("</chart>",
+                      "</chart><spPr><a:noFill/><a:ln><a:noFill/></a:ln></spPr>"
+                      + _txpr(900), 1)
+    return xml
+```
+
+**2. En la firma de `agregar_grafico`, agrega dos parámetros al final:**
+
+```python
+                    horizontal=False, hueco=55, leyenda="r",
+                    color_etiqueta="FFFFFF", size_cat=800, parrafo=None):
+```
+
+**3. Cuatro líneas dentro de `agregar_grafico`:**
+
+`ch.gapWidth = 55` → `ch.gapWidth = 45`
+
+```python
+        ch.y_axis.delete = False
+        ch.x_axis.delete = False
+```
+→
+```python
+        ch.y_axis.delete = True    # el eje de valores se omite, como en el reporte
+        ch.x_axis.delete = False
+```
+
+Después de `ch.set_categories(...)` en la rama de torta/dona, agrega `ch.varyColors = False`.
+
+Y justo antes del bloque de `externalData`, inserta:
+
+```python
+    # estilo del reporte (fuentes, etiquetas, ejes, sin titulo automatico)
+    xml_chart = _formatear_xml(xml_chart, tipo, color_etiqueta, size_cat)
+```
+
+---
+
+Qué corrige cada cosa: `autoTitleDeleted` quita el título automático que Word inventaba con el nombre de la serie. `_txpr` fuerza Arial en etiquetas, ejes y leyenda, en vez del Calibri por defecto. Las etiquetas de datos pasan a blanco en negrita centradas, que es el problema que hacía ilegibles los números sobre el azul. `y_axis.delete = True` elimina el eje de valores, igual que el PDF publicado. `roundedCorners` y el `spPr` sin relleno quitan el marco alrededor del gráfico. `varyColors = False` evita que Word reasigne su paleta por encima de los colores corporativos en tortas y donas.
+
+Verifiqué que el XML de los 5 gráficos sigue siendo válido y que `externalData` se mantiene, así que "Editar datos" sigue funcionando.
+
+Si aun así no te convence el resultado visual, el fallback es limpio: en `generar_word` reemplaza cada `agregar_grafico(...)` por la versión con imagen, y recuperas `_png_barras` y `_png_circular` del script anterior. Pero pruébalo primero, porque el problema era formato ausente, no una limitación del formato nativo.
