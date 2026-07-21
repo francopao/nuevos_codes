@@ -1,0 +1,734 @@
+# -*- coding: utf-8 -*-
+# =============================================================================
+# RENDIMIENTOS RVL — VERSIÓN MODERNIZADA 2026 (Python 3.10–3.12, pandas 2.x)
+#
+# QUÉ HACE (idéntico al flujo original 2022/2023):
+#   1) Lee QEST_BD.xlsm (DQ_IN, DQ_RV) y anexa al Monitor los registros nuevos
+#      posteriores a la última fecha ya cargada en DQ_IN / DQ_SIS.
+#   2) Escribe las bases actualizadas en las hojas DQ_IN y DQ_SIS del Monitor.
+#   3) Calcula AUM por AFP/fondo (DataValorCuota_IN.xlsm) y lo convierte a USD
+#      con el tipo de cambio de BDPrecios (hoja BDTC).
+#   4) Lee precios/retornos por ISIN (BDat_Act), convierte monedas a PEN,
+#      lee precios Bloomberg de la hoja RVL (con y sin dividendos).
+#   5) Arma cantidades (Q) por AFP-Fondo, PxQ, weights (total / líquida "_L" /
+#      ilíquida "_IL"), rezaga los weights un día (T→T+1), calcula retornos
+#      ponderados, acumulados, sectoriales y de benchmarks (EPU, ETFPERU).
+#   6) Exporta la matriz consolidada a la hoja "BD" del Monitor.
+#   7) Genera el PDF de rendimientos acumulados, sectores y precios.
+#
+# BUGS DEL CÓDIGO ORIGINAL CORREGIDOS AQUÍ (causas probables del mal cálculo
+# de la hoja BD):
+#   [B1] df_BDTC.drop(df1.index[:5]) y df_BDat_Act.drop(df1.index[:13]) usaban
+#        el índice de OTRO DataFrame (df1, el QEST). Funcionaba solo por
+#        casualidad (RangeIndex). Ahora se usa .iloc[5:] / .iloc[13:].
+#   [B2] En Matriz_Weights, "weight_EXSIS_F1_" apuntaba por error a
+#        weight_EXSIS_F1_L (cartera líquida). Corregido a weight_EXSIS_F1.
+#   [B3] En la exportación se abría un segundo xw.Book sin usarlo; se
+#        reutiliza el mismo workbook y se guarda explícitamente al final
+#        (el original nunca llamaba a save(), por lo que un cierre de Excel
+#        sin guardar dejaba la hoja BD desactualizada / inconsistente).
+#
+# LIBRERÍAS "SEGURAS" (todas mantenidas activamente; versiones probadas):
+#   pip install "pandas>=2.2,<3" "numpy>=1.26,<3" "openpyxl>=3.1" \
+#               "python-calamine>=0.2" "xlwings>=0.31" "matplotlib>=3.8"
+#   - Lectura: pandas + engine="calamine" (rápido, solo-lectura, no toca los
+#     archivos input) y openpyxl para la hoja RVL (xlsm mixto).
+#   - Escritura al Monitor: xlwings (preserva macros, formatos y fórmulas de
+#     las demás hojas del .xlsm; nunca reescribe el archivo completo).
+#   Se eliminaron dependencias frágiles/obsoletas del original: polars, xlrd,
+#   win32com directo, imports duplicados de datetime.
+#
+# REQUISITO: Windows con Excel instalado (xlwings usa COM para escribir el
+# .xlsm sin dañarlo). Los archivos input NUNCA se modifican; solo se escribe
+# en el Monitor (hojas DQ_IN, DQ_SIS y BD) y en los PDFs de salida.
+# =============================================================================
+
+from __future__ import annotations
+
+import datetime as dt
+import sys
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg")  # backend sin ventana: evita cuelgues al correr por consola
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.backends.backend_pdf import PdfPages
+
+try:
+    import xlwings as xw
+except ImportError:
+    sys.exit("[ERROR] Falta xlwings. Instala:  pip install xlwings")
+
+# =============================================================================
+# 0. CONFIGURACIÓN — RUTAS (ajústalas si cambian de ubicación)
+# =============================================================================
+
+QEST_PATH    = Path(r"Z:\Benchmarking\QEST_BD.xlsm")
+MONITOR_PATH = Path(r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\Rendimiento RVL.xlsm")
+PDF_PATH     = Path(r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\PDFs\Rendimiento RVL YTD.pdf")
+PDF_RED_PATH = Path(r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Rendimiento RVL\PDFs\Rendimiento RVL YTD Reducido.pdf")
+AUM_PATH     = Path(r"Z:\Valor Cuota\DataValorCuota_IN.xlsm")
+BDPRECIOS_PATH = Path(r"Z:\Benchmarking\BDPrecios_VB_IN.xlsx")
+
+GUARDAR_MONITOR_AL_FINAL = True   # guarda el .xlsm tras escribir DQ_IN/DQ_SIS/BD
+GENERAR_PDF_REDUCIDO     = False  # versión solo-Integra
+
+FECHA_HOY = dt.datetime.today().strftime("%d.%m.%y")
+
+# Cartera líquida (ISINs fijos, igual que el original)
+LIQUIDOS = [
+    "302012200001", "302008100002", "3220082A1040",
+    "300013200001", "300013200002", "3920836W5029",
+    "3020836W5029", "345445281022", "345217200001",
+]
+
+_BLANCOS_BLOOMBERG = ["#N/A N/A", "NM", "(Invalid Formula Name)", "NA"]
+
+FONDOS = ["1", "2", "3"]
+AFPS   = ["IN", "HA", "PF", "RI"]
+
+
+# =============================================================================
+# 1. UTILIDADES DE VALIDACIÓN (blindaje / mensajes oportunos al usuario)
+# =============================================================================
+
+def fallar(msg: str) -> None:
+    """Aborta con un mensaje claro y accionable."""
+    sys.exit(f"\n[ERROR] {msg}\n")
+
+
+def validar_rutas() -> None:
+    faltantes = [p for p in
+                 (QEST_PATH, MONITOR_PATH, AUM_PATH, BDPRECIOS_PATH)
+                 if not p.exists()]
+    if faltantes:
+        listado = "\n  - ".join(str(p) for p in faltantes)
+        fallar("No se encuentran estos archivos (¿unidad Z: conectada?):\n  - " + listado)
+    for pdf in (PDF_PATH, PDF_RED_PATH):
+        if not pdf.parent.exists():
+            fallar(f"No existe la carpeta de PDFs: {pdf.parent}")
+
+
+def leer_excel(path: Path, sheet: str, **kw) -> pd.DataFrame:
+    """
+    Lectura SOLO-LECTURA con calamine (rápido, no bloquea ni altera el archivo).
+    Si calamine no está instalado, cae a openpyxl con aviso.
+    """
+    try:
+        return pd.read_excel(path, sheet_name=sheet, engine="calamine", **kw)
+    except ImportError:
+        warnings.warn("python-calamine no instalado; usando openpyxl (más lento). "
+                      "Recomendado:  pip install python-calamine")
+        return pd.read_excel(path, sheet_name=sheet, engine="openpyxl", **kw)
+    except ValueError as e:
+        fallar(f"No se pudo leer la hoja '{sheet}' de {path.name}: {e}")
+
+
+def buscar_fecha(lista_fechas: list, fecha, contexto: str) -> int:
+    """index() blindado: si la última fecha del Monitor no existe en el QEST,
+    explica el problema en vez de reventar con ValueError críptico."""
+    try:
+        return lista_fechas.index(fecha)
+    except ValueError:
+        fallar(
+            f"{contexto}: la última fecha registrada en el Monitor "
+            f"({fecha!r}) NO aparece en el QEST. Posibles causas: el QEST fue "
+            f"depurado/reiniciado, formatos de fecha distintos, o la hoja del "
+            f"Monitor tiene una fecha manual errónea. Revisa ambas hojas antes "
+            f"de volver a correr."
+        )
+
+
+def convertir_columnas_object_a_float(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte a float64 toda columna object/str (pandas>=2.1 puede devolver
+    dtype 'str' tras leer Excel; pedir ambos es retrocompatible)."""
+    df = df.copy()
+    for col in df.select_dtypes(include=["object", "string"]).columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("float64")
+    return df
+
+
+def detectar_sufijo_cartera(nombre_clave: str) -> str:
+    low = nombre_clave.lower()
+    if any(t in low for t in ("_il", "iliq", "ilíquida", "iliquida")):
+        return "_IL"
+    if any(t in low for t in ("_l", "_liq", "liquida", "líquida")):
+        return "_L"
+    return ""
+
+
+# =============================================================================
+# 2. ACTUALIZACIÓN DE BASES DQ_IN / DQ_SIS
+# =============================================================================
+
+def actualizar_DQ_IN(df1: pd.DataFrame, DQ_IN_BD: pd.DataFrame,
+                     lista_in: list[str]) -> pd.DataFrame:
+    """Anexa a DQ_IN_BD los registros del QEST posteriores a la última fecha."""
+    df = df1.iloc[10:].transpose().rename(columns={10: "Isins"})
+    filtrada = df[df["Isins"].isin(lista_in)].transpose()
+    filtrada.columns = filtrada.iloc[0].to_list()
+    filtrada = filtrada.iloc[1:]
+
+    if DQ_IN_BD.empty or "Fecha" not in DQ_IN_BD.columns:
+        fallar("La hoja DQ_IN del Monitor está vacía o sin columna 'Fecha'.")
+    ultima = DQ_IN_BD["Fecha"].iloc[-1]
+    print(f"DQ IN — última fecha en Monitor: {ultima}")
+
+    fechas_qest = filtrada["Fecha"].values.tolist()
+    # +9: el bloque QEST repite 9 filas de encabezado por fecha (igual que 2022)
+    ubi = buscar_fecha(fechas_qest, ultima, "DQ_IN") + 9
+
+    nuevos = (filtrada.iloc[ubi:]
+              .reset_index(drop=True)
+              .loc[lambda d: d["Dato"] == "Q"])
+    if nuevos.empty:
+        print("DQ IN — sin registros nuevos (Monitor ya al día).")
+    else:
+        print(f"DQ IN — {len(nuevos)} registros nuevos anexados.")
+    return pd.concat([DQ_IN_BD, nuevos]).reset_index(drop=True)
+
+
+def actualizar_DQ_SIS(df2: pd.DataFrame, DQ_SIS_BD: pd.DataFrame,
+                      lista_ex: list[str]) -> pd.DataFrame:
+    """Anexa a DQ_SIS los registros nuevos del QEST (sistema HA/PF/RI)."""
+    df3 = df2.iloc[11:].transpose().rename(columns={13: "Isins"})
+    filtrada = df3[df3["Isins"].isin(lista_ex)].transpose()
+    filtrada = filtrada.reset_index(drop=True).dropna(how="all")
+    filtrada.columns = filtrada.iloc[2].to_list()
+    filtrada = filtrada.drop(2).drop(columns=["Fondo"])
+
+    base = DQ_SIS_BD.copy()
+    base.columns = base.iloc[0].to_list()
+    base_h = base.drop(0)
+    hist = base_h.iloc[2:]
+
+    if "Fecha" not in hist.columns:
+        fallar("La hoja DQ_SIS del Monitor no tiene columna 'Fecha' en la fila esperada.")
+    ultima = hist["Fecha"][::-1].drop_duplicates().iloc[0]
+    print(f"DQ SIS — última fecha en Monitor: {ultima}")
+
+    fechas_qest = filtrada["Fecha"].values.tolist()
+    ubi = buscar_fecha(fechas_qest, ultima, "DQ_SIS")
+
+    nuevos = filtrada.iloc[ubi:].reset_index(drop=True).dropna(how="all")
+    final_hist = base_h.iloc[:ubi]
+
+    final_hist = final_hist.loc[:, ~final_hist.columns.duplicated()]
+    nuevos = nuevos.loc[:, ~nuevos.columns.duplicated()]
+    return pd.concat([final_hist, nuevos], ignore_index=True)
+
+
+# =============================================================================
+# 3. AUM
+# =============================================================================
+
+def calculo_aum(df: pd.DataFrame) -> pd.DataFrame:
+    lista_df = []
+    for fondo in FONDOS:
+        for afp in AFPS:
+            tmp = df.iloc[4:].transpose()
+            sel = tmp[tmp[4].isin(["Fecha", f"{afp}-FONDO{fondo}"])].transpose()
+            if sel.shape[1] < 2:
+                fallar(f"AUM: no se encontró la serie '{afp}-FONDO{fondo}' en "
+                       f"DataHistórica de {AUM_PATH.name}.")
+            sel.columns = sel.iloc[0].to_list()
+            sel = sel.drop(4, axis=0)
+            sel["Fecha"] = pd.to_datetime(sel["Fecha"], errors="coerce")
+            sel = (sel.dropna(subset=["Fecha"]).set_index("Fecha")
+                      .set_axis([f"{afp}_F{fondo}"], axis=1)
+                      .sort_index().loc["2014-12-30":])
+            sel = sel.replace("ND", 0).fillna(0)
+            sel = sel.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float64)
+            lista_df.append(sel)
+
+    out = pd.concat(lista_df, axis=1)
+    out["Total"] = out.sum(axis=1)
+    for afp in AFPS:
+        out[f"{afp}_MF"] = out.filter(like=f"{afp}_").sum(axis=1)
+        out[f"{afp}_Share"] = out[f"{afp}_MF"] / out["Total"].replace(0, np.nan)
+
+    combinaciones = {"EXIN": ["HA", "PF", "RI"], "EXHA": ["IN", "PF", "RI"],
+                     "EXPF": ["IN", "HA", "RI"], "EXRI": ["IN", "PF", "HA"]}
+    for fondo in FONDOS:
+        for nuevo, cols in combinaciones.items():
+            out[f"{nuevo}_F{fondo}"] = out[[f"{c}_F{fondo}" for c in cols]].sum(axis=1)
+    for afp in AFPS:
+        out[f"Aum_{afp}"] = out[f"{afp}_F1"] + out[f"{afp}_F2"] + out[f"{afp}_F3"]
+    return out.drop(columns=["Total"])
+
+
+# =============================================================================
+# 4. LIMPIEZA HOJA RVL (Bloomberg) Y BENCHMARKS
+# =============================================================================
+
+def limpiar_precios_rvl(df_raw: pd.DataFrame, campo: str,
+                        fechas: pd.Index) -> pd.DataFrame:
+    mask = df_raw.iloc[2] == campo
+    if not mask.any():
+        fallar(f"Hoja RVL: no existe ningún bloque con campo '{campo}'.")
+    bloque = df_raw.loc[:, mask]
+    columnas = bloque.loc[3].tolist()[1:]
+
+    df = bloque.iloc[5:, 1:].copy()
+    df.columns = columnas
+    df = df.loc[:, ~pd.Series(df.columns).isna().values]
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    if len(fechas) != len(df):
+        # Alinear defensivamente en vez de reventar por desfase de filas
+        n = min(len(fechas), len(df))
+        warnings.warn(f"Hoja RVL/{campo}: {len(df)} filas de datos vs "
+                      f"{len(fechas)} fechas; se alinean las primeras {n}.")
+        df = df.iloc[:n]
+        fechas = fechas[:n]
+
+    df.insert(0, "Fecha", np.asarray(fechas))
+    df = df.set_index("Fecha").astype(object)
+    df = df.replace(_BLANCOS_BLOOMBERG, np.nan).bfill().fillna(0)
+    return convertir_columnas_object_a_float(df).sort_index()
+
+
+def limpiar_benchmark(wb: pd.DataFrame, nombre: str,
+                      precios_ref: pd.DataFrame) -> pd.DataFrame:
+    cols = wb.columns[wb.iloc[0].isin(["Benchmark", nombre])]
+    if len(cols) == 0:
+        fallar(f"Hoja Benchmark: no se encontró el bloque '{nombre}'.")
+    limpio = wb[cols].iloc[4:].reset_index(drop=True).copy()
+    limpio.columns = limpio.iloc[0]
+    limpio = limpio.drop(0).reset_index(drop=True)
+    limpio = limpio.rename(columns={limpio.columns[0]: "Fecha"})
+    limpio["Fecha"] = pd.to_datetime(limpio["Fecha"], errors="coerce")
+    limpio = (limpio.dropna(subset=["Fecha"]).set_index("Fecha")
+                    .replace("-", 0).apply(pd.to_numeric, errors="coerce"))
+    return limpio.reindex(precios_ref.index).ffill()
+
+
+# =============================================================================
+# 5. HELPERS NUMÉRICOS
+# =============================================================================
+
+def _pxq(precios, cantidades, dedup=False):
+    df = precios.mul(cantidades, axis=0).dropna(axis=0, how="all").copy()
+    if dedup:
+        df = df[~df.index.duplicated(keep="first")]
+    return df
+
+
+def _weight(pxq: pd.DataFrame) -> pd.DataFrame:
+    tot = pxq.sum(axis=1)
+    if (tot == 0).any():
+        n = int((tot == 0).sum())
+        warnings.warn(f"weights: {n} fecha(s) con PxQ total = 0 → pesos NaN esas fechas.")
+    return pxq.div(tot.replace(0, np.nan), axis=0)
+
+
+def _ret_ponderado(retornos, weights):
+    return retornos.mul(weights, axis=0).dropna(axis=0, how="all").copy()
+
+
+def _rezagar(df: pd.DataFrame) -> pd.DataFrame:
+    """Peso del día T se aplica al retorno de T+1 (shift de índice)."""
+    df = df.copy()
+    df.index = pd.Index(df.index).to_series().reset_index(drop=True).shift(-1).values
+    return df.iloc[:-1].copy()
+
+
+def _acumular(ret: pd.DataFrame) -> pd.DataFrame:
+    return (1 + ret.replace([np.inf, -np.inf], np.nan).fillna(0)).cumprod() * 100
+
+
+# =============================================================================
+# 6. GRÁFICOS / PDF
+# =============================================================================
+
+def graficar_pdf(ruta_pdf: Path, ret_totales: dict, sectoriales: dict,
+                 precios_div: pd.DataFrame, epu_acum, etf_acum,
+                 lista_sectores, dicc_parametria, solo_integra=False) -> None:
+    colors = ["#3e63ad", "#00B0F0", "#FF0000", "#FFA500"]
+    tam = 10
+    mapa = {"F1": (0, 0), "F2": (0, 1), "F3": (1, 0), "M": (1, 1)}
+    titulos = {"F1": "Fondo 1", "F2": "Fondo 2", "F3": "Fondo 3", "M": "Multifondo"}
+    series_afp = [("IN", colors[0], "Integra")] if solo_integra else [
+        ("IN", colors[0], "Integra"), ("HA", colors[1], "Habitat"),
+        ("PF", colors[2], "Profuturo"), ("RI", colors[3], "Prima")]
+
+    def _pintar(ax, df, titulo):
+        ax.plot(epu_acum, color="grey", label="EPU")
+        ax.plot(etf_acum, color="green", label="ETF Peru")
+        for col, c, lab in series_afp:
+            if col in df.columns:
+                ax.plot(df[col], color=c, label=lab)
+        ax.set_title(titulo, fontsize=12)
+        ax.legend()
+        ax.tick_params(axis="x", rotation=90, labelsize=tam)
+        ax.tick_params(axis="y", labelsize=tam)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b-%y"))
+
+    with PdfPages(ruta_pdf) as pdf:
+        fig, axis = plt.subplots(2, 2, figsize=(22, 17))
+        fig.suptitle("Rendimientos Acumulados - Portafolio RVL",
+                     fontsize=20, fontweight="bold")
+        plt.tight_layout(pad=5); plt.subplots_adjust(top=0.95)
+        for nom, df in ret_totales.items():
+            if nom in mapa:
+                _pintar(axis[mapa[nom]], df, titulos[nom])
+        pdf.savefig(fig); plt.close(fig)
+
+        for sector in lista_sectores:
+            fig, axis = plt.subplots(2, 2, figsize=(22, 17))
+            fig.suptitle(f"Rendimiento Acumulado: {sector}",
+                         fontsize=20, fontweight="bold")
+            plt.tight_layout(pad=5); plt.subplots_adjust(top=0.95)
+            for nom, df in sectoriales.items():
+                partes = nom.split("_")
+                if partes[0] == sector and partes[1] in mapa:
+                    _pintar(axis[mapa[partes[1]]], df, titulos[partes[1]])
+            pdf.savefig(fig); plt.close(fig)
+
+        isins = [c for c in precios_div.columns if c in dicc_parametria]
+        contador = 0
+        for _ in range(len(isins) // 8 + 1):
+            fig, axis = plt.subplots(4, 2, figsize=(22, 17))
+            fig.suptitle("Precios", fontsize=20, fontweight="bold")
+            plt.tight_layout(pad=5); plt.subplots_adjust(top=0.95)
+            for y in range(4):
+                for x in (0, 1):
+                    if contador == len(isins):
+                        break
+                    isin = isins[contador]
+                    ax = axis[y, x]
+                    ax.plot(precios_div[isin], color="#3e63ad")
+                    ax.set_title(dicc_parametria[isin], fontsize=12)
+                    ax.tick_params(axis="x", rotation=90, labelsize=12)
+                    ax.tick_params(axis="y", labelsize=12)
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
+                    contador += 1
+            pdf.savefig(fig); plt.close(fig)
+    print(f"PDF generado: {ruta_pdf}")
+
+
+# =============================================================================
+# 7. FLUJO PRINCIPAL
+# =============================================================================
+
+def main() -> None:
+    validar_rutas()
+    print(f"Rendimiento RVL — corrida {FECHA_HOY}")
+
+    # ------------------------- Parametría -------------------------
+    base_param = leer_excel(MONITOR_PATH, "Parametria", header=None)
+    param = base_param.dropna(axis=0)
+    if param.empty:
+        fallar("La hoja Parametria del Monitor no tiene filas completas.")
+    lista_isins = param.iloc[:, 2].astype(str).tolist()
+    lista_nombres = param.iloc[:, 0].tolist()
+    dicc_parametria = dict(zip(lista_isins, lista_nombres))
+
+    sect = base_param.iloc[:, 2:4].dropna()
+    sect.columns = ["ISIN", "Sector"]
+    lista_sectores = sect["Sector"].unique().tolist()
+    agrupados_sectores = {s: sect.loc[sect["Sector"] == s, "ISIN"].astype(str).tolist()
+                          for s in lista_sectores}
+
+    mon = base_param.iloc[:, [2, 5]].dropna()
+    mon.columns = ["ISIN", "Moneda"]
+    agrupados_monedas = {m: mon.loc[mon["Moneda"] == m, "ISIN"].astype(str).tolist()
+                         for m in mon["Moneda"].unique()}
+
+    lista_in  = ["Fondo", "Dato", "Fecha", "SBS"] + lista_isins
+    lista_ex  = ["Fondo", "Fecha", "Fondo_Fecha"] + lista_isins
+    lista_bdp = ["Campo", "Fecha"] + lista_isins
+
+    # ------------------------- QEST → DQ_IN / DQ_SIS -------------------------
+    DQ_IN_BD  = leer_excel(MONITOR_PATH, "DQ_IN")
+    df1       = leer_excel(QEST_PATH, "DQ_IN", header=None)
+    DQ_SIS_BD = leer_excel(MONITOR_PATH, "DQ_SIS", header=None)
+    df2       = leer_excel(QEST_PATH, "DQ_RV", header=None)
+
+    base_integra = actualizar_DQ_IN(df1, DQ_IN_BD, lista_in)
+    base_sistema = actualizar_DQ_SIS(df2, DQ_SIS_BD, lista_ex).reset_index(drop=True)
+
+    fecha_corte = pd.to_datetime(base_integra["Fecha"].iloc[-1])
+    print(f"Fecha de corte: {fecha_corte:%d-%m-%Y}")
+
+    # Escribir bases actualizadas al Monitor (xlwings preserva macros/fórmulas)
+    try:
+        wb1 = xw.Book(str(MONITOR_PATH), update_links=False)
+    except Exception as e:
+        fallar(f"xlwings no pudo abrir el Monitor (¿Excel instalado?, ¿archivo "
+               f"abierto con bloqueo?): {e}")
+    wb1.sheets["DQ_IN"]["A2"].options(pd.DataFrame, header=None, index=False).value = base_integra
+    wb1.sheets["DQ_SIS"]["A2"].options(pd.DataFrame, header=None, index=False).value = base_sistema
+
+    # ------------------------- AUM y Tipo de Cambio -------------------------
+    df_aum_raw = leer_excel(AUM_PATH, "DataHistórica", header=None,
+                            usecols="B:V", nrows=22000)
+    df_aum_raw.columns = range(df_aum_raw.shape[1])
+    df_aum = calculo_aum(df_aum_raw)
+    print(f"AUM — última fecha disponible: {df_aum.index[-1]:%d-%m-%Y}")
+
+    df_bdtc = leer_excel(BDPRECIOS_PATH, "BDTC", header=None,
+                         usecols="A:DB", nrows=22000)
+    df_bdtc.columns = range(df_bdtc.shape[1])
+    # [B1] FIX: iloc sobre el propio DataFrame (el original usaba df1.index)
+    df_tc = df_bdtc.iloc[5:].transpose().rename(columns={5: "Moneda"})
+    filt_tc = (df_tc[df_tc["Moneda"].isin(["Campo", "Fecha", "DOL", "GBP", "CAD"])]
+               .transpose().reset_index(drop=True))
+    filt_tc.columns = filt_tc.iloc[0]
+    filt_tc = filt_tc.drop(0)
+    tc = (filt_tc[filt_tc["Campo"].astype(str).str.contains("P")]
+          .drop(columns=["Campo"]).reset_index(drop=True))
+    tc["Fecha"] = pd.to_datetime(tc["Fecha"].astype(str), format="mixed",
+                                 dayfirst=True, errors="raise")
+    TC_F = (tc.set_index("Fecha").replace("ND", 0).fillna(0)
+              .apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float64))
+
+    df_aum = df_aum.div(TC_F["DOL"].replace(0, np.nan), axis=0).dropna(how="all").copy()
+
+    # ------------------------- Precios y Retornos (BDat_Act) -------------------------
+    df_bdat = leer_excel(BDPRECIOS_PATH, "BDat_Act", header=None)
+    df_bdat.columns = range(df_bdat.shape[1])
+    # [B1] FIX: iloc propio (antes df1.index[:13])
+    df_bdp = df_bdat.iloc[13:].transpose().rename(columns={13: "SBS"})
+    filt = (df_bdp[df_bdp["SBS"].isin(lista_bdp)].transpose()
+            .reset_index(drop=True))
+    filt.columns = filt.iloc[0]
+    filt = filt.drop(0)
+    filt["Fecha"] = pd.to_datetime(filt["Fecha"].astype(str), format="mixed",
+                                   dayfirst=True, errors="raise")
+
+    def _bloque(mascara):
+        return (filt[mascara].drop(columns=["Campo"]).reset_index(drop=True)
+                .set_index("Fecha").replace("ND", 0).fillna(0)
+                .apply(pd.to_numeric, errors="coerce").fillna(0)
+                .astype(np.float64))
+
+    campo = filt["Campo"].astype(str)
+    precios_vp  = _bloque(campo.str.contains("P"))
+    retornos_vp = _bloque(campo.str.contains("Ret", case=False)
+                          & ~campo.str.contains("Ret1", case=False))
+
+    faltan = [i for i in lista_isins if i not in precios_vp.columns]
+    if faltan:
+        warnings.warn(f"{len(faltan)} ISIN(s) de Parametria sin precio en BDat_Act "
+                      f"(se tratarán como 0): {faltan[:5]}{'…' if len(faltan) > 5 else ''}")
+
+    # Conversión a PEN según moneda
+    for moneda, isins in agrupados_monedas.items():
+        if moneda in ("NSOL", "None"):
+            continue
+        if moneda not in TC_F.columns:
+            fallar(f"Moneda '{moneda}' en Parametria sin serie en BDTC.")
+        cols = [i for i in isins if i in precios_vp.columns]
+        precios_vp[cols] = precios_vp[cols].mul(TC_F[moneda], axis=0)
+
+    # ------------------------- Hoja RVL (Bloomberg) -------------------------
+    precios_rvl = pd.read_excel(MONITOR_PATH, sheet_name="RVL", header=None,
+                                engine="openpyxl").astype(object)
+    fechas_diarias = pd.to_datetime(precios_rvl.iloc[5:, 1], errors="coerce").dropna()
+
+    precios_cdiv = (limpiar_precios_rvl(precios_rvl, "TOT_RETURN_INDEX_GROSS_DVDS",
+                                        fechas_diarias)
+                    .sort_index().loc[:fecha_corte].copy())
+    precios_sdiv = limpiar_precios_rvl(precios_rvl, "Px_last", fechas_diarias)
+
+    for isin in ("5460042E8427", "5076822E0800"):
+        if isin not in retornos_vp.columns:
+            fallar(f"Benchmark: falta el ISIN {isin} (EPU/ETFPERU) en BDat_Act.")
+    epu_acum = (1 + retornos_vp["5460042E8427"].dropna()).cumprod() * 100
+    etf_acum = (1 + retornos_vp["5076822E0800"].dropna()).cumprod() * 100
+
+    # ------------------------- Cantidades por AFP -------------------------
+    def q_integra(tag):
+        df = (base_integra[base_integra["Fondo"].astype(str).str.contains(tag)]
+              .drop(columns=["Dato", "SBS"]))
+        df = df.reindex(columns=["Fecha"] + lista_isins).fillna(0).copy()
+        df["Fecha"] = pd.to_datetime(df["Fecha"])
+        return df.set_index("Fecha").astype(np.float64)
+
+    Q = {}
+    for f in FONDOS:
+        Q[f"IN_F{f}"] = q_integra(f"IN-FONDO{f}")
+    Q["IN_M"] = Q["IN_F1"] + Q["IN_F2"] + Q["IN_F3"]
+
+    bs = base_sistema.copy()
+    bs[["AFP-Fondo", "Fecha_Dia"]] = bs["Fondo_Fecha"].astype(str).str.split("_", expand=True)
+    bs = bs.drop(columns=["Fecha", "Fondo_Fecha"])
+    bs["Fecha_Dia"] = pd.to_datetime(bs["Fecha_Dia"], dayfirst=True)
+    bs = bs.set_index("Fecha_Dia").iloc[2:].fillna(0)
+
+    def q_sis(tag):
+        df = (bs[bs["AFP-Fondo"].astype(str).str.contains(tag)]
+              .drop(columns=["AFP-Fondo"]))
+        df = df.reindex(columns=lista_isins).fillna(0).copy()
+        return convertir_columnas_object_a_float(df).sort_index()
+
+    for afp in ("HA", "PF", "RI"):
+        for f in FONDOS:
+            Q[f"{afp}_F{f}"] = q_sis(f"{afp}-FONDO{f}")
+        Q[f"{afp}_M"] = Q[f"{afp}_F1"] + Q[f"{afp}_F2"] + Q[f"{afp}_F3"]
+    for f in FONDOS:
+        Q[f"EXSIS_F{f}"] = Q[f"HA_F{f}"] + Q[f"PF_F{f}"] + Q[f"RI_F{f}"]
+
+    IL = [c for c in precios_vp.columns if c not in LIQUIDOS]
+    L_pres = [c for c in LIQUIDOS if c in precios_vp.columns]
+    if len(L_pres) < len(LIQUIDOS):
+        warnings.warn("Algunos ISINs de la cartera líquida no tienen precio; "
+                      "se excluyen de '_L'.")
+
+    # ------------------------- PxQ y Weights -------------------------
+    PxQ, W, W_L, W_IL = {}, {}, {}, {}
+    for clave, q in Q.items():
+        dedup = not clave.startswith("IN")
+        pxq = _pxq(precios_vp, q, dedup=dedup)
+        PxQ[clave] = pxq
+        W[clave]   = _rezagar(_weight(pxq))
+        W_L[clave] = _rezagar(_weight(pxq[L_pres]))
+        W_IL[clave] = _rezagar(_weight(pxq[IL]))
+
+    # ------------------------- Weights sectoriales -------------------------
+    sect_w = {}
+    for clave, w in W.items():
+        afp, ftag = clave.split("_")
+        if afp == "EXSIS" and ftag == "M":
+            continue
+        for nombre_sector, isins in agrupados_sectores.items():
+            ws = w.loc[:, w.columns.intersection(isins)]
+            sect_w[f"{afp}_{nombre_sector}_{ftag}"] = ws.div(
+                ws.sum(axis=1).replace(0, np.nan), axis=0)
+
+    # ------------------------- Benchmarks EPU / ETFPERU -------------------------
+    wb_bench = pd.read_excel(MONITOR_PATH, sheet_name="Benchmark", header=None,
+                             engine="openpyxl").astype(object)
+    epu_w_raw = limpiar_benchmark(wb_bench, "EPU", PxQ["IN_F1"])
+    etf_w_raw = limpiar_benchmark(wb_bench, "ETFPERU", PxQ["IN_F1"])
+
+    pxq_epu = precios_sdiv.mul(epu_w_raw, axis=0).dropna(how="all").dropna(axis=1, how="all")
+    pxq_etf = precios_sdiv.mul(etf_w_raw, axis=0).dropna(how="all").dropna(axis=1, how="all")
+    weight_epu = _rezagar(_weight(pxq_epu))
+    weight_etf = _rezagar(_weight(pxq_etf))
+    weights_etfs = {"Weight_EPU": weight_epu, "Weight_ETFPERU": weight_etf}
+
+    # ------------------------- Retornos ponderados -------------------------
+    precios_cdiv_var = precios_cdiv.pct_change().fillna(0)
+
+    ret_agregados = {}
+    for clave in Q:
+        ret_agregados[f"Ret_{clave}_O"]    = _ret_ponderado(retornos_vp, W[clave])
+        ret_agregados[f"Ret_{clave}_O_L"]  = _ret_ponderado(retornos_vp, W_L[clave])
+        ret_agregados[f"Ret_{clave}_O_IL"] = _ret_ponderado(retornos_vp, W_IL[clave])
+
+    ret_epu = (precios_cdiv_var.mul(weight_epu, axis=0)
+               .dropna(how="all").dropna(axis=1, how="all").fillna(0))
+    ret_etf = (precios_cdiv_var.mul(weight_etf, axis=0)
+               .dropna(how="all").dropna(axis=1, how="all").fillna(0))
+    ret_etfs = {"Ret_EPU": ret_epu, "Ret_ETFPERU": ret_etf}
+
+    # ------------------------- Acumulados y totales por fondo -------------------------
+    ret_acum = {}
+    for nombre, df in ret_agregados.items():
+        df["Total"] = df.sum(axis=1)
+        ret_acum[nombre] = _acumular(df)
+
+    ret_totales = {f: pd.DataFrame() for f in ("F1", "F2", "F3", "M")}
+    for nombre, df in ret_acum.items():
+        partes = nombre.split("_")          # Ret / AFP / Ftag / O [...]
+        afp, ftag = partes[1], partes[2]
+        if ftag not in ret_totales:
+            continue
+        col = f"{afp}{detectar_sufijo_cartera(nombre)}"
+        ret_totales[ftag] = ret_totales[ftag].join(
+            df[["Total"]].rename(columns={"Total": col}), how="outer")
+
+    for nombre, df in ret_etfs.items():
+        df["Total"] = df.sum(axis=1)
+
+    # ------------------------- Retornos sectoriales -------------------------
+    ret_sect_acum = {}
+    for afp_sector, w in sect_w.items():
+        ret = (precios_cdiv_var.mul(w, axis=0)
+               .dropna(how="all").dropna(axis=1, how="all"))
+        ret["Total"] = ret.sum(axis=1)
+        ret_sect_acum[f"Ret_Acum_{afp_sector}"] = _acumular(ret)
+
+    solo_tot_sect = {}
+    for sector in lista_sectores:
+        for nombre, df in ret_sect_acum.items():
+            partes = nombre.split("_")      # Ret Acum AFP Sector Ftag
+            if partes[3] != sector:
+                continue
+            key = f"{sector}_{partes[4]}"
+            solo_tot_sect.setdefault(key, pd.DataFrame())
+            solo_tot_sect[key] = pd.concat(
+                [solo_tot_sect[key], pd.DataFrame({partes[2]: df["Total"]})], axis=1)
+
+    # ------------------------- Exportación a hoja BD -------------------------
+    df_exportar = []
+    for nom, df in ret_agregados.items():
+        r = df.copy(); r.columns = [f"{nom}_{c}" for c in r.columns]
+        df_exportar.append(r)
+
+    rp = precios_cdiv_var.copy()
+    rp.columns = [f"Retorno_Precios_No_Acum_{c}" for c in rp.columns]
+    df_exportar.append(rp)
+
+    df_exportar.append(pd.DataFrame(
+        {f"AUM_RVL_{n}": df.sum(axis=1) for n, df in PxQ.items() if n != "EXSIS_M"}))
+
+    # [B2] FIX: cada bloque de weights usa SU DataFrame correcto (el original
+    # exportaba weight_EXSIS_F1_L bajo la etiqueta de cartera total).
+    for pref, dic in (("weight_{k}_", W), ("weight_{k}_L_", W_L), ("weight_{k}_IL_", W_IL)):
+        for clave, df in dic.items():
+            if clave == "EXSIS_M":
+                continue
+            r = df.iloc[:-1].copy()
+            r.columns = [f"{pref.format(k=clave)}{c}" for c in r.columns]
+            df_exportar.append(r)
+
+    for nom, df in ret_etfs.items():
+        r = df.copy(); r.columns = [f"{nom}_{c}" for c in r.columns]
+        df_exportar.append(r)
+    for nom, df in weights_etfs.items():
+        r = df.copy(); r.columns = [f"{nom}_{c}" for c in r.columns]
+        df_exportar.append(r)
+
+    rvp = retornos_vp.copy()
+    rvp.columns = [f"Retorno_VP_{c}" for c in rvp.columns]
+    df_exportar.append(rvp)
+
+    df_final = pd.concat(df_exportar, axis=1)
+    print(f"Hoja BD — exportando matriz {df_final.shape[0]} x {df_final.shape[1]}…")
+
+    # [B3] FIX: reutilizar wb1 (no abrir un segundo Book) y guardar al final
+    sheet_bd = wb1.sheets["BD"]
+    sheet_bd.clear_contents()
+    sheet_bd["A1"].options(pd.DataFrame).value = df_final
+
+    if GUARDAR_MONITOR_AL_FINAL:
+        wb1.save()
+        print("Monitor guardado (DQ_IN, DQ_SIS y BD actualizados).")
+    else:
+        print("[AVISO] Monitor NO guardado (GUARDAR_MONITOR_AL_FINAL=False). "
+              "Guarda manualmente en Excel para conservar la hoja BD.")
+
+    # ------------------------- PDFs -------------------------
+    graficar_pdf(PDF_PATH, ret_totales, solo_tot_sect, precios_cdiv,
+                 epu_acum, etf_acum, lista_sectores, dicc_parametria)
+    if GENERAR_PDF_REDUCIDO:
+        graficar_pdf(PDF_RED_PATH, ret_totales, solo_tot_sect, precios_cdiv,
+                     epu_acum, etf_acum, lista_sectores, dicc_parametria,
+                     solo_integra=True)
+
+    print("\nProceso completado sin errores.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\n[CANCELADO] Ejecución interrumpida por el usuario.")
