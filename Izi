@@ -1,0 +1,25 @@
+La consola dice exactamente qué pasó. Hay dos culpas mías y dos tuyas.
+
+## Mías (ya corregidas en el archivo adjunto)
+
+**El `Plus='Proxies'` lo destruía mi código.** En `append_proxies` yo recalculaba `Plus` y `Plus_1` desde `CAT` para las filas de proxies. Esa fórmula solo puede producir ETF, SOV, Cuestionario Integra o Portafolio — **nunca "Proxies"**. Por eso las 149 filas de proxies entraban a BD(MSCI) con la etiqueta equivocada y los bloques BU/TD/ALT Proxies salían en cero.
+
+Lo verifiqué contra tu propio workbook: la hoja Valorización del Excel tiene 168 filas con `Plus='Proxies'`. Ahora leo `Plus`/`Plus_1` directamente de las hojas Alts/BU/TD y solo derivo desde CAT si la hoja no trae esas columnas (con aviso en consola).
+
+**El sector lo buscaba por la columna equivocada.** Yo cruzaba `Parametria!O` (Name) contra `Valorización!Nombre`, pero `Nombre` sale de `Parametria!H`, no de la O. Son dos nomenclaturas distintas, de ahí el 18%.
+
+Cambié la llave a **SBS**: `Parametria!C → Parametria!P`, que cruza exacto contra `CODIGO_SBS`. Pasó de 245 claves a 813, y en mi prueba con tus datos ya aparecen Materials y Utilities. Dejé como respaldo el match por Name y, en tercer lugar, el `Sector` de BD(MSCI) colapsado a bucket (ahí los valores son del tipo "Construction Materials" o "Equity Sector Utilities", por eso necesitan normalización).
+
+Ojo con la cobertura: quedará alrededor del 27%, y **eso es correcto**. El resto del BU son instrumentos sin sector en Parametria y por diseño caen a "Otros", que es exactamente lo que hacía el Excel con su fórmula de residuo. Cambié el mensaje para que no parezca alarma: ahora solo avisa si baja del 15%.
+
+## Tuyas (input)
+
+**El workbook tiene B1 = 20251231 y corriste el semestre 202606.** El pipeline te lo advirtió pero siguió. Eso significa que todo lo que generaste es data de diciembre etiquetada como junio, y contaminó el histórico. Antes de volver a correr: abre el workbook, pon B1 = 20260630, RefreshAll, guarda y cierra. Y **borra el corte 202606 del `Huella_Historico.xlsx`**, porque ahora mismo tiene cifras de diciembre.
+
+**El workbook en Z: no tiene la hoja MKT.** El que me subiste sí la tiene. Son versiones distintas: copiaste MKT en tu archivo local pero el de la red quedó sin ella. Por eso los AUM de benchmarks salieron en cero y la huella comparable de ACWI/ILF/CEMB/EMB también.
+
+---
+
+Con eso, el orden de trabajo sería: primero arregla B1 y copia la hoja MKT al archivo de Z:, luego reemplaza el pipeline con el adjunto, borra el histórico corrupto y corre de nuevo. En la consola deberías ver `Distribución de Plus` incluyendo `'Proxies'`, la línea `[MarketCap] fila 2026-06-30`, y el sector identificado en torno al 27%.
+
+Una cosa que no es error pero conviene que mires: 9 instrumentos con inversión y sin huella quedaron reportados en `NoMatch_conExposicion`. Esos sí son huella que no estás contando.
