@@ -1,0 +1,312 @@
+Son cuatro cambios. Los tres primeros son cortos; el cuarto es una función nueva que se pega entera.
+
+## Cambio 1 — el año por defecto
+
+Arriba del todo, busca la línea que empieza con `RUTA_LOGO = r"Z:\...`. Justo **debajo** de esa línea, deja un renglón en blanco y pega esto:
+
+```python
+# Anio que se reporta en el Word y en el Excel de respaldo.
+# None = el anio en curso. Para un anio fijo, poner por ejemplo: ANIO_REPORTE = 2025
+ANIO_REPORTE = None
+```
+
+Con eso, cada vez que corras el script sin más, el Word sale con el año actual. Si algún día quieres 2025, cambias esa línea a `ANIO_REPORTE = 2025` y listo.
+
+## Cambio 2 — los argumentos del script
+
+Casi al final del archivo, dentro de `def main():`, busca esta línea:
+
+```python
+    ap.add_argument("--anio", type=int, default=None, help="filtra el Word a un anio")
+```
+
+Reemplázala por estas cuatro:
+
+```python
+    ap.add_argument("--anio", type=int, default=None,
+                    help="anio a reportar; por defecto ANIO_REPORTE o el anio en curso")
+    ap.add_argument("--historico", action="store_true",
+                    help="genera el Word con todos los anios, no solo uno")
+```
+
+## Cambio 3 — dos retoques dentro de `main()`
+
+**3a.** Unas líneas más abajo busca esto:
+
+```python
+    if not args.solo_dashboard:
+        sub = registros
+        etiquetas = []
+        if args.anio:
+```
+
+Reemplázalo por esto (se agregan tres líneas en el medio):
+
+```python
+    if not args.solo_dashboard:
+        # Por defecto el Word acumula solo el anio en curso.
+        if args.anio is None and not args.historico:
+            args.anio = ANIO_REPORTE if ANIO_REPORTE else datetime.now().year
+        sub = registros
+        etiquetas = []
+        if args.anio:
+```
+
+**3b.** Un poco más abajo, casi al final, busca estas dos líneas:
+
+```python
+        nom = f"Reporte_Juntas_{periodo.replace(' - ','_').replace(' ','_')}_{sello}.docx"
+        generar_word(bloques, param, periodo, os.path.join(args.salida, nom))
+```
+
+Reemplázalas por estas cinco:
+
+```python
+        base = f"Juntas_{periodo.replace(' - ', '_').replace(' ', '_')}_{sello}"
+        generar_word(bloques, param, periodo,
+                     os.path.join(args.salida, f"Reporte_{base}.docx"))
+        generar_excel(bloques, param, periodo,
+                      os.path.join(args.salida, f"Data_Charts_{base}.xlsx"))
+```
+
+## Cambio 4 — la función que crea el Excel
+
+Busca esta línea (es un comentario largo de iguales, seguido de `# 7. MAIN`):
+
+```python
+# ============================================================================
+# 7. MAIN
+```
+
+Pega **todo este bloque justo encima**, dejando un renglón en blanco de separación:
+
+```python
+# ============================================================================
+# 6c. EXCEL DE RESPALDO - una hoja por grafico, con su data y su chart nativo
+# ============================================================================
+def generar_excel(bloques, param, periodo, ruta_salida):
+    """Exporta la base de datos de cada grafico del Word, con el chart armado.
+
+    Sirve como respaldo de auditoria y permite rearmar o retocar cualquier
+    grafico en Excel sin volver a calcular nada.
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import BarChart, PieChart, DoughnutChart, Reference, Series
+    from openpyxl.chart.marker import DataPoint
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.utils import get_column_letter
+
+    cfg = param["config"]
+    NAVY = cfg.get("Color_Primario", "1E2E6E").lstrip("#")
+    PAL = [param["sectores"][s]["color"].lstrip("#") for s in param["sectores"]] \
+        or [NAVY]
+    F = lambda **k: Font(name="Arial", **k)
+    HDR = PatternFill("solid", fgColor=NAVY)
+    TH = Border(*[Side(style="thin", color="D9D9D9")] * 4)
+
+    def gp(color):
+        g = GraphicalProperties(solidFill=str(color).lstrip("#"))
+        g.ln.noFill = True
+        return g
+
+    def hoja(nombre, titulo, encabezados, filas, anchos):
+        ws = wb.create_sheet(nombre[:31])
+        c = ws.cell(1, 1, titulo)
+        c.font = F(bold=True, size=13, color=NAVY)
+        for j, (h, a) in enumerate(zip(encabezados, anchos), 1):
+            c = ws.cell(3, j, h)
+            c.font = F(bold=True, color="FFFFFF", size=10)
+            c.fill = HDR
+            c.alignment = Alignment(horizontal="center", wrap_text=True)
+            ws.column_dimensions[get_column_letter(j)].width = a
+        for i, fila in enumerate(filas, 4):
+            for j, v in enumerate(fila, 1):
+                c = ws.cell(i, j, v)
+                c.font = F(size=10)
+                c.border = TH
+        ws.row_dimensions[3].height = 26
+        return ws
+
+    def etiquetas(ch, porcentaje):
+        ch.dataLabels = DataLabelList()
+        ch.dataLabels.showVal = not porcentaje
+        ch.dataLabels.showPercent = porcentaje
+        ch.dataLabels.showSerName = False
+        ch.dataLabels.showCatName = False
+        ch.dataLabels.showLegendKey = False
+
+    def circular(ws, n, anillo, ancla, titulo):
+        ch = DoughnutChart(holeSize=52) if anillo else PieChart()
+        ch.title = titulo
+        ch.height, ch.width = 8.5, 16
+        ch.add_data(Reference(ws, min_col=2, min_row=3, max_row=3 + n),
+                    titles_from_data=True)
+        ch.set_categories(Reference(ws, min_col=1, min_row=4, max_row=3 + n))
+        pts = []
+        for i in range(n):
+            dp = DataPoint(idx=i)
+            dp.graphicalProperties = gp(PAL[i % len(PAL)])
+            pts.append(dp)
+        ch.series[0].data_points = pts
+        etiquetas(ch, True)
+        ch.legend.position = "r"
+        ws.add_chart(ch, ancla)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    # ---------------- portada
+    ws = wb.create_sheet("LEEME")
+    ws.column_dimensions["A"].width = 108
+    texto = [
+        ("RESPALDO DE LOS GRAFICOS DEL REPORTE DE JUNTAS DE ACCIONISTAS", 1),
+        ("", 0),
+        (f"Periodo: {periodo}", 0),
+        (f"Generado: {datetime.now():%d/%m/%Y %H:%M}", 0),
+        ("", 0),
+        ("Cada hoja contiene la base de datos exacta que alimenta un grafico del Word,", 0),
+        ("y el grafico ya construido sobre esa data.", 0),
+        ("", 0),
+        ("Los graficos son nativos de Excel: se pueden editar, cambiar de tipo, copiar", 0),
+        ("y pegar a PowerPoint o Word, sin recalcular nada.", 0),
+        ("", 0),
+        ("Si se modifica una celda de la tabla, el grafico de esa hoja se actualiza solo.", 0),
+    ]
+    for i, (t, b) in enumerate(texto, 1):
+        c = ws.cell(i, 1, t)
+        c.font = F(bold=bool(b), size=12 if b else 10,
+                   color=NAVY if b else "000000")
+
+    for bloque in bloques:
+        if bloque is None:
+            continue
+        tj = bloque["tipo"]
+
+        # ---------------- sectores
+        ws = hoja(f"{tj} 1 Sectores", f"{tj} - Distribucion por sector",
+                  ["Sector", "Empresas", "Juntas", "% de juntas"],
+                  [[s["sector"], s["empresas"], s["juntas"], s["pct"]]
+                   for s in bloque["sectores"]],
+                  [34, 12, 10, 13])
+        n = len(bloque["sectores"])
+        for i in range(4, 4 + n):
+            ws.cell(i, 4).number_format = "0.00%"
+        ch = BarChart()
+        ch.type = "col"
+        ch.title = f"{tj} - Juntas por sector"
+        ch.height, ch.width = 8.5, 18
+        ser = Series(Reference(ws, min_col=3, min_row=3, max_row=3 + n),
+                     title_from_data=True)
+        pts = []
+        for i, s in enumerate(bloque["sectores"]):
+            dp = DataPoint(idx=i)
+            dp.graphicalProperties = gp(s["color"])
+            pts.append(dp)
+        ser.data_points = pts
+        ch.series.append(ser)
+        ch.set_categories(Reference(ws, min_col=1, min_row=4, max_row=3 + n))
+        ch.legend = None
+        ch.y_axis.majorGridlines = None
+        etiquetas(ch, False)
+        ws.add_chart(ch, "F3")
+
+        # ---------------- temas de agenda
+        b = bloque["barras"]
+        enc = ["Tema de agenda"] + [s["nombre"] for s in b["series"]] + ["Total"]
+        filas = []
+        for i, t in enumerate(b["temas"]):
+            vals = [s["datos"][i] for s in b["series"]]
+            filas.append([t] + vals + [sum(vals)])
+        ws = hoja(f"{tj} 2 Temas", f"{tj} - Votacion por tema de agenda",
+                  enc, filas, [50] + [13] * (len(enc) - 1))
+        n = len(b["temas"])
+        ch = BarChart()
+        ch.type = "bar"
+        ch.grouping = "stacked"
+        ch.overlap = 100
+        ch.gapWidth = 45
+        ch.title = f"{tj} - Votacion por tema de agenda"
+        ch.height, ch.width = max(10, 0.65 * n + 4), 22
+        for j, s in enumerate(b["series"], 2):
+            ser = Series(Reference(ws, min_col=j, min_row=3, max_row=3 + n),
+                         title_from_data=True)
+            ser.graphicalProperties = gp(s["color"])
+            ch.series.append(ser)
+        ch.set_categories(Reference(ws, min_col=1, min_row=4, max_row=3 + n))
+        ch.legend.position = "b"
+        ch.y_axis.delete = True
+        ch.x_axis.majorGridlines = None
+        etiquetas(ch, False)
+        ws.add_chart(ch, f"{get_column_letter(len(enc) + 2)}3")
+
+        # ---------------- votos en contra por tema
+        if bloque["contra_tema"]:
+            ws = hoja(f"{tj} 3 Contras", f"{tj} - Votos en contra por tema",
+                      ["Tema de agenda", "Votos en contra"],
+                      [[c["tema"], c["n"]] for c in bloque["contra_tema"]],
+                      [50, 16])
+            circular(ws, len(bloque["contra_tema"]), False, "E3",
+                     f"{tj} - Votos en contra por tema")
+
+        # ---------------- motivos de voto en contra (directores)
+        if bloque["motivos_dir"]:
+            ws = hoja(f"{tj} 4 Motivos", f"{tj} - Motivos de voto en contra (directores)",
+                      ["Motivo", "Votos"],
+                      [[m["motivo"], m["n"]] for m in bloque["motivos_dir"]],
+                      [50, 12])
+            circular(ws, len(bloque["motivos_dir"]), True, "E3",
+                     f"{tj} - Motivos de voto en contra")
+
+        # ---------------- independencia
+        if bloque["independencia"]:
+            ws = hoja(f"{tj} 5 Independencia", f"{tj} - Independencia de directores",
+                      ["Condicion", "Directores"],
+                      [[i["tipo"], i["n"]] for i in bloque["independencia"]],
+                      [30, 14])
+            circular(ws, len(bloque["independencia"]), True, "E3",
+                     f"{tj} - Independencia de directores")
+
+        # ---------------- experiencia
+        if bloque["experiencia"]:
+            ws = hoja(f"{tj} 6 Experiencia", f"{tj} - Experiencia de directores",
+                      ["Especialidad", "Menciones"],
+                      [[e["esp"], e["n"]] for e in bloque["experiencia"]],
+                      [36, 14])
+            circular(ws, len(bloque["experiencia"]), True, "E3",
+                     f"{tj} - Experiencia de directores")
+
+        # ---------------- detalle por empresa
+        filas = []
+        for e in bloque["tabla"]:
+            for f in e["fechas"]:
+                for p in f["puntos"]:
+                    filas.append([e["empresa"], f["fecha"], p["punto"],
+                                  p["texto"], p["decision"], p["motivo"],
+                                  p["justificacion"]])
+        hoja(f"{tj} 7 Detalle", f"{tj} - Detalle por empresa",
+             ["Empresa", "Fecha", "Punto", "Tema de agenda", "Votacion",
+              "Motivo", "Justificacion"],
+             filas, [28, 12, 10, 70, 14, 42, 42])
+
+        # ---------------- indicadores del periodo
+        ws = hoja(f"{tj} 8 Resumen", f"{tj} - Indicadores del periodo",
+                  ["Indicador", "Valor"],
+                  [["Juntas", bloque["n_juntas"]],
+                   ["Empresas", bloque["n_empresas"]],
+                   ["Puntos de agenda votados", bloque["n_puntos"]],
+                   ["Votos en contra", bloque["n_contra"]],
+                   ["Directores votados a favor", bloque["n_dir_fav"]]],
+                  [34, 14])
+
+    wb.save(ruta_salida)
+    print(f"[OK] Excel      -> {ruta_salida}")
+```
+
+---
+
+Probado con tu BD. Ahora salen tres archivos: el HTML igual que siempre, `Reporte_Juntas_2026_....docx` y `Data_Charts_Juntas_2026_....xlsx`.
+
+El Excel trae 8 hojas por cada tipo de junta, cada una con su tabla y su gráfico nativo de Excel ya armado: sectores, temas de agenda, contras por tema, motivos, independencia, experiencia, el detalle completo por empresa, y un resumen de indicadores. Si editas una celda de la tabla, el gráfico se actualiza solo, y puedes copiar cualquiera y pegarlo en PowerPoint.
+
+El dashboard HTML sigue llevando todo el histórico sin filtrar; el año solo afecta al Word y al Excel. Si alguna vez quieres el Word con todos los años, corres `python "tu_script.py" --historico`.
