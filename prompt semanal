@@ -1,0 +1,31 @@
+Actúa como analista senior de riesgo ASG especializado en empresas peruanas listadas en BVL.
+Haz una revisión de controversias ASG de [NOMBRE DE LA EMPRESA] (ticker: [TICKER]) 
+para el período desde [FECHA_ULTIMA_REVISION] hasta hoy (con 7 días de margen hacia atrás 
+por si hay cobertura tardía).
+
+Realiza búsquedas activas y separadas (no una sola consulta genérica) cubriendo:
+- Medios locales de zonas de operación
+- Medios nacionales (El Comercio, Gestión, La República, Perú21, RPP, Infobae Perú)
+- Medios financieros y fuentes regulatorias (SMV, BVL, OEFA, SUNAFIL, OSINERGMIN, 
+  Defensoría del Pueblo, INDECOPI, Poder Judicial)
+
+Usa términos específicos, no solo "ESG" o "sostenibilidad": muerto, fallecido, accidente 
+laboral, denuncia, demanda, sentencia, multa, derrame, contaminación, conflicto social, 
+paro, huelga, corrupción, soborno, extorsión, SUNAFIL, infracción laboral.
+
+FORMATO DE SALIDA — OBLIGATORIO:
+Devuelve únicamente un bloque de código con una fila por evento, sin texto antes o después, 
+usando este formato exacto (una línea por evento, separador "|"):
+
+EMPRESA|TICKER|FECHA_EVENTO|CATEGORIA|DESCRIPCION_BREVE|ESTADO|FUENTE|TIPO_FUENTE|LINK
+
+Donde:
+- CATEGORIA: Ambiental / Social / Gobernanza / Fatalidad-Accidente / Judicial
+- ESTADO: confirmado / denuncia sin resolver / en investigación / judicializado / resuelto
+- TIPO_FUENTE: local / nacional / financiero / regulatorio
+- Si no hay link verificable, no lo reportes como evento; agrégalo en una línea aparte 
+  con CATEGORIA="SIN_FUENTE"
+- Si no hay hallazgos en alguna categoría, incluye una fila con ESTADO="sin_eventos" 
+  y esa categoría, para dejar constancia de que sí se buscó
+
+No agregues explicaciones, resúmenes ni texto fuera del bloque de código.
