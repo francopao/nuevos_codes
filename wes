@@ -1,0 +1,788 @@
+"""
+2. BD_G&P — versión modernizada (2026)
+======================================
+Mismo resultado que el proceso original, pero:
+
+  * TODO Excel que se abre se cierra, y se abre en una INSTANCIA DEDICADA e
+    invisible de Excel (`xw.App`), de modo que los libros que el usuario ya
+    tenga abiertos NO se cierran ni se ven afectados.
+  * Solo se usa xlwings donde realmente hace falta recalcular:
+      - G&P_MLab_<mmaaaa>.xlsm  (se escribe el escenario en 'Abs'!E3)
+      - RIESGO - Consulta General.xlsm (se escribe la fecha en 'Tipo de Cambio'!B1)
+    El resto de archivos se lee con openpyxl replicando el `used_range` de
+    xlwings (mismos índices de fila/columna) => mucho más rápido.
+  * Cada archivo se lee UNA sola vez y queda en caché
+    (Parametria x4, BD1 x3, VP x2 en la versión anterior).
+  * Las esperas fijas (sleep 10 / 5 / 6) se reemplazan por espera activa hasta
+    que Excel reporta el cálculo terminado, con tope de seguridad.
+  * Las funciones fila-por-fila (`apply(axis=1)`) están vectorizadas.
+
+La lógica de negocio, los filtros, el orden de columnas y los archivos de
+salida son idénticos a la versión original.
+
+ARCHIVOS QUE GENERA (sin cambios):
+  - <Dataset>\\G&P\\<AAAAMM> G&P.xlsx
+  - <Output>\\Base Alerta\\*.txt  (6 archivos)
+  - <Output>\\Intermedio\\<AAAAMM> BD1.xlsx
+  - <Output>\\Intermedio\\<AAAAMM> Portafolio.xlsx
+  - <Dataset>\\Para.xlsx
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("bd_gp")
+
+
+# ==========================================================================
+# 1. PARÁMETROS DE EJECUCIÓN
+# ==========================================================================
+DIA, MES, ANIO = "30", "06", "2026"
+ESCENARIO_INPUT = "T"
+
+
+@dataclass
+class Rutas:
+    base_esg: Path = Path(
+        r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+        r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+        r"\1.Data Histórica"
+    )
+    vp: Path = Path(r"Z:\Benchmarking\VP.xlsm")
+    valor_cuota: Path = Path(r"Z:\Valor Cuota\DataValorCuota_IN.xlsm")
+    riesgo: Path = Path(r"Z:\Mesa de Inversiones\Trading\RIESGO - Consulta General.xlsm")
+    qest: Path = Path(r"Z:\Benchmarking\QEST_BD.xlsm")
+    precios: Path = Path(r"Z:\Benchmarking\BDPrecios_VB_IN.xlsx")
+
+    # Derivadas
+    @property
+    def dataset(self) -> Path:
+        return self.base_esg / "Dataset"
+
+    @property
+    def output(self) -> Path:
+        return self.base_esg / "Output"
+
+    @property
+    def parametria(self) -> Path:
+        return self.dataset / "Parametria.xlsx"
+
+    def gp_input(self, mes: str, anio: str) -> Path:
+        return self.dataset / "G&P input" / f"G&P_MLab_{mes}{anio}.xlsm"
+
+    def gp_output(self, mes: str, anio: str) -> Path:
+        return self.dataset / "G&P" / f"{anio}{mes} G&P.xlsx"
+
+    def comparables(self, nombre: str) -> Path:
+        return self.dataset / "Comparables" / nombre
+
+    def intermedio(self, nombre: str) -> Path:
+        return self.output / "Intermedio" / nombre
+
+    def base_alerta(self, nombre: str) -> Path:
+        return self.output / "Base Alerta" / nombre
+
+
+RUTAS = Rutas()
+
+# Segundos máximos de espera a que Excel termine de calcular
+TIMEOUT_CALCULO = 120
+# Espera mínima tras escribir un input (da tiempo a que se disparen los links)
+ESPERA_MINIMA = 1.0
+
+
+# ==========================================================================
+# 2. ACCESO A EXCEL
+# ==========================================================================
+@contextmanager
+def excel_dedicado():
+    """
+    Abre una instancia de Excel EXCLUSIVA para el proceso, invisible y sin
+    libro en blanco. Al salir se cierran sus libros y se termina esa instancia.
+    Los Excel que el usuario tenga abiertos en su sesión no se tocan.
+    """
+    import xlwings as xw
+
+    app = xw.App(visible=False, add_book=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    try:
+        yield app
+    finally:
+        try:
+            for wb in list(app.books):
+                wb.close()
+        except Exception as e:  # pragma: no cover
+            log.warning("No se pudieron cerrar todos los libros: %s", e)
+        try:
+            app.quit()
+        except Exception as e:  # pragma: no cover
+            log.warning("No se pudo cerrar la instancia de Excel: %s", e)
+        log.info("Instancia dedicada de Excel cerrada.")
+
+
+def esperar_calculo(app, timeout: int = TIMEOUT_CALCULO) -> None:
+    """
+    Espera activa hasta que Excel termina de calcular (xlDone = 0), en lugar
+    de un sleep fijo. Si el driver no expone CalculationState, cae a un sleep.
+    """
+    time.sleep(ESPERA_MINIMA)
+    inicio = time.time()
+    try:
+        while app.api.CalculationState != 0:
+            if time.time() - inicio > timeout:
+                log.warning("Excel sigue calculando tras %ds; se continúa.", timeout)
+                return
+            time.sleep(0.25)
+    except Exception:
+        time.sleep(5)
+    log.debug("Cálculo terminado en %.1fs", time.time() - inicio)
+
+
+def leer_libro(ruta: Path, hojas: list[str | int]) -> dict[str | int, pd.DataFrame]:
+    """
+    Abre el archivo UNA sola vez y devuelve todas las hojas pedidas replicando
+    exactamente lo que entrega `xw.sheets[...].used_range.value` (mismo recorte
+    de filas y columnas), pero con openpyxl: sin abrir Excel y sin releer el
+    archivo por cada hoja.
+
+    Nota: lee los valores cacheados de las fórmulas, que es lo mismo que
+    devuelve xlwings sobre un libro que no se recalcula.
+    """
+    from openpyxl import load_workbook
+
+    if not ruta.exists():
+        raise FileNotFoundError(f"No se encuentra el archivo: {ruta}")
+
+    t0 = time.time()
+    wb = load_workbook(ruta, read_only=True, data_only=True)
+    salida: dict[str | int, pd.DataFrame] = {}
+    try:
+        for hoja in hojas:
+            ws = wb[hoja] if isinstance(hoja, str) else wb[wb.sheetnames[hoja]]
+            filas = list(
+                ws.iter_rows(
+                    min_row=ws.min_row, max_row=ws.max_row,
+                    min_col=ws.min_column, max_col=ws.max_column,
+                    values_only=True,
+                )
+            )
+            salida[hoja] = pd.DataFrame(filas)
+    finally:
+        wb.close()  # <- siempre se cierra
+
+    log.info("Leído %s %s -> %s (%.1fs)", ruta.name, list(hojas),
+             {k: v.shape for k, v in salida.items()}, time.time() - t0)
+    return salida
+
+
+class CacheExcel:
+    """Cada archivo se abre una sola vez por corrida, aunque se pidan N hojas."""
+
+    def __init__(self) -> None:
+        self._data: dict[tuple[str, str | int], pd.DataFrame] = {}
+
+    def hojas(self, ruta: Path, hojas: list[str | int]) -> dict[str | int, pd.DataFrame]:
+        faltantes = [h for h in hojas if (str(ruta), h) not in self._data]
+        if faltantes:
+            for h, df in leer_libro(ruta, faltantes).items():
+                self._data[(str(ruta), h)] = df
+        return {h: self._data[(str(ruta), h)].copy() for h in hojas}
+
+    def hoja(self, ruta: Path, hoja: str | int) -> pd.DataFrame:
+        return self.hojas(ruta, [hoja])[hoja]
+
+
+CACHE = CacheExcel()
+
+
+# ==========================================================================
+# 3. UTILIDADES
+# ==========================================================================
+def recor(serie: pd.Series) -> pd.Series:
+    """Primeros 2 caracteres del SBS; conserva los nulos (equivale a recor())."""
+    return serie.where(serie.isna(), serie.astype(str).str[:2])
+
+
+def _fondo_dummy(fondo: pd.Series, cual: str) -> pd.Series:
+    """Reemplazo vectorizado de usd_f1 / usd_f2 / usd_f3."""
+    return (fondo == cual).astype(int)
+
+
+# ==========================================================================
+# 3b. VALIDACIÓN DE FECHA EN LAS FUENTES
+# ==========================================================================
+def _a_fecha(serie: pd.Series) -> pd.Series:
+    """Normaliza a fecha (sin hora) tolerando texto, datetime y serial de Excel."""
+    return pd.to_datetime(serie, errors="coerce").dt.normalize()
+
+
+def filtrar_por_fecha(df: pd.DataFrame, col: str, fecha: datetime,
+                      contexto: str, mask_extra: pd.Series | None = None) -> pd.DataFrame:
+    """
+    Filtra por fecha avisando de inmediato si no hay data, en lugar de dejar
+    que el proceso siga y falle 5 minutos después con un KeyError opaco.
+    """
+    fechas = _a_fecha(df[col])
+    mask = fechas == pd.Timestamp(fecha).normalize()
+    if mask_extra is not None:
+        mask = mask & mask_extra
+
+    if not mask.any():
+        disponibles = (fechas.dropna().drop_duplicates()
+                       .sort_values().dt.strftime("%d/%m/%Y").tolist())
+        raise ValueError(
+            f"[{contexto}] No hay registros para {fecha:%d/%m/%Y}. "
+            f"Últimas fechas disponibles: {disponibles[-8:]}. "
+            "Verifique que la fuente esté actualizada o corra con una fecha de corte cargada."
+        )
+
+    log.info("[%s] %d fila(s) para %s.", contexto, int(mask.sum()), fecha.date())
+    return df[mask]
+
+
+# ==========================================================================
+# 4. LECTURA DE FUENTES
+# ==========================================================================
+def leer_gp(escenario: str, mes: str, anio: str, app) -> pd.DataFrame:
+    """G&P_MLab: se escribe el escenario y se lee 'Detallado' ya recalculado."""
+    ruta = RUTAS.gp_input(mes, anio)
+    if not ruta.exists():
+        raise FileNotFoundError(f"No se encuentra el G&P del mes: {ruta}")
+
+    log.info("Abriendo G&P (%s) con escenario '%s'...", ruta.name, escenario)
+    wb = app.books.open(str(ruta), read_only=True, update_links=False)
+    try:
+        wb.sheets["Abs"].range("E3").value = escenario
+        esperar_calculo(app)
+        hoja_det = wb.sheets["Detallado"]
+        log.info("Detallado!C5 = %s", hoja_det.range("C5").value)
+        datos = hoja_det.used_range.value
+    finally:
+        wb.close()
+
+    df = pd.DataFrame(datos).iloc[8:, 1:60]
+    df.columns = df.iloc[0].astype(str).str.strip()
+    df = df.iloc[1:].reset_index(drop=True)
+
+    df = df.iloc[:, [0, 2, 4, 6, 7, 8, 11, 14, 15,
+                     22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+                     33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+                     44, 45, 46, 47, 48, 49, 50, 51, 52, 53]]
+
+    df.insert(1, "SBS2", recor(df["SBS"]))
+    del df["PBS"]
+    df.columns = [
+        "SBS", "SBS2", "Nombre", "Asset Class", "Cat", "SubCat", "Sub Cat2",
+        "Categoría", "AC Dir", "Rank Rt",
+        "INF1", "HAF1GAP", "RIF1GAP", "PFF1GAP", "SIF1GAP",
+        "INF2", "HAF2GAP", "RIF2GAP", "PFF2GAP", "SIF2GAP",
+        "INF3", "HAF3GAP", "RIF3GAP", "PFF3GAP", "SIF3GAP",
+    ]
+
+    # ISIN desde VP.xlsm (una sola lectura, cacheada)
+    vp = CACHE.hoja(RUTAS.vp, "CalcP").iloc[4:, [2, 3, 10]]
+    vp.columns = vp.iloc[0]
+    vp = vp.drop(vp.index[0]).set_index("SBS")
+    df.insert(0, "ISIN", df["SBS"].map(vp["ISIN"].to_dict()))
+
+    log.info("G&P cargado: %d filas.", len(df))
+    return df
+
+
+def leer_aum(fecha_aum: str) -> tuple[float, ...]:
+    """AUM por AFP y fondo desde DataValorCuota_IN.xlsm."""
+    df = CACHE.hoja(RUTAS.valor_cuota, "DataHistórica")
+    df.columns = df.iloc[5]
+    df = df.iloc[6:, 1:22]
+    df = df.iloc[:, [0, 2, 3, 4, 10, 11, 12, 14, 15, 16, 18, 19, 20]]
+    df = df.set_index("Fecha")
+
+    try:
+        fila = pd.array(df.loc[fecha_aum, :])
+    except Exception:
+        disponibles = (pd.to_datetime(pd.Series(df.index), errors="coerce")
+                       .dropna().sort_values().dt.strftime("%d/%m/%Y").tolist())
+        log.warning(
+            "[DataValorCuota] %s no está en DataHistórica; se usa la ÚLTIMA fila "
+            "disponible (comportamiento original). Últimas fechas cargadas: %s",
+            fecha_aum, disponibles[-8:])
+        fila = pd.array(df.dropna().iloc[-1, :])
+
+    # (mismo desempaquetado que la versión original)
+    return (fila[3], fila[4], fila[5],      # inf1, inf2, inf3
+            fila[0], fila[1], fila[2],      # haf1, haf2, haf3
+            fila[9], fila[10], fila[11],    # rif1, rif2, rif3
+            fila[6], fila[7], fila[8])      # pff1, pff2, pff3
+
+
+def leer_tipo_cambio(fecha_iso: str, app) -> tuple[float, dict]:
+    """
+    Una sola apertura de RIESGO - Consulta General para obtener:
+      - el tipo de cambio del código '2'  (antes: valor_dolar)
+      - el diccionario CODIGO_MONEDA_SBS -> VALOR (antes: segunda apertura)
+    """
+    if not RUTAS.riesgo.exists():
+        raise FileNotFoundError(f"No se encuentra: {RUTAS.riesgo}")
+
+    fecha = fecha_iso.replace("-", "")
+    log.info("Consultando tipo de cambio para %s...", fecha)
+    wb = app.books.open(str(RUTAS.riesgo), read_only=True, update_links=False)
+    try:
+        hoja = wb.sheets["Tipo de Cambio"]
+        hoja.range("B1").value = fecha
+        esperar_calculo(app)
+        datos = hoja.used_range.value
+    finally:
+        wb.close()
+
+    df = pd.DataFrame(datos)
+
+    valor = None
+    for cod, val in zip(df[4], df[3]):
+        if cod == "2":
+            valor = val
+    if valor is None:
+        raise ValueError(f"No se encontró el tipo de cambio (código '2') para {fecha}.")
+    log.info("Tipo de cambio = %s", valor)
+
+    dmon = df.drop(index=[0, 1])
+    dmon.columns = dmon.iloc[0]
+    dic_moneda = dmon.set_index("CODIGO_MONEDA_SBS")["VALOR"].to_dict()
+
+    return valor, dic_moneda
+
+
+def leer_parametria(indice: str) -> dict:
+    """Parametria.xlsx hoja 'BU' indexada por 'SBS', 'ISIN' o 'Cod.Emisor'."""
+    df = CACHE.hoja(RUTAS.parametria, "BU")
+    df.columns = df.iloc[0]
+    df = df.drop(df.index[0])
+    if indice == "Cod.Emisor":
+        df = df.drop(df.loc[df["Cod.Emisor"].isin([None])].index)
+    return df.set_index(indice).to_dict()
+
+
+def leer_qest() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """QEST_BD.xlsm: hojas DQ_IN, DQ_RV, DQ_RF (una sola apertura del archivo)."""
+    h = CACHE.hojas(RUTAS.qest, ["DQ_IN", "DQ_RV", "DQ_RF"])
+    return h["DQ_IN"], h["DQ_RV"], h["DQ_RF"]
+
+
+# ==========================================================================
+# 5. TRANSFORMACIONES G&P
+# ==========================================================================
+def operaciones(df: pd.DataFrame) -> pd.DataFrame:
+    for a, b in zip(
+        ["HAF1", "RIF1", "PFF1", "SIF1", "HAF2", "RIF2", "PFF2", "SIF2",
+         "HAF3", "RIF3", "PFF3", "SIF3"],
+        ["INF1", "INF1", "INF1", "INF1", "INF2", "INF2", "INF2", "INF2",
+         "INF3", "INF3", "INF3", "INF3"],
+    ):
+        df[a] = df[b] - df[a + "GAP"]
+    return df.loc[df["Asset Class"].isin(["Renta Fija", "Renta Variable"])]
+
+
+def filtrar_BU(df: pd.DataFrame) -> pd.DataFrame:
+    """Mismos filtros que la función BU() original, en una sola máscara."""
+    cat_gob = (df["Cat"].isin(["Gobierno"])
+               | df["SubCat"].isin(["Gobierno"])
+               | df["Sub Cat2"].isin(["Gobierno"]))
+    es_fm = df["Categoría"].astype(str).str.contains("FM", regex=False, na=False)
+    ac_ok = df["AC Dir"].isin(["PE", "PEC", "EMC", "INTER"])
+    sbs_excl = df["SBS2"].isin(["52", "54", "50", "48", "PR", "08", "01", "FT", "PT"])
+
+    out = df.loc[~cat_gob & ~es_fm & ac_ok & ~sbs_excl].copy()
+    out["Categoría"] = out["Categoría"].astype(object)
+    log.info("BU: %d posiciones tras filtros.", len(out))
+    return out
+
+
+def filtrar_TD(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.loc[df["SBS2"].isin(["52", "54", "50", "48", "49"])].sort_index(
+        ignore_index=True)
+    log.info("TD: %d posiciones.", len(out))
+    return out
+
+
+def df_result(fondo: str, data: pd.DataFrame) -> pd.DataFrame:
+    df = data.loc[data[fondo] > 0, ["SBS", "ISIN", "Nombre", "Rank Rt", fondo]].copy()
+    df["Fondo"] = fondo[-2:]
+    return df.rename(columns={fondo: "Weight"})
+
+
+def X_AFP(f1: str, f2: str, f3: str, data: pd.DataFrame,
+          nombre: str, tipo: str) -> pd.DataFrame:
+    df = pd.concat([df_result(f, data) for f in (f1, f2, f3)]).sort_index(
+        ignore_index=True)
+    df["Strategy"] = tipo
+    df["Afp"] = nombre
+    return df
+
+
+def BU_TD_AFP(df1: pd.DataFrame, df2: pd.DataFrame,
+              aum1: float, aum2: float, aum3: float) -> pd.DataFrame:
+    df = pd.concat([df1, df2]).sort_index(ignore_index=True)
+    df["AUM"] = (aum1 * _fondo_dummy(df["Fondo"], "F1")
+                 + aum2 * _fondo_dummy(df["Fondo"], "F2")
+                 + aum3 * _fondo_dummy(df["Fondo"], "F3"))
+    return df
+
+
+def X_AFP_(df: pd.DataFrame, aum1: float, aum2: float, aum3: float) -> pd.DataFrame:
+    df = df.copy()
+    df["USD"] = df["Weight"] * (aum1 * _fondo_dummy(df["Fondo"], "F1")
+                                + aum2 * _fondo_dummy(df["Fondo"], "F2")
+                                + aum3 * _fondo_dummy(df["Fondo"], "F3"))
+    df = df.drop(columns=["Fondo", "AUM", "Weight"]).sort_index(ignore_index=True)
+
+    df = df.groupby(["SBS", "ISIN", "Nombre", "Rank Rt", "Strategy", "Afp"]).sum()
+    aum = aum1 + aum2 + aum3
+    df["AUM"] = aum
+    df["Weight"] = df["USD"] / aum
+    df = df.drop(columns=["USD"])
+    df["Fondo"] = "Multifondos"
+    return df.reset_index()
+
+
+# ==========================================================================
+# 6. CANTIDADES (Q)
+# ==========================================================================
+def Q_integra(df: pd.DataFrame, dic_sbs: dict, solo_integra: bool) -> pd.DataFrame:
+    """
+    Reemplaza Q_AFP()/QM_AFP() originales.
+      solo_integra=True  -> Portafolio  (Q solo si Fondo coincide y Afp == Integra)
+      solo_integra=False -> Multifondos (Q = suma de los 3 fondos)
+    """
+    out = df.copy()
+    f = [pd.to_numeric(out["SBS"].map(dic_sbs[f"IN-FONDO{i}"]), errors="coerce")
+         for i in (1, 2, 3)]
+
+    if solo_integra:
+        es_in = out["Afp"] == "Integra"
+        q = sum(v.where(es_in & (out["Fondo"] == f"F{i}"), 0).fillna(0)
+                for i, v in zip((1, 2, 3), f))
+    else:
+        q = sum(f)
+
+    out.insert(9, "Q", q)
+    return out
+
+
+def Q_X_OPE(df: pd.DataFrame, fecha: str, afp: str) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = df.iloc[15]
+    df = df.drop(df.index[15])
+    filtros = [f"{afp}-FONDO{i}_{fecha}" for i in (1, 2, 3)]
+    res = df[df["Fondo_Fecha"].isin(filtros)].transpose()
+    res.columns = res.iloc[0]
+    return res
+
+
+def Q_otras_afp(port: pd.DataFrame, multi: pd.DataFrame,
+                df_rv: pd.DataFrame, df_rf: pd.DataFrame,
+                fecha_nueva: str, abr: str) -> pd.DataFrame:
+    """Reemplaza el segundo Q_AFP() (Habitat / Profuturo / Prima)."""
+    dic = pd.concat([Q_X_OPE(df_rv, fecha_nueva, abr),
+                     Q_X_OPE(df_rf, fecha_nueva, abr)]).to_dict()
+
+    out = pd.concat([port, multi])
+    f = [pd.to_numeric(out["SBS"].map(dic[f"{abr}-FONDO{i}"]), errors="coerce").fillna(0)
+         for i in (1, 2, 3)]
+
+    es_multi = out["Fondo"] == "Multifondos"
+    multi_q = (f[0] + f[1] + f[2]).where(es_multi, 0)
+    propios = sum(v.where(out["Fondo"] == f"F{i}", 0)
+                  for i, v in zip((1, 2, 3), f))
+
+    out.insert(9, "Q", propios + multi_q)
+    return out
+
+
+# ==========================================================================
+# 7. SALIDAS INTERMEDIAS
+# ==========================================================================
+def crear_txt(df1: pd.DataFrame, df2: pd.DataFrame, ruta: Path,
+              excluir_fondos: list[str] | None = None) -> None:
+    dfT = pd.concat([df1, df2]).sort_index(ignore_index=True)
+    dfT = dfT[["ISIN", "Weight", "Fondo", "Rank Rt", "Strategy"]]
+    dfT.columns = ["SECURITY_ID", "WEIGHT", "fondo", "class", "Strategy"]
+    if excluir_fondos:
+        dfT = dfT[~dfT["fondo"].isin(excluir_fondos)]
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    dfT.to_csv(ruta, sep=",", index=False)
+    log.info("Generado: %s (%d filas)", ruta.name, len(dfT))
+
+
+def plantilla_etf(ruta: Path, sbs: str) -> pd.DataFrame:
+    """Expande un ETF a las 5 AFP x 4 fondos (antes: doble bucle con concat)."""
+    df = CACHE.hoja(ruta, 0)
+    df.columns = df.iloc[0]
+    df = df.drop(df.index[0])
+
+    col_mv = next((c for c in df.columns if str(c).strip().startswith("Market Value")), None)
+    if col_mv is None:
+        raise KeyError(f"[{ruta.name}] No se encontró columna 'Market Value...'. "
+                       f"Columnas: {list(df.columns)}")
+
+    df = df[df["ISIN"].notna() & df[col_mv].notna()]
+    base = pd.DataFrame({
+        "ISIN": df["ISIN"].values,
+        "Market Value (%) (P)": (pd.to_numeric(df[col_mv], errors="coerce") / 100).fillna(0).values,
+    })
+
+    combos = pd.MultiIndex.from_product(
+        [["Integra", "Habitat", "Prima", "Profuturo", "Ex_Integra"],
+         ["F1", "F2", "F3", "Multifondos"]],
+        names=["AFP", "Fondo"],
+    ).to_frame(index=False)
+
+    out = base.merge(combos, how="cross")
+    out = out[["ISIN", "Market Value (%) (P)", "Fondo", "AFP"]]
+    out["SBS"] = sbs
+    out["key1"] = out["SBS"] + out["Fondo"] + out["AFP"]
+    log.info("[%s] plantilla ETF: %d filas.", ruta.name, len(out))
+    return out.reset_index(drop=True)
+
+
+def generar_relacion(epu: pd.DataFrame, bd: pd.DataFrame) -> pd.DataFrame:
+    epu = epu.copy()
+    dicBD = bd.set_index("key1").to_dict()
+    for col in ["Weight", "assetclass", "Strategy", "AUM", "Tipo",
+                "Precio", "Q", "Nombre", "Fecha", "codEmisor"]:
+        epu[col] = epu["key1"].map(dicBD[col])
+
+    epu = epu.dropna(subset=["Weight"])
+    epu["peso"] = epu["Market Value (%) (P)"] * epu["Weight"]
+    epu = epu.drop(columns=["Market Value (%) (P)", "key1", "Weight"])
+    return epu.rename(columns={"peso": "Weight"})
+
+
+# ==========================================================================
+# 8. PROCESO PRINCIPAL
+# ==========================================================================
+def main(dia: str = DIA, mes: str = MES, anio: str = ANIO,
+         escenario: str = ESCENARIO_INPUT) -> pd.DataFrame:
+    t0 = time.time()
+    fecha_input = f"{anio}-{mes}-{dia}"
+    fecha_aum = fecha_input
+    fecha_nueva = f"{dia}/{mes}/{anio}"
+    log.info("=== BD G&P %s%s | corte %s | escenario '%s' ===", anio, mes,
+             fecha_input, escenario)
+
+    # ---------- Lecturas que requieren Excel vivo (una sola sesión) ----------
+    with excel_dedicado() as app:
+        df = leer_gp(escenario, mes, anio, app)
+        valor, dic_moneda = leer_tipo_cambio(fecha_input, app)
+    # A partir de aquí ya no queda ningún Excel abierto por el proceso.
+
+    (auminf1, auminf2, auminf3, aumhaf1, aumhaf2, aumhaf3,
+     aumrif1, aumrif2, aumrif3, aumpff1, aumpff2, aumpff3) = leer_aum(fecha_aum)
+    aumsif1 = aumhaf1 + aumpff1 + aumrif1
+    aumsif2 = aumhaf2 + aumpff2 + aumrif2
+    aumsif3 = aumhaf3 + aumpff3 + aumrif3
+
+    # ---------- G&P a Excel ----------
+    ruta_gp = RUTAS.gp_output(mes, anio)
+    ruta_gp.parent.mkdir(parents=True, exist_ok=True)
+    df.to_excel(ruta_gp, index=False)
+    log.info("Generado: %s", ruta_gp.name)
+
+    # ---------- BU / TD por AFP ----------
+    df_temporal = operaciones(df)
+    df_BU = filtrar_BU(df_temporal)
+    df_TD = filtrar_TD(df_temporal)
+
+    afps = [("INF", "Integra"), ("HAF", "Habitat"), ("PFF", "Profuturo"),
+            ("RIF", "Prima"), ("SIF", "Ex_Integra")]
+    BU_ = {n: X_AFP(f"{p}1", f"{p}2", f"{p}3", df_BU, n, "BU") for p, n in afps}
+    TD_ = {n: X_AFP(f"{p}1", f"{p}2", f"{p}3", df_TD, n, "TD") for p, n in afps}
+
+    aum = {
+        "Integra": (auminf1, auminf2, auminf3),
+        "Habitat": (aumhaf1, aumhaf2, aumhaf3),
+        "Profuturo": (aumpff1, aumpff2, aumpff3),
+        "Prima": (aumrif1, aumrif2, aumrif3),
+        "Ex_Integra": (aumsif1, aumsif2, aumsif3),
+    }
+    PORT = {n: BU_TD_AFP(BU_[n], TD_[n], *aum[n]) for _, n in afps}
+    MULTI = {n: X_AFP_(PORT[n], *aum[n]) for _, n in afps}
+
+    Portafolio = pd.concat(PORT.values()).sort_index(ignore_index=True)
+    Multifondos = pd.concat(MULTI.values()).sort_index(ignore_index=True)
+    input1 = pd.concat([Portafolio, Multifondos]).sort_index(ignore_index=True)
+    input1.insert(0, "Fecha", fecha_nueva)
+
+    # ---------- TXT Base Alerta ----------
+    pref = f"{mes}{anio}BUIN_"
+    crear_txt(BU_["Integra"], MULTI["Integra"], RUTAS.base_alerta(f"{pref}.txt"))
+    crear_txt(TD_["Integra"], MULTI["Integra"], RUTAS.base_alerta(f"TDIN_{mes}{anio}.txt"))
+    for suf, excl in [("F1 INBU", ["F3", "F2", "Multifondos"]),
+                      ("F2 INBU", ["F1", "F3", "Multifondos"]),
+                      ("F3 INBU", ["F1", "F2", "Multifondos"]),
+                      ("M INBU", ["F1", "F2", "F3"])]:
+        crear_txt(BU_["Integra"], MULTI["Integra"],
+                  RUTAS.base_alerta(f"{pref}{suf}.txt"), excluir_fondos=excl)
+
+    # ---------- Cantidades (Q) ----------
+    dq_in, dq_rv, dq_rf = leer_qest()
+    dq_in.columns = dq_in.iloc[10]
+    dq_in = dq_in.drop(dq_in.index[10])
+    dic_sbs = filtrar_por_fecha(
+        dq_in, "Fecha", datetime.fromisoformat(fecha_aum + " 00:00:00"),
+        "QEST_BD!DQ_IN", mask_extra=(dq_in["Dato"] == "Q")).transpose()
+    dic_sbs.columns = dic_sbs.iloc[0]
+    dic_sbs = dic_sbs.to_dict()
+
+    IN_PORT = Q_integra(Portafolio, dic_sbs, solo_integra=True)
+    IN_M = Q_integra(MULTI["Integra"], dic_sbs, solo_integra=False)
+    df_IN = pd.concat([IN_PORT, IN_M]).sort_index(ignore_index=True)
+    df_IN = df_IN[df_IN["Afp"] == "Integra"]
+
+    otras = {abr: Q_otras_afp(PORT[n], MULTI[n], dq_rv, dq_rf, fecha_nueva, abr)
+             for abr, n in [("HA", "Habitat"), ("PF", "Profuturo"), ("RI", "Prima")]}
+
+    PORT_M_TOTAL = pd.concat([df_IN, *otras.values()]).sort_index(ignore_index=True)
+
+    # Ex_Integra = suma de HA + PF + RI
+    ex = pd.concat(otras.values()).sort_index(ignore_index=True)
+    ex["Key"] = ex["SBS"] + ex["ISIN"] + ex["Fondo"] + ex["Strategy"]
+    suma_q = ex.groupby("Key")["Q"].sum()
+
+    EX_IN = input1[input1["Afp"] == "Ex_Integra"].sort_index(ignore_index=True).copy()
+    EX_IN["Q"] = (EX_IN["SBS"] + EX_IN["ISIN"] + EX_IN["Fondo"] + EX_IN["Strategy"]).map(suma_q)
+
+    PORT_M_TOTAL = pd.concat([PORT_M_TOTAL, EX_IN]).sort_index(ignore_index=True)
+    PORT_M_TOTAL = PORT_M_TOTAL.drop(columns=["Fecha"])
+    PORT_M_TOTAL["codEmisor"] = PORT_M_TOTAL["SBS"].astype(str).str[2:6]
+
+    # ---------- Nombres, precios y tipo de cambio ----------
+    par_sbs = leer_parametria("SBS")
+    df_p_m = PORT_M_TOTAL.copy()
+    name_p = df_p_m["SBS"].map(par_sbs["Name"])
+    df_p_m["Nombre"] = np.where(df_p_m["Strategy"] == "BU", name_p, df_p_m["Nombre"])
+    df_p_m["Tipo"] = valor
+    df_p_m["Fecha"] = fecha_nueva
+    df_p_m = df_p_m.rename(columns={"Rank Rt": "assetclass"})
+    df_p_m = df_p_m[["SBS", "ISIN", "Weight", "Fondo", "assetclass", "Strategy",
+                     "Afp", "AUM", "Tipo", "Q", "Nombre", "Fecha", "codEmisor"]]
+
+    # Precios
+    dfp = CACHE.hoja(RUTAS.precios, "BDat_Act")
+    dfp.columns = dfp.iloc[13]
+    dfp = dfp.drop(dfp.index[13])
+    dic_precio = filtrar_por_fecha(
+        dfp, "Fecha", datetime.fromisoformat(fecha_aum + " 00:00:00"),
+        "BDPrecios!BDat_Act", mask_extra=(dfp["Campo"] == "P")).transpose()
+    dic_precio.columns = dic_precio.iloc[0]
+    df_p_m["Precio"] = df_p_m["SBS"].map(dic_precio.to_dict()["P"])
+
+    df_p_m["Fecha"] = datetime.strptime(f"01/{mes}/{anio}", "%d/%m/%Y")
+    df_p_m["Tipo"] = df_p_m["SBS"].str.get(6).map(dic_moneda)
+    df_p_m["Inversión"] = df_p_m["Precio"] * df_p_m["Q"] * df_p_m["Tipo"]
+
+    ruta_bd1 = RUTAS.intermedio(f"{anio}{mes} BD1.xlsx")
+    ruta_bd1.parent.mkdir(parents=True, exist_ok=True)
+    df_p_m.to_excel(ruta_bd1, index=False)
+    log.info("Generado: %s (%d filas)", ruta_bd1.name, len(df_p_m))
+
+    # ---------- Incorporar EPU / ETF Perú ----------
+    plantilla = pd.concat([
+        plantilla_etf(RUTAS.comparables(f"{anio}{mes} EPU US.xlsx"), "5460042E8427"),
+        plantilla_etf(RUTAS.comparables(f"{anio}{mes} ETF Perú.xlsx"), "5076822E0800"),
+    ])
+
+    # BD1 se relee UNA vez (antes: 3 aperturas vía xlwings)
+    bd1 = pd.read_excel(ruta_bd1)
+    sbs2 = recor(bd1["SBS"])
+
+    bd_etf = bd1[sbs2.isin(["54", "50"])].sort_index(ignore_index=True).copy()
+    bd_etf["Strategy"] = "BU"
+    bd_etf["key1"] = bd_etf["SBS"] + bd_etf["Fondo"] + bd_etf["Afp"]
+    epu = generar_relacion(plantilla, bd_etf)
+
+    resto = bd1[~sbs2.isin(["54", "50"])].copy()
+    resto["key1"] = (resto["ISIN"] + resto["Fondo"] + resto["Afp"]
+                     + resto["assetclass"] + resto["Strategy"])
+    epu_key = (epu["ISIN"] + epu["Fondo"] + epu["AFP"]
+               + epu["assetclass"] + epu["Strategy"])
+    epu_ind = epu.assign(key1=epu_key)
+
+    resto["Weight"] = resto["Weight"].fillna(0)
+    w2 = resto["key1"].map(epu_ind.set_index("key1")["Weight"].to_dict()).fillna(0)
+    resto.insert(2, "Weight_T", resto["Weight"] + w2)
+    df_port_epu = (resto.drop(columns=["Weight"])
+                        .rename(columns={"Weight_T": "Weight", "Afp": "AFP"}))
+
+    ya_esta = epu_key.isin(set(resto["key1"]))
+    df_solo_epu = epu_ind[~ya_esta].drop(columns=["key1"]).assign(key1=epu_key[~ya_esta])
+
+    df_total = pd.concat([df_port_epu, df_solo_epu])
+
+    # ---------- Nombre / Empresa desde Parametría (por ISIN) ----------
+    par_isin = leer_parametria("ISIN")
+    vp = CACHE.hoja(RUTAS.vp, "CalcP").iloc[4:, [3, 4]]
+    vp.columns = vp.iloc[0]
+    vp = vp.drop(vp.index[0]).set_index("ISIN")
+
+    dic_p1 = df_total.copy()
+    es_bu = dic_p1["Strategy"] == "BU"
+    dic_p1.loc[es_bu, "Nombre"] = dic_p1.loc[es_bu, "ISIN"].map(par_isin["Nombre"])
+    dic_p1["Empresa"] = dic_p1["Nombre"]
+    id_map = dic_p1["ISIN"].map(par_isin.get("ID", {}))
+    dic_p1["Empresa"] = np.where(es_bu & id_map.notna(), id_map, dic_p1["Empresa"])
+
+    dic_p1 = dic_p1[["SBS", "ISIN", "Weight", "Fondo", "assetclass", "Strategy",
+                     "AFP", "AUM", "Tipo", "Precio", "Q", "Inversión", "Nombre",
+                     "Empresa", "Fecha", "codEmisor", "key1"]]
+
+    ruta_port = RUTAS.intermedio(f"{anio}{mes} Portafolio.xlsx")
+    dic_p1.to_excel(ruta_port, index=False)
+    log.info("Generado: %s (%d filas)", ruta_port.name, len(dic_p1))
+
+    # ---------- Nuevos instrumentos -> Para.xlsx ----------
+    par = CACHE.hoja(RUTAS.parametria, "BU")
+    par.columns = par.iloc[0]
+    par = par.drop(par.index[0])
+    par = par.drop(par.loc[par["ISIN"].isin([None])].index)
+
+    pbu = pd.read_excel(ruta_port)
+    pbu = pbu[pbu["Strategy"] == "BU"]
+    nuevos = pbu[~pbu["ISIN"].isin(set(par["ISIN"]))]
+    nuevos = nuevos[["ISIN", "SBS", "codEmisor", "Nombre"]].copy()
+    nuevos.columns = ["ISIN", "SBS", "Cod.Emisor", "Nombre"]
+
+    dic3 = leer_parametria("Cod.Emisor")
+    for pos, (col, origen) in enumerate(
+        [("Moneda", "moneda"), ("Sector", "Sector"), ("Pais", "País"),
+         ("Region", "Region"), ("Mercado", "mercado")], start=4
+    ):
+        nuevos.insert(pos, col, nuevos["Cod.Emisor"].map(dic3[origen]))
+
+    df_Total = pd.concat([par, nuevos])
+    ruta_para = RUTAS.dataset / "Para.xlsx"
+    df_Total.to_excel(ruta_para, index=False)
+    log.info("Generado: %s (%d filas, %d nuevos instrumentos)",
+             ruta_para.name, len(df_Total), len(nuevos))
+
+    log.info("=== Proceso terminado en %.1f min ===", (time.time() - t0) / 60)
+    return dic_p1
+
+
+if __name__ == "__main__":
+    resultado = main()
+    print(resultado.head())
