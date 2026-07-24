@@ -1,0 +1,425 @@
+"""
+Comparables — versión modernizada (2026)
+=========================================
+Genera el archivo intermedio "<AAAAMM> Comparables.xlsx" a partir de:
+  1. RIESGO - Consulta General.xlsm  -> tipo de cambio de la fecha de corte (xlwings)
+  2. Market Cap.xlsx (hoja 'MKT')    -> AUM por ETF a la fecha de corte
+  3. Los 8 exceles de holdings de ETFs (<AAAAMM> <TICKER>.xlsx)
+  4. 0 Subyacentes.xlsx (hoja 'Parametros') -> País / Región / Mercado por Country Code
+
+Cambios clave frente a la versión anterior:
+  * Los encabezados de los exceles de ETF NO son homogéneos: en unos la primera
+    columna se llama 'Name' y en otros viene vacía ('Unnamed: 0'), y las métricas
+    aparecen con o sin sufijo ' (P)' ('Market Value (%)' vs 'Market Value (%) (P)').
+    -> Esto es exactamente lo que causaba el KeyError: 'Name'.
+       Ahora se normalizan los nombres de columna y se resuelven por alias.
+  * El sector ya no depende del prefijo '› ': se deduce por la indentación del
+    árbol de Bloomberg (y se conserva '› ' como caso legacy).
+  * Sin `inplace=True` encadenado (evita el ChainedAssignmentError de pandas 2.x/3.x).
+  * Rutas centralizadas en CONFIG y validadas antes de ejecutar.
+  * Avisos claros: cada archivo reporta filas, suma de pesos, ISIN sin país, etc.
+  * xlwings solo se usa donde hace falta recalcular (tipo de cambio).
+
+Requisitos: pandas >= 2.0, openpyxl, xlwings (solo para el tipo de cambio).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# --------------------------------------------------------------------------
+# Logging: un aviso por evento relevante, con nivel para poder silenciar.
+# --------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("comparables")
+
+
+# ==========================================================================
+# 1. CONFIGURACIÓN — lo único que se toca al mover carpetas o agregar ETFs
+# ==========================================================================
+@dataclass
+class Config:
+    # --- Rutas ---
+    riesgo_xlsm: Path = Path(
+        r"Z:\Mesa de Inversiones\Trading\RIESGO - Consulta General.xlsm"
+    )
+    carpeta_comparables: Path = Path(
+        r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+        r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+        r"\1.Data Histórica\Dataset\Comparables"
+    )
+    carpeta_output: Path = Path(
+        r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+        r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+        r"\1.Data Histórica\Output\Intermedio"
+    )
+    subyacentes_xlsx: Path = Path(
+        r"Y:\Riesgos Inversiones\1. Nueva organización de Carpetas\AFP"
+        r"\4. Riesgos de Mercado\4.10 Reportes Regulatorios"
+        r"\4.10.15 Base maestra - Inventario\0 Subyacentes.xlsx"
+    )
+
+    # --- ETFs: etiqueta AFP -> (sufijo del archivo, columna en Market Cap) ---
+    # La etiqueta AFP es la que se escribe en el output y la que usa el mapeo de AUM.
+    etfs: dict[str, tuple[str, str]] = field(
+        default_factory=lambda: {
+            "ACWI US": ("ACWI US", "ACWI US"),
+            "CEMB US": ("CEMB US", "CEMB US"),
+            "EEM US": ("EEM US", "EEM US"),
+            "EPU US": ("EPU US", "EPU US"),
+            "ETF Perú": ("ETF Perú", "ETFPERUD PE"),
+            "IEMG US": ("IEMG US", "IEMG US"),
+            "ILF US": ("ILF US", "ILF US"),
+            "SWDA LN": ("SWDA LN", "SWDA LN"),
+        }
+    )
+
+    # --- Comportamiento ---
+    tolerancia_peso: float = 0.02   # aviso si la suma de pesos se aleja de 1
+    tc_espera_seg: int = 5          # espera de recálculo del .xlsm
+    exigir_todos_los_etf: bool = False  # True = falta un archivo -> error
+
+
+CONFIG = Config()
+
+
+# ==========================================================================
+# 2. UTILIDADES DE NORMALIZACIÓN
+# ==========================================================================
+def _limpiar_encabezado(col: object) -> str:
+    """'Market Value (%) (P) ' -> 'market value (%)'. Une variantes Bloomberg."""
+    s = str(col).strip()
+    s = re.sub(r"\s*\(P\)\s*$", "", s)          # sufijo de precio/preliminar
+    s = re.sub(r"\s*\.\d+$", "", s)             # duplicados de pandas (.1)
+    s = re.sub(r"\s+", " ", s)
+    return s.lower()
+
+
+def resolver_columna(df: pd.DataFrame, alias: list[str], *, requerida: bool = True,
+                     contexto: str = "") -> str | None:
+    """
+    Devuelve el nombre REAL de la primera columna que coincide con algún alias.
+    Compara sobre nombres normalizados, así 'Market Value (%)' y
+    'Market Value (%) (P)' resuelven igual.
+    """
+    mapa = {_limpiar_encabezado(c): c for c in df.columns}
+    for a in alias:
+        clave = _limpiar_encabezado(a)
+        if clave in mapa:
+            return mapa[clave]
+    if requerida:
+        raise KeyError(
+            f"[{contexto}] No se encontró ninguna de las columnas {alias}. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+    log.warning("[%s] Columna opcional ausente (%s); se llenará con vacío.",
+                contexto, alias[0])
+    return None
+
+
+def _nivel_indentacion(nombre: object) -> int:
+    """Profundidad en el árbol de Bloomberg: 0 = fondo, 1 = sector, 2 = valor."""
+    s = str(nombre)
+    if s.strip().startswith("›"):          # formato legacy con viñeta
+        return 1
+    if not s.strip():
+        return -1
+    return (len(s) - len(s.lstrip(" \t"))) // 3
+
+
+def _texto_sector(nombre: object) -> str:
+    s = str(nombre).strip()
+    return s[1:].strip() if s.startswith("›") else s
+
+
+# ==========================================================================
+# 3. TIPO DE CAMBIO (único paso que necesita Excel vivo)
+# ==========================================================================
+def obtener_tipo_cambio(fecha: datetime, cfg: Config = CONFIG) -> float:
+    """Escribe la fecha en 'Tipo de Cambio'!B1, deja recalcular y lee el TC tipo '2'."""
+    import xlwings as xw  # import perezoso: el resto del script corre sin Excel
+
+    if not cfg.riesgo_xlsm.exists():
+        raise FileNotFoundError(f"No se encuentra el archivo de riesgo: {cfg.riesgo_xlsm}")
+
+    log.info("Consultando tipo de cambio para %s ...", fecha.date())
+    wb = xw.Book(str(cfg.riesgo_xlsm), read_only=True, update_links=False)
+    try:
+        hoja = wb.sheets["Tipo de Cambio"]
+        hoja.range("B1").value = fecha.strftime("%Y%m%d")
+        time.sleep(cfg.tc_espera_seg)
+        datos = hoja.used_range.value
+    finally:
+        wb.close()
+
+    df = pd.DataFrame(datos)
+    if df.shape[1] < 5:
+        raise ValueError("La hoja 'Tipo de Cambio' no devolvió las columnas esperadas.")
+
+    filas = df[df[4].astype(str).str.strip() == "2"]
+    if filas.empty:
+        raise ValueError(
+            f"No se encontró el tipo de cambio (código '2') para {fecha.date()}. "
+            "Verifique que la fecha sea un día hábil con data cargada."
+        )
+    if len(filas) > 1:
+        log.warning("Se encontraron %d filas con código '2'; se usa la primera.", len(filas))
+
+    tc = float(filas.iloc[0][3])
+    log.info("Tipo de cambio = %.4f", tc)
+    return tc
+
+
+# ==========================================================================
+# 4. AUM POR ETF (Market Cap.xlsx) — ya no requiere xlwings
+# ==========================================================================
+def obtener_aum(fecha_mes: datetime, cfg: Config = CONFIG) -> dict[str, float]:
+    ruta = cfg.carpeta_comparables / "Market Cap.xlsx"
+    if not ruta.exists():
+        raise FileNotFoundError(f"No se encuentra Market Cap: {ruta}")
+
+    crudo = pd.read_excel(ruta, sheet_name="MKT", header=None)
+
+    # El encabezado real es la fila que contiene 'FECHA' (no siempre es la 1).
+    filas_fecha = crudo.index[
+        crudo.apply(lambda r: r.astype(str).str.strip().str.upper().eq("FECHA").any(), axis=1)
+    ]
+    if len(filas_fecha) == 0:
+        raise ValueError("La hoja 'MKT' no tiene una fila de encabezado con 'FECHA'.")
+    i_hdr = int(filas_fecha[0])
+
+    df = crudo.iloc[i_hdr + 1:].copy()
+    df.columns = [str(c).replace(" Equity", "").strip() for c in crudo.iloc[i_hdr]]
+    df = df.rename(columns={"FECHA": "FECHA"})
+    df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
+
+    fila = df[df["FECHA"] == fecha_mes]
+    if len(fila) == 0:
+        disponibles = df["FECHA"].dropna().dt.strftime("%Y-%m").unique()[-6:]
+        raise ValueError(
+            f"Market Cap no tiene la fecha {fecha_mes:%d/%m/%Y}. "
+            f"Últimos meses disponibles: {list(disponibles)}"
+        )
+    if len(fila) > 1:
+        raise ValueError(
+            f"Market Cap tiene {len(fila)} filas para {fecha_mes:%d/%m/%Y}; debe haber exactamente 1."
+        )
+
+    aum: dict[str, float] = {}
+    for etiqueta, (_, col_mkt) in cfg.etfs.items():
+        if col_mkt not in fila.columns:
+            raise KeyError(
+                f"Market Cap no tiene la columna '{col_mkt}' (ETF {etiqueta}). "
+                f"Columnas: {[c for c in fila.columns if c and c != 'nan']}"
+            )
+        valor = pd.to_numeric(fila[col_mkt].iloc[0], errors="coerce")
+        if pd.isna(valor):
+            raise ValueError(f"AUM vacío para {etiqueta} en {fecha_mes:%d/%m/%Y}.")
+        aum[etiqueta] = float(valor)
+
+    log.info("AUM leídos: %s", {k: round(v, 1) for k, v in aum.items()})
+    return aum
+
+
+# ==========================================================================
+# 5. HOLDINGS DE UN ETF
+# ==========================================================================
+def leer_etf(ruta: Path, etiqueta_afp: str, cfg: Config = CONFIG) -> pd.DataFrame:
+    df = pd.read_excel(ruta)
+    ctx = ruta.name
+
+    # --- Resolución flexible de columnas (aquí moría el código anterior) ---
+    c_nombre = resolver_columna(df, ["Name", "Unnamed: 0"], requerida=False, contexto=ctx)
+    if c_nombre is None:
+        c_nombre = df.columns[0]       # la jerarquía siempre está en la 1ª columna
+        log.warning("[%s] Sin encabezado 'Name'; se usa la primera columna '%s'.",
+                    ctx, c_nombre)
+
+    c_isin = resolver_columna(df, ["ISIN"], contexto=ctx)
+    c_peso = resolver_columna(df, ["Market Value (%)"], contexto=ctx)
+    c_rating = resolver_columna(df, ["MSCI ESG Rating"], requerida=False, contexto=ctx)
+    c_crncy = resolver_columna(df, ["Crncy", "Currency"], requerida=False, contexto=ctx)
+    c_pais = resolver_columna(df, ["Cntry (Risk)", "Country (Risk)"], requerida=False, contexto=ctx)
+    c_clase = resolver_columna(df, ["Class - Broad"], requerida=False, contexto=ctx)
+    c_precio = resolver_columna(df, ["Px Close"], requerida=False, contexto=ctx)
+
+    # --- Sector: se propaga desde las filas de cabecera del árbol ---
+    niveles = df[c_nombre].map(_nivel_indentacion)
+    es_sector = (niveles == 1) & df[c_isin].isna()
+    df["Sector GICS"] = np.where(es_sector, df[c_nombre].map(_texto_sector), np.nan)
+    df["Sector GICS"] = df["Sector GICS"].ffill()
+    if not es_sector.any():
+        log.warning("[%s] No se detectaron filas de sector; 'Sector GICS' quedará vacío.", ctx)
+
+    # --- Solo posiciones reales ---
+    n0 = len(df)
+    df = df[df[c_isin].notna() & df[c_peso].notna()].copy()
+    log.info("[%s] %d filas -> %d posiciones con ISIN y peso.", ctx, n0, len(df))
+    if df.empty:
+        raise ValueError(f"[{ctx}] No quedaron posiciones tras filtrar ISIN/peso.")
+
+    # --- Peso a fracción y control de suma ---
+    df["Weight"] = pd.to_numeric(df[c_peso], errors="coerce") / 100.0
+    suma = df["Weight"].sum()
+    msg = f"[{ctx}] Suma de Market Value = {suma:.6f}"
+    if abs(suma - 1) > cfg.tolerancia_peso:
+        log.warning("%s  <-- fuera de la tolerancia ±%.0f%%", msg, cfg.tolerancia_peso * 100)
+    else:
+        log.info(msg)
+
+    if df[c_isin].duplicated().any():
+        dups = df.loc[df[c_isin].duplicated(keep=False), c_isin].unique()
+        log.warning("[%s] %d ISIN duplicados (ej. %s).", ctx, len(dups), list(dups)[:3])
+
+    salida = pd.DataFrame({
+        "ISIN": df[c_isin].astype(str).str.strip(),
+        "Weight": df["Weight"],
+        "AFP": etiqueta_afp,
+        "Nombre": df[c_nombre].map(lambda x: str(x).strip()),
+        "MSCI ESG Rating": df[c_rating] if c_rating else np.nan,
+        "Crncy": df[c_crncy] if c_crncy else np.nan,
+        "Cntry (Risk)": df[c_pais] if c_pais else np.nan,
+        "Class - Broad": df[c_clase] if c_clase else np.nan,
+        "Precio": pd.to_numeric(df[c_precio], errors="coerce") if c_precio else np.nan,
+        "Sector GICS": df["Sector GICS"],
+    })
+    return salida
+
+
+# ==========================================================================
+# 6. DICCIONARIO DE PAÍSES (0 Subyacentes.xlsx / hoja 'Parametros')
+# ==========================================================================
+def leer_parametros_pais(cfg: Config = CONFIG) -> pd.DataFrame:
+    if not cfg.subyacentes_xlsx.exists():
+        raise FileNotFoundError(f"No se encuentra 0 Subyacentes: {cfg.subyacentes_xlsx}")
+
+    crudo = pd.read_excel(cfg.subyacentes_xlsx, sheet_name="Parametros", header=None)
+
+    # El encabezado NO siempre está en la misma fila: se busca 'Country Code'.
+    i_hdr = None
+    for i in range(min(15, len(crudo))):
+        if crudo.iloc[i].astype(str).str.strip().eq("Country Code").any():
+            i_hdr = i
+            break
+    if i_hdr is None:
+        raise ValueError("En 'Parametros' no se encontró la columna 'Country Code'.")
+    log.info("Encabezado de 'Parametros' detectado en la fila %d.", i_hdr + 1)
+
+    df = crudo.iloc[i_hdr + 1:].copy()
+    df.columns = [str(c).strip() for c in crudo.iloc[i_hdr]]
+
+    c_code = "Country Code"
+    c_pais = resolver_columna(df, ["Nombre País"], contexto="Parametros")
+    c_region = resolver_columna(df, ["Geografía Integra"], contexto="Parametros")
+    # Algunas versiones del archivo traen 'Mercado-MSCI' en lugar de 'Mercado'.
+    c_mercado = resolver_columna(df, ["Mercado", "Mercado-MSCI"],
+                                 requerida=False, contexto="Parametros")
+
+    par = pd.DataFrame({
+        "Country Code": df[c_code].astype(str).str.strip(),
+        "País": df[c_pais],
+        "Región": df[c_region],
+        "Mercado": df[c_mercado] if c_mercado else np.nan,
+    })
+    par = par[par["Country Code"].notna() & ~par["Country Code"].isin(["", "nan", "None"])]
+    par = par.drop_duplicates(subset="Country Code", keep="first")
+    log.info("Parámetros de país cargados: %d códigos.", len(par))
+    return par
+
+
+# ==========================================================================
+# 7. PROCESO PRINCIPAL
+# ==========================================================================
+def comparables(dia: int | str, mes: int | str, anio: int | str,
+                cfg: Config = CONFIG, *, guardar: bool = True) -> pd.DataFrame:
+    dia, mes, anio = int(dia), int(mes), int(anio)
+    fecha_corte = datetime(anio, mes, dia)
+    fecha_mes = datetime(anio, mes, 1)
+    etiqueta_mes = f"{anio:04d}{mes:02d}"
+    log.info("=== Comparables %s | corte %s ===", etiqueta_mes, fecha_corte.date())
+
+    tc = obtener_tipo_cambio(fecha_corte, cfg)
+    aum = obtener_aum(fecha_mes, cfg)
+
+    # --- Holdings de cada ETF ---
+    partes, faltantes = [], []
+    for etiqueta, (sufijo, _) in cfg.etfs.items():
+        ruta = cfg.carpeta_comparables / f"{etiqueta_mes} {sufijo}.xlsx"
+        if not ruta.exists():
+            faltantes.append(ruta.name)
+            log.error("Archivo no encontrado: %s", ruta.name)
+            continue
+        partes.append(leer_etf(ruta, etiqueta, cfg))
+
+    if faltantes and cfg.exigir_todos_los_etf:
+        raise FileNotFoundError(f"Faltan archivos de ETF: {faltantes}")
+    if not partes:
+        raise FileNotFoundError(f"No se pudo leer ningún ETF en {cfg.carpeta_comparables}")
+    if faltantes:
+        log.warning("Se continúa SIN %d ETF(s): %s", len(faltantes), faltantes)
+
+    df = pd.concat(partes, ignore_index=True)
+    log.info("Consolidado: %d posiciones de %d ETFs.", len(df), len(partes))
+
+    # --- Enriquecimiento de país ---
+    par = leer_parametros_pais(cfg)
+    df["Cntry (Risk)"] = df["Cntry (Risk)"].astype(str).str.strip()
+    df = df.merge(par, how="left", left_on="Cntry (Risk)", right_on="Country Code")
+    df = df.drop(columns="Country Code")
+
+    sin_pais = df.loc[df["País"].isna(), "Cntry (Risk)"].replace("nan", np.nan).dropna().unique()
+    if len(sin_pais):
+        log.warning("%d código(s) de país sin equivalencia en 'Parametros': %s",
+                    len(sin_pais), sorted(sin_pais)[:15])
+
+    # --- Campos fijos del layout de salida ---
+    df["Fondo"] = "Multifondos"
+    df["AssetClass"] = "RVI"
+    df["Strategy"] = "BU"
+    df["Tipo"] = tc
+    df["AUM"] = df["AFP"].map(aum)
+    df["Q"] = ""
+    df["Empresa"] = df["Nombre"]
+    df["SBS"] = ""
+    df["Fecha"] = fecha_mes
+    df["cod emisor"] = ""
+    df["Pct_FFMM"] = df["Weight"]
+
+    if df["AUM"].isna().any():
+        etiquetas = df.loc[df["AUM"].isna(), "AFP"].unique()
+        raise ValueError(f"AUM sin asignar para: {list(etiquetas)}")
+
+    columnas = [
+        "ISIN", "Weight", "Fondo", "AssetClass", "Strategy", "AFP", "AUM", "Tipo",
+        "Precio", "Q", "Nombre", "Empresa", "SBS", "Fecha", "cod emisor",
+        "MSCI ESG Rating", "Crncy", "Cntry (Risk)", "Class - Broad",
+        "País", "Región", "Mercado", "Sector GICS", "Pct_FFMM",
+    ]
+    df = df[columnas]
+
+    if guardar:
+        cfg.carpeta_output.mkdir(parents=True, exist_ok=True)
+        destino = cfg.carpeta_output / f"{etiqueta_mes} Comparables.xlsx"
+        if destino.exists():
+            log.warning("Se sobrescribirá el archivo existente: %s", destino.name)
+        df.to_excel(destino, index=False)
+        log.info("Archivo generado: %s (%d filas)", destino, len(df))
+
+    return df
+
+
+if __name__ == "__main__":
+    df = comparables(21, 7, 2026)
+    print(df.head())
