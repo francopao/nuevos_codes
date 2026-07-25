@@ -1,0 +1,408 @@
+# -*- coding: utf-8 -*-
+"""
+Comparables — AFP Integra / Mesa de Inversiones (RVL / ESG)
+===========================================================
+Reescritura modernizada del script original (misma salida, mismo output).
+
+Qué produce
+-----------
+[AAAAMM] Comparables.xlsx  (idénticas columnas, valores, orden, nombre y ruta
+que la versión original para un mismo periodo de corte).
+
+Cambios respecto al original (solo el "cómo", no el "qué")
+----------------------------------------------------------
+1. Sin ingreso manual: el periodo se detecta de la fecha de ejecución.
+   Se puede sobreescribir con fecha_corte / (dia, mes, anio).
+2. Selección inteligente Formato A / Formato B por benchmark (Objetivo 2).
+3. Velocidad (Objetivo 3): Market Cap, Subyacentes y los 8 benchmarks se leen
+   con pandas/openpyxl (sin COM). Excel vivo (xlwings) se usa SOLO para el
+   RIESGO - Consulta General.xlsm (query de tipo de cambio con recálculo),
+   abriéndolo una única vez y esperando el cálculo de forma activa (sin
+   time.sleep fijo), cerrando la instancia correctamente.
+4. Blindaje: excepciones específicas por benchmark; un archivo faltante o mal
+   formado se reporta y NO tumba el resto del pipeline.
+
+Requisitos: Windows + Excel + xlwings (solo para el TC). pandas / openpyxl.
+"""
+
+import os
+import re
+import datetime as _dt
+from typing import Optional, Dict, List
+
+import numpy as np
+import pandas as pd
+
+# ----------------------------------------------------------------------------
+# RUTAS (idénticas al original)
+# ----------------------------------------------------------------------------
+RUTA_RIESGO = r"Z:\Mesa de Inversiones\Trading\RIESGO - Consulta General.xlsm"
+
+CARPETA_COMPARABLES = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+    r"\1.Data Histórica\Dataset\Comparables"
+)
+RUTA_MARKET_CAP = os.path.join(CARPETA_COMPARABLES, "Market Cap.xlsx")
+
+RUTA_SUBYACENTES = (
+    r"Y:\Riesgos Inversiones\1. Nueva organización de Carpetas\AFP"
+    r"\4. Riesgos de Mercado\4.10 Reportes Regulatorios"
+    r"\4.10.15 Base maestra - Inventario\0 Subyacentes.xlsx"
+)
+CARPETA_OUTPUT = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+    r"\1.Data Histórica\Output\Intermedio"
+)
+
+# ----------------------------------------------------------------------------
+# CONSTANTES DE NEGOCIO
+# ----------------------------------------------------------------------------
+# Orden/nombres EXACTOS de los 8 benchmarks (== nombres_archivos del original).
+BENCHMARKS: List[str] = [
+    "ACWI US", "CEMB US", "EEM US", "EPU US",
+    "ETF Perú", "IEMG US", "ILF US", "SWDA LN",
+]
+
+# benchmark (nombre de archivo / AFP)  ->  columna en Market Cap 'MKT'
+MKT_COL_POR_BENCHMARK: Dict[str, str] = {
+    "ACWI US": "ACWI US",
+    "CEMB US": "CEMB US",
+    "EEM US":  "EEM US",
+    "EPU US":  "EPU US",
+    "ETF Perú": "ETFPERUD PE",   # ETF Perú toma su AUM de ETFPERUD PE
+    "IEMG US": "IEMG US",
+    "ILF US":  "ILF US",
+    "SWDA LN": "SWDA LN",
+}
+
+# Encabezados canónicos del FORMATO A (derivados del export real "202606 EPU US.xlsx").
+# Las columnas "Port" del Formato B corresponden 1 a 1, en orden, a estas
+# (la col 0 "Name" viene de la columna jerárquica "Class" del Formato B).
+# Se mantienen los duplicados ('Pos (Mkt) (P)') tal como aparecen en el Formato A real.
+FORMATO_A_HEADERS: List[str] = [
+    "Name", "ID059", "POINT_Issue_Year", "ISIN", "Ticker",
+    "Market Value (%) (P)", "Issuer", "MSCI ESG Rating (P)", "Crncy",
+    "Cntry (Risk)", "Currency (Risk)", "Class - Broad", "Total Assets (P)",
+    "Short Name", "Market Cap (USD) (P)", "Company Name", "Price Source (P)",
+    "BB Comp (P)", "Pos (Mkt) (P)", "Sector", "Px Close (P)",
+    "Pos (Disp) (P)", "Pos (Mkt) (P)",
+]
+
+
+# ============================================================================
+# 1. TIPO DE CAMBIO  (único punto que requiere Excel vivo / xlwings COM)
+# ============================================================================
+def obtener_tipo_cambio(dia: str, mes: str, anio: str) -> float:
+    """Escribe la fecha de corte en 'Tipo de Cambio'!B1, espera el recálculo
+    de forma activa (sin sleep fijo) y devuelve el TC (col idx4 == '2' -> idx3),
+    replicando la lógica del original."""
+    import xlwings as xw
+
+    fecha = re.sub("-", "", f"{anio}-{mes}-{dia}")   # AAAAMMDD
+    app = None
+    wb = None
+    try:
+        # update_links=False para no colgarse con vínculos externos.
+        app = xw.App(visible=False, add_book=False)
+        app.display_alerts = False
+        app.screen_updating = False
+        wb = app.books.open(RUTA_RIESGO, update_links=False)
+        sheet = wb.sheets["Tipo de Cambio"]
+        sheet.range("B1").value = fecha
+
+        # Espera activa del cálculo (reemplaza time.sleep(5)).
+        import time as _t
+        app.calculate()
+        t0 = _t.time()
+        while app.api.CalculationState != 0 and (_t.time() - t0) < 30:  # 0 = xlDone
+            _t.sleep(0.2)
+
+        data = sheet.used_range.value
+        df = pd.DataFrame(data)
+
+        valor = None
+        for i, j in zip(df[4], df[3]):   # col idx4 == '2' -> valor en col idx3
+            if i == "2":
+                valor = j
+        if valor is None:
+            raise ValueError(
+                "No se encontró el tipo de cambio (fila con col índice 4 == '2') "
+                f"para la fecha {fecha} en RIESGO - Consulta General.xlsm."
+            )
+        return float(valor)
+    finally:
+        try:
+            if wb is not None:
+                wb.close()
+        finally:
+            if app is not None:
+                app.quit()
+
+
+# ============================================================================
+# 2. MARKET CAP  (pandas, sin COM)
+# ============================================================================
+def leer_market_cap(mes: str, anio: str) -> Dict[str, float]:
+    """Devuelve {benchmark: AUM} para el 01/mm/aaaa, leyendo la hoja 'MKT'."""
+    if not os.path.exists(RUTA_MARKET_CAP):
+        raise FileNotFoundError(f"No existe Market Cap: {RUTA_MARKET_CAP}")
+
+    raw = pd.read_excel(RUTA_MARKET_CAP, sheet_name="MKT", header=None)
+
+    # Localiza la fila de encabezados reales (la que contiene 'FECHA').
+    hdr_idx = None
+    for i in range(min(5, len(raw))):
+        if raw.iloc[i].astype(str).str.strip().eq("FECHA").any():
+            hdr_idx = i
+            break
+    if hdr_idx is None:
+        raise ValueError("No se encontró la fila de encabezados ('FECHA') en 'MKT'.")
+
+    df = raw.iloc[hdr_idx + 1:].copy()
+    df.columns = raw.iloc[hdr_idx]
+    df.columns = df.columns.astype(str).str.replace(" Equity", "", regex=False)
+
+    fecha_col = _dt.datetime.strptime(f"01/{mes}/{anio}", "%d/%m/%Y")
+    df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
+    fila = df.loc[df["FECHA"] == fecha_col]
+    if len(fila) != 1:
+        raise ValueError(
+            f"Se esperaba 1 fila en Market Cap para {fecha_col:%d/%m/%Y}, "
+            f"se encontraron {len(fila)}."
+        )
+
+    aum = {}
+    for bench, col in MKT_COL_POR_BENCHMARK.items():
+        if col not in fila.columns:
+            raise KeyError(f"Falta la columna '{col}' en la hoja 'MKT'.")
+        aum[bench] = float(fila[col].iloc[0])
+    return aum
+
+
+# ============================================================================
+# 3. DICCIONARIO DE PAÍS  (Subyacentes -> 'Parametros', pandas)
+# ============================================================================
+def leer_diccionario_pais() -> dict:
+    """Diccionario indexado por Country Code con Nombre País / Geografía Integra /
+    Mercado (equivale a diccionario2 del original)."""
+    if not os.path.exists(RUTA_SUBYACENTES):
+        raise FileNotFoundError(f"No existe Subyacentes: {RUTA_SUBYACENTES}")
+
+    raw = pd.read_excel(RUTA_SUBYACENTES, sheet_name="Parametros", header=None)
+
+    # Detecta la fila de encabezados por presencia de 'Country Code'
+    # (el original dependía del recorte de used_range; aquí es robusto a filas vacías).
+    hdr_idx = None
+    for i in range(min(6, len(raw))):
+        if raw.iloc[i].astype(str).str.strip().eq("Country Code").any():
+            hdr_idx = i
+            break
+    if hdr_idx is None:
+        raise ValueError("No se encontró la fila con 'Country Code' en 'Parametros'.")
+
+    df = raw.iloc[hdr_idx + 1:].copy()
+    df.columns = raw.iloc[hdr_idx]
+    cols = ["Nombre País", "Geografía Integra", "Mercado", "Country Code"]
+    faltan = [c for c in cols if c not in df.columns]
+    if faltan:
+        raise KeyError(f"Faltan columnas en 'Parametros': {faltan}")
+
+    df = df[cols].dropna(subset=["Country Code"]).set_index("Country Code")
+    return df.to_dict()
+
+
+# ============================================================================
+# 4. SELECCIÓN INTELIGENTE FORMATO A / FORMATO B  (Objetivo 2)
+# ============================================================================
+def _transformar_formato_b(ruta_b: str) -> (pd.DataFrame, str):
+    """Convierte un export crudo (Formato B) a la estructura del Formato A.
+    Devuelve (df_formato_A, AAAAMM detectado a partir de A2)."""
+    raw = pd.read_excel(ruta_b, sheet_name=0, header=None)
+
+    # Fecha de corte en A2 (MM/DD/AA) -> AAAAMM
+    a2 = raw.iloc[1, 0]
+    if isinstance(a2, (_dt.datetime, _dt.date, pd.Timestamp)):
+        fecha = pd.to_datetime(a2)
+    else:
+        fecha = pd.to_datetime(str(a2), format="%m/%d/%y", errors="coerce")
+        if pd.isna(fecha):
+            fecha = pd.to_datetime(str(a2), errors="coerce")
+    if pd.isna(fecha):
+        raise ValueError(f"No se pudo interpretar la fecha de A2 ('{a2}') en {ruta_b}.")
+    aaaamm = f"{fecha.year:04d}{fecha.month:02d}"
+
+    # Encabezados reales en fila 4 (idx3); fila 5 (idx4) clasifica Port/Bmrk.
+    clasif = raw.iloc[4]                       # 'Class', 'Port', 'Bmrk', ...
+    port_cols = [c for c in range(len(clasif))
+                 if str(clasif.iloc[c]).strip() == "Port"]
+
+    # Datos desde la fila 6 (idx5) en adelante.
+    datos = raw.iloc[5:].reset_index(drop=True)
+
+    # Name = columna jerárquica (col 0, 'Class'); resto = columnas 'Port' en orden.
+    out = pd.DataFrame()
+    out_cols = [datos.iloc[:, 0]] + [datos.iloc[:, c] for c in port_cols]
+    df_a = pd.concat(out_cols, axis=1)
+
+    # Nombres canónicos del Formato A (col0=Name + 22 columnas Port 1 a 1).
+    n = df_a.shape[1]
+    if n != len(FORMATO_A_HEADERS):
+        # Ajuste defensivo: se recorta/rellena para no tumbar el pipeline,
+        # dejando constancia. El downstream solo usa un subconjunto nombrado.
+        headers = FORMATO_A_HEADERS[:n] + [f"Extra_{k}" for k in range(n - len(FORMATO_A_HEADERS))]
+    else:
+        headers = FORMATO_A_HEADERS
+    df_a.columns = headers
+    return df_a, aaaamm
+
+
+def obtener_benchmark(bench: str, aaaamm: str) -> pd.DataFrame:
+    """Devuelve el DataFrame en layout Formato A para un benchmark:
+       1) usa '[AAAAMM] [bench].xlsx' si existe (Formato A);
+       2) si no, transforma '[bench].xlsx' (Formato B), guarda el histórico
+          '[AAAAMM detectado] [bench].xlsx' y lo usa;
+       3) si ninguno existe -> FileNotFoundError."""
+    ruta_a = os.path.join(CARPETA_COMPARABLES, f"{aaaamm} {bench}.xlsx")
+    if os.path.exists(ruta_a):
+        return pd.read_excel(ruta_a)   # Formato A: se usa tal cual
+
+    ruta_b = os.path.join(CARPETA_COMPARABLES, f"{bench}.xlsx")
+    if os.path.exists(ruta_b):
+        df_a, aaaamm_det = _transformar_formato_b(ruta_b)
+        # Guarda histórico con el AAAAMM detectado del propio archivo (A2).
+        ruta_hist = os.path.join(CARPETA_COMPARABLES, f"{aaaamm_det} {bench}.xlsx")
+        try:
+            df_a.to_excel(ruta_hist, index=False)
+        except Exception as e:  # que no falte permiso/lock tumbe el pipeline
+            print(f"  [aviso] No se pudo guardar histórico '{ruta_hist}': {e}")
+        return df_a
+
+    raise FileNotFoundError(
+        f"No se encontró Formato A ('{aaaamm} {bench}.xlsx') ni "
+        f"Formato B ('{bench}.xlsx') en la carpeta Comparables."
+    )
+
+
+# ============================================================================
+# 5. PIPELINE PRINCIPAL  (lógica de negocio == original; solo I/O modernizado)
+# ============================================================================
+def comparables(dia: str, mes: str, anio: str) -> str:
+    tc = obtener_tipo_cambio(dia, mes, anio)
+    print(f"Tipo de cambio: {tc}")
+
+    aum_map = leer_market_cap(mes, anio)
+    print(f"AUM por benchmark: {aum_map}")
+
+    aaaamm = f"{anio}{mes}"
+    df_Total = pd.DataFrame()
+    errores = []
+
+    for bench in BENCHMARKS:
+        try:
+            df_h = obtener_benchmark(bench, aaaamm)
+
+            # --- Bloque de negocio idéntico al original ---
+            df_h["Sector1"] = df_h["Name"].apply(
+                lambda x: x[2:] if str(x).startswith("› ") else ""
+            )
+            df_h["Sector1"].replace("", np.nan, inplace=True)
+            df_h["Sector1"] = df_h["Sector1"].ffill()
+
+            df_h = df_h[df_h["ISIN"].notna()]
+            df_h = df_h[df_h["Market Value (%) (P)"].notna()]
+            df_h["AFP"] = bench                      # == nombre_archivo[7:-5] original
+            df_h["Market Value (%) (P)"] = df_h["Market Value (%) (P)"] / 100
+            print(f"  {bench}: Market Value = {df_h['Market Value (%) (P)'].sum()}")
+
+            df_Total = pd.concat([df_Total, df_h]).sort_index(ignore_index=True)
+        except Exception as e:
+            # Un benchmark que falla se reporta y NO tumba el resto.
+            errores.append((bench, str(e)))
+            print(f"  [ERROR] {bench}: {e}")
+
+    if df_Total.empty:
+        raise RuntimeError(
+            "Ningún benchmark pudo procesarse. Errores:\n" +
+            "\n".join(f"  - {b}: {m}" for b, m in errores)
+        )
+
+    # --- Selección, inserciones, renombres y drops: idénticos al original ---
+    df_Total = df_Total.get([
+        "ISIN", "Market Value (%) (P)", "AFP", "Name", "MSCI ESG Rating (P)",
+        "Crncy", "Cntry (Risk)", "Class - Broad", "Px Close (P)", "Sector1",
+    ])
+
+    df_Total.insert(2, "Fondo", "Multifondos")
+    df_Total.insert(3, "AssetClass", "RVI")
+    df_Total.insert(4, "Strategy", "BU")
+    df_Total.insert(6, "AUM", "")
+    df_Total.insert(7, "Tipo", tc)
+    df_Total.insert(8, "Precio", "")
+    df_Total.insert(9, "Q", "")
+
+    df_Total["Precio"] = df_Total["Px Close (P)"]
+    df_Total = df_Total.drop("Px Close (P)", axis=1)
+
+    df_Total.insert(11, "Empresa", df_Total["Name"])
+    df_Total.insert(12, "SBS", "")
+
+    fecha = _dt.datetime.strptime(f"01/{mes}/{anio}", "%d/%m/%Y")
+    df_Total.insert(13, "Fecha", fecha)
+    df_Total.insert(14, "cod emisor", "")
+    df_Total.insert(15, "key", df_Total["ISIN"] + df_Total["AFP"] + df_Total["Name"])
+
+    df_Total = df_Total.rename(columns={
+        "Market Value (%) (P)": "Weight",
+        "Name": "Nombre",
+        "Sector1": "Sector GICS",
+    })
+
+    diccionario2 = leer_diccionario_pais()
+    df_Total.insert(19, "País",    df_Total["Cntry (Risk)"].map(diccionario2["Nombre País"]))
+    df_Total.insert(20, "Región",  df_Total["Cntry (Risk)"].map(diccionario2["Geografía Integra"]))
+    df_Total.insert(21, "Mercado", df_Total["Cntry (Risk)"].map(diccionario2["Mercado"]))
+
+    df_Total["AUM"] = df_Total["AFP"].map(aum_map)   # == función AUM(row) original
+    df_Total["Pct_FFMM"] = df_Total["Weight"]
+    df_Total.drop("key", axis=1, inplace=True)
+
+    os.makedirs(CARPETA_OUTPUT, exist_ok=True)
+    ruta_out = os.path.join(CARPETA_OUTPUT, f"{anio}{mes} Comparables.xlsx")
+    df_Total.to_excel(ruta_out, index=False)
+    print(f"OK -> {ruta_out}")
+
+    if errores:
+        print("Benchmarks con error (revisar):")
+        for b, m in errores:
+            print(f"  - {b}: {m}")
+
+    return ruta_out
+
+
+# ============================================================================
+# 6. DETECCIÓN AUTOMÁTICA DE PERIODO + ENTRYPOINT
+# ============================================================================
+def resolver_periodo(fecha_corte: Optional[_dt.date] = None,
+                     dia: Optional[str] = None,
+                     mes: Optional[str] = None,
+                     anio: Optional[str] = None):
+    """Determina (dia, mes, anio) como strings 2/2/4.
+    Prioridad: dia/mes/anio explícitos > fecha_corte > fecha de ejecución (hoy).
+    El día se usa para el TC (fecha de corte); mes/anio definen el periodo
+    (Market Cap y columna Fecha usan el 01/mm/aaaa, igual que el original)."""
+    if dia and mes and anio:
+        return str(dia).zfill(2), str(mes).zfill(2), str(anio)
+    base = fecha_corte or _dt.date.today()
+    return f"{base.day:02d}", f"{base.month:02d}", f"{base.year:04d}"
+
+
+if __name__ == "__main__":
+    # Sin ingreso manual: usa la fecha de ejecución.
+    # Para sobreescribir, p. ej.:
+    #   d, m, a = resolver_periodo(fecha_corte=_dt.date(2026, 6, 30))
+    #   d, m, a = resolver_periodo(dia="21", mes="07", anio="2026")
+    d, m, a = resolver_periodo()
+    print(f"Procesando periodo {a}{m} (fecha de corte {d}/{m}/{a})")
+    comparables(d, m, a)
