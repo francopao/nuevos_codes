@@ -1,0 +1,962 @@
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+ BD_G&P  +  BD_G&P soberanos  -> UN SOLO SCRIPT (Mesa de Inversiones / RVL-ESG)
+================================================================================
+Consolida ambos pipelines en una sola corrida. La LOGICA DE NEGOCIO es idéntica
+a los scripts originales (filtros, cálculos, mapeos, orden de columnas, nombres
+de hojas y de salida). Solo cambian infraestructura, blindaje y velocidad.
+
+DECISIONES DE INFRAESTRUCTURA (documentadas inline):
+ - COM/xlwings SOLO donde es imprescindible (escribir E3 en G&P y B1 en RIESGO y
+   forzar recálculo). Todo lo demás se lee con openpyxl (read_only, data_only) =
+   valores cacheados del último guardado en Excel, que es lo que el proceso usa.
+   *Verificado* que la alineación de headers (fila 5/10/13/15, etc.) coincide con
+   la que producía xlwings para VP, QEST, BDPrecios, DataValorCuota, Parametría.
+   G&P se mantiene en xlwings porque su used_range NO alinea igual y además
+   requiere el recálculo del escenario.
+ - Cacheo de lecturas: VP, Parametría, QEST, BDPrecios, RIESGO, DataValorCuota,
+   EPU/ETF y el propio G&P se leen UNA sola vez y se comparten entre ambas ramas.
+ - time.sleep fijos -> espera activa (poll de una celda centinela con timeout).
+ - Una sola instancia de Excel (App oculta), cerrada correctamente al final para
+   no dejar procesos huérfanos.
+ - Fecha automática (último dato disponible en DataValorCuota, anclada a la regla
+   de negocio) con override opcional por parámetro.
+
+USO:
+   python BD_GyP_consolidado.py                # fecha automática
+   python BD_GyP_consolidado.py 2026-06-30     # fecha forzada (YYYY-MM-DD)
+================================================================================
+"""
+
+import os
+import re
+import sys
+import time
+import difflib
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import openpyxl
+
+# xlwings se importa perezosamente (solo si hay que tocar Excel vivo)
+xw = None
+_XW_APP = None
+
+ESCENARIO_INPUT = 'T'
+
+# Fecha de corte. None -> detección automática. Para forzar, poner 'YYYY-MM-DD'
+# (esto es lo cómodo en Spyder; también se acepta como argumento de línea de comandos).
+FECHA_FORZADA = None
+
+# ------------------------------------------------------------------ RUTAS ----
+# (idénticas a los scripts originales)
+R_GYP_TMPL   = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Dataset\G&P input\G&P_MLab_{mesanio}.xlsm')
+R_GYP_ALT    = r'Z:\Benchmarking\G&P_MLab.xlsm'                 # ruta alterna (blindaje soberanos)
+R_VP         = r'Z:\Benchmarking\VP.xlsm'
+R_VALORCUOTA = r'Z:\Valor Cuota\DataValorCuota_IN.xlsm'
+R_RIESGO     = r'Z:\Mesa de Inversiones\Trading\RIESGO - Consulta General.xlsm'
+R_QEST       = r'Z:\Benchmarking\QEST_BD.xlsm'
+R_PRECIOS    = r'Z:\Benchmarking\BDPrecios_VB_IN.xlsx'
+R_PARAM      = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Dataset\Parametria.xlsx')
+D_COMPARABLES = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                 r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                 r'\1.Data Histórica\Dataset\Comparables\\')
+D_GYP_OUT    = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Dataset\G&P\\')
+D_INTERMEDIO = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Output\Intermedio\\')
+D_BASEALERTA = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Output\Base Alerta\\')
+R_PARA_OUT   = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\1.Data Histórica\Dataset\Para{suf}.xlsx')  # _S para soberanos (evita clobber en la misma corrida)
+
+
+# ============================================================================
+#  EXCEPCIONES / BLINDAJE
+# ============================================================================
+class ProcesoError(Exception):
+    """Error controlado del pipeline (archivo/hoja/columna/celda/red)."""
+
+
+def _diag_ruta(ruta):
+    d = os.path.dirname(ruta)
+    if not os.path.exists(d):
+        return f"(la carpeta '{d}' no responde: ¿unidad de red Z: caída/desconectada?)"
+    return "(la carpeta existe pero el archivo no)"
+
+
+# ============================================================================
+#  LECTURA openpyxl (cacheada) -> DataFrame crudo alineado a A1 (como xlwings)
+# ============================================================================
+_CACHE_XLSX = {}   # (ruta, hoja) -> DataFrame
+
+def leer_xlsx(ruta, hoja=0, obligatoria_hoja=True):
+    """Lee una hoja completa (valores cacheados) y la cachea. Alinea a A1."""
+    key = (ruta, hoja)
+    if key in _CACHE_XLSX:
+        return _CACHE_XLSX[key].copy()
+    try:
+        wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True, keep_links=False)
+    except FileNotFoundError:
+        raise ProcesoError(f"No se encontró el archivo:\n  {ruta}\n  {_diag_ruta(ruta)}")
+    except Exception as e:
+        raise ProcesoError(f"No se pudo abrir:\n  {ruta}\n  Detalle: {e}")
+    try:
+        if isinstance(hoja, int):
+            if hoja >= len(wb.sheetnames):
+                raise ProcesoError(f"El archivo '{ruta}' no tiene la hoja índice {hoja}.")
+            ws = wb[wb.sheetnames[hoja]]
+        else:
+            if hoja not in wb.sheetnames:
+                if obligatoria_hoja:
+                    raise ProcesoError(f"No existe la hoja '{hoja}' en '{ruta}'. "
+                                       f"Hojas: {wb.sheetnames}")
+                return None
+            ws = wb[hoja]
+        data = [row for row in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    df = pd.DataFrame(data)
+    _CACHE_XLSX[key] = df.copy()
+    return df
+
+
+# ============================================================================
+#  xlwings (COM) — App única + espera activa + G&P + RIESGO
+# ============================================================================
+def _get_app():
+    global xw, _XW_APP
+    if _XW_APP is None:
+        import xlwings as _xw
+        xw = _xw
+        _XW_APP = xw.App(visible=False, add_book=False)
+        _XW_APP.display_alerts = False
+        _XW_APP.screen_updating = False
+    return _XW_APP
+
+
+def _abrir_xw(ruta, alterna=None):
+    app = _get_app()
+    try:
+        return app.books.open(ruta, read_only=True, update_links=False)
+    except Exception:
+        if alterna is not None and os.path.exists(alterna):
+            print(f"[AVISO] No se pudo abrir:\n  {ruta}\n-> usando alterna:\n  {alterna}")
+            return app.books.open(alterna, read_only=True, update_links=False)
+        if not os.path.exists(ruta):
+            raise ProcesoError(f"No se encontró (COM):\n  {ruta}\n  {_diag_ruta(ruta)}")
+        raise
+
+
+def _espera_activa(sheet, celda, timeout=25, intervalo=0.3, minimo=0.8):
+    """Reemplaza time.sleep fijo: espera hasta que 'celda' tenga valor (recálculo
+    listo) o hasta timeout. 'minimo' asegura un pequeño margen inicial."""
+    time.sleep(minimo)
+    t0 = time.time()
+    prev = object()
+    while time.time() - t0 < timeout:
+        try:
+            val = sheet.range(celda).value
+        except Exception:
+            val = None
+        if val is not None and val == prev:      # estable y no vacío
+            return val
+        prev = val
+        time.sleep(intervalo)
+    return sheet.range(celda).value
+
+
+# --------------------------------------------------- G&P (escenario + recálculo)
+def leer_gyp(escenario, mesanio):
+    """Escribe el escenario en Abs!E3, fuerza recálculo y devuelve 'Detallado'."""
+    ruta = R_GYP_TMPL.format(mesanio=mesanio)
+    wb = _abrir_xw(ruta, alterna=R_GYP_ALT)
+    try:
+        try:
+            sh_abs = wb.sheets['Abs']
+            sh_det = wb.sheets['Detallado']
+        except Exception:
+            raise ProcesoError("G&P no tiene las hojas 'Abs' y/o 'Detallado'.")
+        sh_abs.range('E3').value = escenario
+        try:
+            wb.app.calculate()
+        except Exception:
+            pass
+        _espera_activa(sh_det, 'C5', timeout=30, minimo=1.0)  # antes: sleep(10) fijo
+        print("G&P C5 =", sh_det.range('C5').value)
+        valores = sh_det.used_range.value
+    finally:
+        wb.close()
+    return pd.DataFrame(valores)
+
+
+# --------------------------------------------------- RIESGO (Tipo de Cambio)
+_CACHE_RIESGO = {}   # fecha_yyyymmdd -> DataFrame used_range
+
+def leer_riesgo(fecha_yyyymmdd):
+    """Escribe la fecha en B1 de 'Tipo de Cambio', recalcula y cachea el rango."""
+    if fecha_yyyymmdd in _CACHE_RIESGO:
+        return _CACHE_RIESGO[fecha_yyyymmdd].copy()
+    wb = _abrir_xw(R_RIESGO)
+    try:
+        try:
+            sheet = wb.sheets['Tipo de Cambio']
+        except Exception:
+            raise ProcesoError("RIESGO no tiene la hoja 'Tipo de Cambio'.")
+        sheet.range('B1').value = fecha_yyyymmdd
+        try:
+            wb.app.calculate()
+        except Exception:
+            pass
+        _espera_activa(sheet, 'B1', timeout=20, minimo=1.0)   # antes: sleep(5/6) fijo
+        valores = sheet.used_range.value
+    finally:
+        wb.close()
+    df = pd.DataFrame(valores)
+    _CACHE_RIESGO[fecha_yyyymmdd] = df.copy()
+    return df
+
+
+# ============================================================================
+#  UTILIDADES DE NEGOCIO (idénticas a los originales)
+# ============================================================================
+def recor(dato):
+    if str(dato) != "None":
+        dato = str(dato)
+        dato = dato[0:2]
+    return dato
+
+def FM(dato):
+    dato = str(dato)
+    if re.findall('FM', dato) == ['FM']:
+        dato = "borrar"
+    return dato
+
+def codEmisor(dato):
+    return str(dato)[2:6]
+
+def usd_f1(d): return 1 if d == "F1" else 0
+def usd_f2(d): return 1 if d == "F2" else 0
+def usd_f3(d): return 1 if d == "F3" else 0
+
+def _resolver_columna(df, nombres, obligatoria=True):
+    if isinstance(nombres, str):
+        nombres = [nombres]
+    cols = list(df.columns)
+    cols_str = {str(c).strip(): c for c in cols}
+    for nom in nombres:
+        if nom in cols_str:
+            return cols_str[nom]
+    for nom in nombres:
+        for c_str, c_real in cols_str.items():
+            if c_str.startswith(nom) or nom.startswith(c_str):
+                return c_real
+    for nom in nombres:
+        cerca = difflib.get_close_matches(nom, list(cols_str.keys()), n=1, cutoff=0.85)
+        if cerca:
+            print(f"[AVISO] Columna '{nom}' aproximada a '{cerca[0]}'.")
+            return cols_str[cerca[0]]
+    if obligatoria:
+        raise ProcesoError(f"No se encontró ninguna de {nombres}. Columnas: {cols}")
+    return None
+
+
+# ============================================================================
+#  DETECCIÓN AUTOMÁTICA DE FECHA
+# ============================================================================
+def fechas_datavalorcuota():
+    df = leer_xlsx(R_VALORCUOTA, 'DataHistórica')
+    # header en fila 5 (Excel 6); Fecha en la primera col del bloque 1:22
+    fechas = []
+    for v in df.iloc[6:, 1].tolist():
+        if isinstance(v, datetime):
+            fechas.append(v)
+    if not fechas:
+        raise ProcesoError("DataValorCuota: no se pudo leer ninguna 'Fecha' válida.")
+    return sorted(fechas)
+
+def detectar_fecha(fecha_forzada=None):
+    """Regla de negocio:
+       - si estamos en la 1ra semana del mes (día <= 7): último día del mes anterior.
+       - si no: día anterior a hoy.
+       Luego se ANCLA al último dato disponible <= objetivo en DataValorCuota_IN.
+       Override: fecha_forzada 'YYYY-MM-DD'."""
+    disponibles = fechas_datavalorcuota()
+    if fecha_forzada:
+        try:
+            f = datetime.strptime(fecha_forzada, '%Y-%m-%d')
+        except ValueError:
+            raise ProcesoError(f"Fecha forzada inválida '{fecha_forzada}' (use YYYY-MM-DD).")
+        # se respeta tal cual (el usuario manda), pero se avisa si no hay dato
+        if f not in disponibles:
+            print(f"[AVISO] {fecha_forzada} no aparece en DataValorCuota; se usará igual.")
+        return f
+    hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if hoy.day <= 7:
+        objetivo = hoy.replace(day=1) - timedelta(days=1)      # fin de mes anterior
+    else:
+        objetivo = hoy - timedelta(days=1)                      # día anterior
+    candidatas = [d for d in disponibles if d <= objetivo]
+    elegida = max(candidatas) if candidatas else max(disponibles)
+    print(f"[FECHA] hoy={hoy:%Y-%m-%d} objetivo={objetivo:%Y-%m-%d} -> corte={elegida:%Y-%m-%d}")
+    return elegida
+
+
+# ============================================================================
+#  BASE COMPARTIDA (se calcula UNA vez y sirve a ambas ramas)
+# ============================================================================
+class Base:
+    pass
+
+
+def construir_base(fecha_dt):
+    b = Base()
+    b.fecha_dt   = fecha_dt
+    b.fecha_iso  = fecha_dt.strftime('%Y-%m-%d')          # YYYY-MM-DD
+    b.anio       = b.fecha_iso[0:4]
+    b.mes        = b.fecha_iso[5:7]
+    b.dia        = b.fecha_iso[8:10]
+    b.fecha_nueva = f"{b.dia}/{b.mes}/{b.anio}"            # dd/mm/yyyy
+    b.fecha_yyyymmdd = b.anio + b.mes + b.dia
+    mesanio = b.mes + b.anio
+
+    # ---- G&P (xlwings, escenario + recálculo) -> df base --------------------
+    dfg = leer_gyp(ESCENARIO_INPUT, mesanio)
+    dfg = dfg.iloc[8::, 1:60]
+
+    # happy-path original (xlwings alinea con SBS en la fila 9). Fallback dinámico
+    # solo si el header no trae 'SBS' (blindaje ante corrimiento del used_range).
+    header1 = dfg.iloc[0]
+    if 'SBS' not in [str(x).strip() for x in header1.tolist()]:
+        fila = None
+        for i in range(min(30, len(dfg))):
+            if 'SBS' in [str(v).strip() for v in dfg.iloc[i].tolist()]:
+                fila = i; break
+        if fila is None:
+            raise ProcesoError("G&P/Detallado: no se encontró la fila header con 'SBS'.")
+        header1 = dfg.iloc[fila]
+        dfg = dfg.iloc[fila:]
+    dfg.columns = header1.astype(str).str.strip()
+    dfg = dfg.iloc[1:]
+    dfg = dfg.iloc[:, [0, 2, 4, 6, 7, 8, 11, 14, 15, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+                       31, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 44, 45, 46, 47, 48, 49,
+                       50, 51, 52, 53]]
+    dfg = dfg.reset_index(drop=True)
+    dfg.insert(1, 'SBS2', dfg["SBS"].apply(recor))
+    del dfg['PBS']
+    dfg.columns = ['SBS', 'SBS2', 'Nombre', 'Asset Class', 'Cat', 'SubCat', 'Sub Cat2',
+                   'Categoría', 'AC Dir', 'Rank Rt',
+                   'INF1', 'HAF1GAP', 'RIF1GAP', 'PFF1GAP', 'SIF1GAP',
+                   'INF2', 'HAF2GAP', 'RIF2GAP', 'PFF2GAP', 'SIF2GAP',
+                   'INF3', 'HAF3GAP', 'RIF3GAP', 'PFF3GAP', 'SIF3GAP']
+
+    # ISIN desde VP!CalcP (openpyxl, cacheado)
+    vp = leer_xlsx(R_VP, 'CalcP')
+    df2 = vp.iloc[4:, [2, 3, 10]].copy()
+    df2.columns = df2.iloc[0, ::]
+    df2 = df2.drop([4], axis=0)
+    df2 = df2.set_index("SBS")
+    dic_vp = df2.to_dict()
+    dfg.insert(0, 'ISIN', dfg["SBS"].map(dic_vp['ISIN']))
+    b.df = dfg
+
+    # ---- AUMs desde DataValorCuota (openpyxl) -------------------------------
+    dv = leer_xlsx(R_VALORCUOTA, 'DataHistórica')
+    dv.columns = dv.iloc[5, ::]
+    dv = dv.iloc[6::, 1:22]
+    dv = dv.iloc[:, [0, 2, 3, 4, 10, 11, 12, 14, 15, 16, 18, 19, 20]]
+    dv = dv.set_index("Fecha")
+    try:
+        arr = pd.array(dv.loc[b.fecha_iso, :])
+    except Exception:
+        arr = pd.array(dv.dropna().iloc[-1, :])
+    (b.auminf1, b.auminf2, b.auminf3, b.aumhaf1, b.aumhaf2, b.aumhaf3,
+     b.aumrif1, b.aumrif2, b.aumrif3, b.aumpff1, b.aumpff2, b.aumpff3) = (
+        arr[3], arr[4], arr[5], arr[0], arr[1], arr[2],
+        arr[9], arr[10], arr[11], arr[6], arr[7], arr[8])
+    b.aumsif1 = b.aumhaf1 + b.aumpff1 + b.aumrif1
+    b.aumsif2 = b.aumhaf2 + b.aumpff2 + b.aumrif2
+    b.aumsif3 = b.aumhaf3 + b.aumpff3 + b.aumrif3
+    # NOTA: el "for var in variables: var=(var/valor)/1e6" original NO reasigna nada
+    # (rebinding local) -> los AUM se usan CRUDOS. Se preserva ese comportamiento.
+
+    # ---- valor dólar desde RIESGO (xlwings) ---------------------------------
+    dr = leer_riesgo(b.fecha_yyyymmdd)
+    valor = None
+    for i, j in zip(dr[4], dr[3]):
+        if i == '2':
+            valor = j
+    if valor is None:
+        raise ProcesoError("RIESGO: no se halló el tipo de cambio (fila código '2').")
+    b.valor = valor
+    print("valor dólar =", valor)
+
+    # ---- QEST DQ_IN / DQ_RV / DQ_RF (openpyxl) ------------------------------
+    qin = leer_xlsx(R_QEST, 'DQ_IN')
+    qin.columns = qin.iloc[10, ::]
+    qin = qin.drop([10], axis=0)
+    qin = qin[(qin['Dato'] == 'Q') &
+              (qin['Fecha'] == datetime.fromisoformat(b.fecha_iso + ' 00:00:00'))]
+    t = qin.transpose(); t.columns = t.iloc[0, ::]
+    b.dic_sbs = t.to_dict()
+    b.qest_rv = leer_xlsx(R_QEST, 'DQ_RV')
+    b.qest_rf = leer_xlsx(R_QEST, 'DQ_RF')
+
+    # ---- Precios (BDPrecios, openpyxl) --------------------------------------
+    dp = leer_xlsx(R_PRECIOS, 'BDat_Act')
+    dp.columns = dp.iloc[13, ::]
+    dp = dp.drop([13], axis=0)
+    dp = dp[(dp['Fecha'] == datetime.fromisoformat(b.fecha_iso + ' 00:00:00')) &
+            (dp['Campo'] == 'P')]
+    tp = dp.transpose(); tp.columns = tp.iloc[0, ::]
+    b.dic_precio = tp.to_dict()
+
+    # ---- Moneda (RIESGO, mismo rango cacheado) ------------------------------
+    dm = dr.copy()
+    dm = dm.drop([0], axis=0).drop([1], axis=0)
+    dm.columns = dm.iloc[0, ::]
+    dm = dm.set_index("CODIGO_MONEDA_SBS")
+    b.dic_moneda = dm.to_dict()
+
+    # ---- Parametría BU (openpyxl) -> dicts compartidos ----------------------
+    b.param_bu = leer_xlsx(R_PARAM, 'BU')
+
+    return b
+
+
+# ============================================================================
+#  RAMA (normal vs soberanos) — reutiliza la Base
+# ============================================================================
+def operaciones(df):
+    for a, b in zip(['HAF1', 'RIF1', 'PFF1', 'SIF1', 'HAF2', 'RIF2', 'PFF2', 'SIF2',
+                     'HAF3', 'RIF3', 'PFF3', 'SIF3'],
+                    ["INF1", "INF1", "INF1", "INF1", "INF2", "INF2", "INF2", "INF2",
+                     "INF3", "INF3", "INF3", "INF3"]):
+        df[a] = df[b] - df[a + "GAP"]
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable'])]
+    return df
+
+
+def BU(df, soberanos):
+    d = df.copy(deep=True)
+    d = d.drop(df.loc[df['Cat'].isin(['Gobierno'])].index)
+    d = d.drop(df.loc[df['SubCat'].isin(['Gobierno'])].index)
+    d = d.drop(df.loc[df['Sub Cat2'].isin(['Gobierno'])].index)
+    d['Categoría'] = d['Categoría'].apply(FM)
+    d = d.drop(d.loc[d['Categoría'].isin(["borrar"])].index)
+    d = d.loc[d['AC Dir'].isin(["PE", "PEC", "EMC", "INTER"])]
+    # RAMA: soberanos excluye además el SBS2 '43'
+    excl = ["52", "54", "50", "48", "PR", "08", "01", "FT", "PT"]
+    if soberanos:
+        excl = ["52", "54", "50", "48", "PR", "08", "01", "43", "FT", "PT"]
+    d = d.drop(d.loc[d['SBS2'].isin(excl)].index)
+    return d
+
+
+def TD(df):
+    d = df.copy(deep=True)
+    return d.loc[d['SBS2'].isin(['52', '54', '50', '48', '49'])].sort_index(ignore_index=True)
+
+
+def SOB(df):   # solo soberanos
+    d = df.copy(deep=True)
+    return d.loc[d['SBS2'].isin(['08', '01', '43'])].sort_index(ignore_index=True)
+
+
+def df_result(fondo, data):
+    df = data.copy(deep=True)
+    df = df.drop(df[df[fondo] <= 0].index)
+    df = df.get(['SBS', 'ISIN', 'Nombre', 'Rank Rt', fondo])
+    df['Fondo'] = fondo[-2:]
+    df = df.rename(columns={fondo: "Weight"})
+    return df
+
+
+def X_AFP(f1, f2, f3, data, nombre, tipo):
+    df = pd.concat([df_result(f1, data), df_result(f2, data), df_result(f3, data)]
+                   ).sort_index(ignore_index=True)
+    df["Strategy"] = tipo
+    df["Afp"] = nombre
+    return df
+
+
+def BU_TD_AFP(dfs, auminf1, auminf2, auminf3):
+    """dfs = [BU,TD] (normal) o [BU,TD,SOB] (soberanos)."""
+    df = pd.concat(dfs).sort_index(ignore_index=True)
+    df["F1"], df["F2"], df["F3"] = auminf1, auminf2, auminf3
+    df["USD1"], df["USD2"], df["USD3"] = (df["Fondo"].apply(usd_f1),
+                                          df["Fondo"].apply(usd_f2),
+                                          df["Fondo"].apply(usd_f3))
+    df["AUM"] = df["F1"] * df["USD1"] + df["F2"] * df["USD2"] + df["F3"] * df["USD3"]
+    return df.drop(['USD1', 'USD2', 'USD3', 'F1', 'F2', 'F3'], axis=1)
+
+
+def X_AFP_(df, auminf1, auminf2, auminf3):
+    df = df.copy(deep=True)
+    df["F1"], df["F2"], df["F3"] = (auminf1 * df["Weight"], auminf2 * df["Weight"],
+                                    auminf3 * df["Weight"])
+    df["USD1"], df["USD2"], df["USD3"] = (df["Fondo"].apply(usd_f1),
+                                          df["Fondo"].apply(usd_f2),
+                                          df["Fondo"].apply(usd_f3))
+    df["USD"] = df["F1"] * df["USD1"] + df["F2"] * df["USD2"] + df["F3"] * df["USD3"]
+    df = df.drop(['Fondo', 'AUM', 'USD1', 'USD2', 'USD3', 'F1', 'F2', 'F3', 'Weight'],
+                 axis=1).sort_index(ignore_index=True)
+    df = df.groupby(['SBS', 'ISIN', "Nombre", "Rank Rt", "Strategy", "Afp"]).sum()
+    aum = auminf1 + auminf2 + auminf3
+    df["AUM"] = aum
+    df["Weight"] = df["USD"] / aum
+    df = df.drop(['USD'], axis=1)
+    df["Fondo"] = "Multifondos"
+    df.reset_index(inplace=True)
+    return df
+
+
+# --- TXT Base Alerta (idénticos a original) ---------------------------------
+def _txt(df1, df2, drop_fondos):
+    dfT = pd.concat([df1.copy(deep=True), df2.copy(deep=True)]).sort_index(ignore_index=True)
+    dfT = dfT.get(['ISIN', 'Weight', 'Fondo', 'Rank Rt', 'Strategy'])
+    dfT.columns = ['SECURITY_ID', 'WEIGHT', 'fondo', 'class', 'Strategy']
+    if drop_fondos:
+        dfT = dfT.drop(dfT.loc[dfT['fondo'].isin(drop_fondos)].index)
+    return dfT
+
+def crear_txts(BUIN, TDIN, IN_, mes, anio):
+    try:
+        _txt(BUIN, IN_, None).to_csv(D_BASEALERTA + f'{mes}{anio}BUIN_.txt', sep=',', index=False)
+        _txt(TDIN, IN_, None).to_csv(D_BASEALERTA + f'TDIN_{mes}{anio}.txt', sep=',', index=False)
+        _txt(BUIN, IN_, ["F3", "F2", "Multifondos"]).to_csv(D_BASEALERTA + f'{mes}{anio}BUIN_F1 INBU.txt', sep=',', index=False)
+        _txt(BUIN, IN_, ["F1", "F3", "Multifondos"]).to_csv(D_BASEALERTA + f'{mes}{anio}BUIN_F2 INBU.txt', sep=',', index=False)
+        _txt(BUIN, IN_, ["F1", "F2", "Multifondos"]).to_csv(D_BASEALERTA + f'{mes}{anio}BUIN_F3 INBU.txt', sep=',', index=False)
+        _txt(BUIN, IN_, ["F1", "F2", "F3"]).to_csv(D_BASEALERTA + f'{mes}{anio}BUIN_M INBU.txt', sep=',', index=False)
+    except Exception as e:
+        print(f"[AVISO] No se pudieron escribir TXT Base Alerta: {e}")
+
+
+# --- Q por AFP (QEST DQ_RV/RF) ----------------------------------------------
+def _retorna(row, fondo, afp_only=None):
+    if row['Fondo'] == fondo and (afp_only is None or row['Afp'] == afp_only):
+        return row[fondo]
+    return 0
+
+def Q_AFP_integra(df, dic_sbs):
+    p = df.copy(deep=True)
+    p.insert(9, 'F1', p["SBS"].map(dic_sbs['IN-FONDO1']))
+    p.insert(10, 'F2', p["SBS"].map(dic_sbs['IN-FONDO2']))
+    p.insert(11, 'F3', p["SBS"].map(dic_sbs['IN-FONDO3']))
+    p['F1'] = p.apply(lambda r: _retorna(r, 'F1', 'Integra'), axis=1)
+    p['F2'] = p.apply(lambda r: _retorna(r, 'F2', 'Integra'), axis=1)
+    p['F3'] = p.apply(lambda r: _retorna(r, 'F3', 'Integra'), axis=1)
+    p["Q"] = p['F1'] + p['F2'] + p['F3']
+    return p.drop(['F1', 'F2', 'F3'], axis=1)
+
+def QM_AFP_integra(df, dic_sbs):
+    p = df.copy(deep=True)
+    p.insert(9, 'F1', p["SBS"].map(dic_sbs['IN-FONDO1']))
+    p.insert(10, 'F2', p["SBS"].map(dic_sbs['IN-FONDO2']))
+    p.insert(11, 'F3', p["SBS"].map(dic_sbs['IN-FONDO3']))
+    p["Q"] = p['F1'] + p['F2'] + p['F3']
+    return p.drop(['F1', 'F2', 'F3'], axis=1)
+
+def _Q_X_OPE(df, fecha_nueva, AFP):
+    df = df.copy(deep=True)
+    df.columns = df.iloc[15, ::]
+    df = df.drop([15], axis=0)
+    f1, f2, f3 = (AFP + "-FONDO1_" + fecha_nueva, AFP + "-FONDO2_" + fecha_nueva,
+                  AFP + "-FONDO3_" + fecha_nueva)
+    df = df[(df['Fondo_Fecha'] == f1) | (df['Fondo_Fecha'] == f2) | (df['Fondo_Fecha'] == f3)]
+    t = df.transpose(); t.columns = t.iloc[0, ::]
+    return t
+
+def _gen_dic(rv, rf, fecha_nueva, AFP):
+    return pd.concat([_Q_X_OPE(rv, fecha_nueva, AFP),
+                      _Q_X_OPE(rf, fecha_nueva, AFP)]).to_dict()
+
+def _ret_f(row, f):
+    if row['Fondo'] == f or row['Fondo'] == "Multifondos":
+        return row[f]
+    return 0
+def _ret_multi(row):
+    return (row['F1'] + row['F2'] + row['F3']) if row['Fondo'] == "Multifondos" else 0
+def _corr(row, f):
+    if row['Fondo'] == "Multifondos":
+        return 0
+    if row['Fondo'] == f:
+        return row[f]
+
+def Q_AFP(AFP, AFP_, f1, f2, f3, rv, rf, fecha_nueva, abrAFP):
+    PM = pd.concat([AFP, AFP_])
+    dic = _gen_dic(rv, rf, fecha_nueva, abrAFP)
+    PM.insert(9, 'F1', PM["SBS"].map(dic[f1]))
+    PM.insert(10, 'F2', PM["SBS"].map(dic[f2]))
+    PM.insert(11, 'F3', PM["SBS"].map(dic[f3]))
+    PM['F1'] = PM.apply(lambda r: _ret_f(r, 'F1'), axis=1)
+    PM['F2'] = PM.apply(lambda r: _ret_f(r, 'F2'), axis=1)
+    PM['F3'] = PM.apply(lambda r: _ret_f(r, 'F3'), axis=1)
+    PM.insert(12, 'Multifondos', PM.apply(_ret_multi, axis=1))
+    PM['F1'] = PM.apply(lambda r: _corr(r, 'F1'), axis=1)
+    PM['F2'] = PM.apply(lambda r: _corr(r, 'F2'), axis=1)
+    PM['F3'] = PM.apply(lambda r: _corr(r, 'F3'), axis=1)
+    PM['F1'] = PM['F1'].replace(np.nan, 0)
+    PM['F2'] = PM['F2'].replace(np.nan, 0)
+    PM['F3'] = PM['F3'].replace(np.nan, 0)
+    PM["Q"] = PM['F1'] + PM['F2'] + PM['F3'] + PM['Multifondos']
+    return PM.drop(['F1', 'F2', 'F3', 'Multifondos'], axis=1)
+
+
+def _renom_afp(row):
+    return {'F1': 'Ex_INF1', 'F2': 'Ex_INF2', 'F3': 'Ex_INF3',
+            'Multifondos': 'Ex_INFM'}.get(row['Fondo'])
+
+
+def _if_BU(row):
+    return row['Name_P'] if row['Strategy'] == "BU" else row['Nombre']
+
+def dic_emisor(df1, valor, fecha_nueva, param_bu):
+    df = param_bu.copy(deep=True)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0).set_index("SBS")
+    dic = df.to_dict()
+    p = df1.copy(deep=True)
+    p.insert(11, 'Name_P', p["SBS"].map(dic['Name']))
+    p['Nombre'] = p.apply(_if_BU, axis=1)
+    p = p.drop(['Name_P'], axis=1)
+    p['Tipo'], p['Fecha'] = valor, fecha_nueva
+    p = p.rename(columns={"Rank Rt": "assetclass"})
+    return p.get(['SBS', 'ISIN', 'Weight', 'Fondo', 'assetclass', 'Strategy', 'Afp',
+                  'AUM', 'Tipo', 'Q', 'Nombre', 'Fecha', 'codEmisor'])
+
+
+def _operaciones_df_p_m(df):
+    df = df.copy(deep=True)
+    df.insert(1, 'SBS2', df["SBS"].apply(recor))
+    df = df.loc[df['SBS2'].isin(['54', '50'])].sort_index(ignore_index=True)
+    df['Strategy'] = 'BU'
+    df["key1"] = df["SBS"] + df["Fondo"] + df["Afp"]
+    return df
+
+
+def _leer_bd1_local(ruta_bd1):
+    """Re-lee el BD1 recién escrito (round-trip preservado como en el original)."""
+    df = leer_xlsx(ruta_bd1, 'Sheet1')
+    df.columns = df.iloc[0, ::]
+    return df.drop([0], axis=0)
+
+
+def plantilla_epu_etf(anio, mes):
+    def _one(nombre, sbs_valor):
+        dfx = leer_xlsx(D_COMPARABLES + nombre, hoja=0)
+        dfx.columns = dfx.iloc[0, ::]
+        dfx = dfx.drop([0], axis=0)
+        col_isin = _resolver_columna(dfx, ['ISIN'])
+        col_mv = _resolver_columna(dfx, ['Market Value (%) (P)', 'Market Value (%)'])
+        dfx = dfx[dfx[col_isin].notna()]
+        dfx = dfx[dfx[col_mv].notna()]
+        dfx[col_mv] = dfx[col_mv] / 100
+        dfx = dfx.get([col_isin, col_mv])
+        dfx.columns = ['ISIN', 'Market Value (%) (P)']
+        dfx['Market Value (%) (P)'] = dfx['Market Value (%) (P)'].fillna(0)
+        out = pd.DataFrame()
+        for i in ["Integra", "Habitat", "Prima", "Profuturo", "Ex_Integra"]:
+            for j in ["F1", "F2", "F3", "Multifondos"]:
+                d = dfx.copy(deep=True); d["Fondo"] = j; d["AFP"] = i
+                out = pd.concat([out, d])
+        out = out.reset_index(drop=True)
+        out["SBS"] = sbs_valor
+        out["key1"] = out["SBS"] + out["Fondo"] + out["AFP"]
+        return out
+    df_epu = _one(anio + mes + " EPU US.xlsx", '5460042E8427')
+    df_etf = _one(anio + mes + " ETF Perú.xlsx", '5076822E0800')
+    return df_epu, df_etf
+
+
+def procesar_rama(base, soberanos):
+    suf = "_S" if soberanos else ""
+    etiqueta = "SOBERANOS" if soberanos else "NORMAL"
+    print(f"\n================  RAMA {etiqueta}  ================")
+    anio, mes, fecha_nueva = base.anio, base.mes, base.fecha_nueva
+    valor = base.valor
+
+    # ---- excel intermedio G&P (con/sin _S) ----------------------------------
+    df_temporal = operaciones(base.df.copy(deep=True))
+    # G&P intermedio: el original guarda el df BASE (con ISIN, pre-operaciones).
+    # Nombres exactos: normal -> "{anio}{mes} G&P.xlsx"; soberanos -> "..._S.xlsx".
+    try:
+        base.df.to_excel(D_GYP_OUT + f'{anio}{mes} G&P{suf}.xlsx', index=False)
+    except Exception as e:
+        print(f"[AVISO] No se pudo escribir G&P{suf}.xlsx: {e}")
+
+    df_BU = BU(df_temporal, soberanos)
+    BUIN = X_AFP('INF1', 'INF2', 'INF3', df_BU, "Integra", "BU")
+    BUHA = X_AFP('HAF1', 'HAF2', 'HAF3', df_BU, "Habitat", "BU")
+    BUPF = X_AFP('PFF1', 'PFF2', 'PFF3', df_BU, "Profuturo", "BU")
+    BURI = X_AFP('RIF1', 'RIF2', 'RIF3', df_BU, "Prima", "BU")
+    BUSI = X_AFP('SIF1', 'SIF2', 'SIF3', df_BU, "Ex_Integra", "BU")
+
+    df_TD = TD(df_temporal)
+    TDIN = X_AFP('INF1', 'INF2', 'INF3', df_TD, "Integra", "TD")
+    TDHA = X_AFP('HAF1', 'HAF2', 'HAF3', df_TD, "Habitat", "TD")
+    TDPF = X_AFP('PFF1', 'PFF2', 'PFF3', df_TD, "Profuturo", "TD")
+    TDRI = X_AFP('RIF1', 'RIF2', 'RIF3', df_TD, "Prima", "TD")
+    TDSI = X_AFP('SIF1', 'SIF2', 'SIF3', df_TD, "Ex_Integra", "TD")
+
+    if soberanos:
+        df_SOB = SOB(df_temporal)
+        SOBIN = X_AFP('INF1', 'INF2', 'INF3', df_SOB, "Integra", "SOB")
+        SOBHA = X_AFP('HAF1', 'HAF2', 'HAF3', df_SOB, "Habitat", "SOB")
+        SOBPF = X_AFP('PFF1', 'PFF2', 'PFF3', df_SOB, "Profuturo", "SOB")
+        SOBRI = X_AFP('RIF1', 'RIF2', 'RIF3', df_SOB, "Prima", "SOB")
+        SOBSI = X_AFP('SIF1', 'SIF2', 'SIF3', df_SOB, "Ex_Integra", "SOB")
+        IN = BU_TD_AFP([BUIN, TDIN, SOBIN], base.auminf1, base.auminf2, base.auminf3)
+        HA = BU_TD_AFP([BUHA, TDHA, SOBHA], base.aumhaf1, base.aumhaf2, base.aumhaf3)
+        PF = BU_TD_AFP([BUPF, TDPF, SOBPF], base.aumpff1, base.aumpff2, base.aumpff3)
+        RI = BU_TD_AFP([BURI, TDRI, SOBRI], base.aumrif1, base.aumrif2, base.aumrif3)
+        SI = BU_TD_AFP([BUSI, TDSI, SOBSI], base.aumsif1, base.aumsif2, base.aumsif3)
+    else:
+        IN = BU_TD_AFP([BUIN, TDIN], base.auminf1, base.auminf2, base.auminf3)
+        HA = BU_TD_AFP([BUHA, TDHA], base.aumhaf1, base.aumhaf2, base.aumhaf3)
+        PF = BU_TD_AFP([BUPF, TDPF], base.aumpff1, base.aumpff2, base.aumpff3)
+        RI = BU_TD_AFP([BURI, TDRI], base.aumrif1, base.aumrif2, base.aumrif3)
+        SI = BU_TD_AFP([BUSI, TDSI], base.aumsif1, base.aumsif2, base.aumsif3)
+
+    Portafolio = pd.concat([IN, HA, PF, RI, SI]).sort_index(ignore_index=True)
+    IN_ = X_AFP_(IN, base.auminf1, base.auminf2, base.auminf3)
+    HA_ = X_AFP_(HA, base.aumhaf1, base.aumhaf2, base.aumhaf3)
+    PF_ = X_AFP_(PF, base.aumpff1, base.aumpff2, base.aumpff3)
+    RI_ = X_AFP_(RI, base.aumrif1, base.aumrif2, base.aumrif3)
+    SI_ = X_AFP_(SI, base.aumsif1, base.aumsif2, base.aumsif3)
+    Multifondos = pd.concat([IN_, HA_, PF_, RI_, SI_]).sort_index(ignore_index=True)
+
+    input1 = pd.concat([Portafolio, Multifondos]).sort_index(ignore_index=True)
+    input1.insert(0, "Fecha", fecha_nueva)
+
+    crear_txts(BUIN, TDIN, IN_, mes, anio)  # TXT Base Alerta (mismos nombres que original)
+
+    # ---- Q por AFP (QEST) ----------------------------------------------------
+    IN_PORT = Q_AFP_integra(Portafolio, base.dic_sbs)
+    IN_M = QM_AFP_integra(IN_, base.dic_sbs)
+    df_IN_PORT_M = pd.concat([IN_PORT, IN_M]).sort_index(ignore_index=True)
+    df_IN_PORT_M_Integra = df_IN_PORT_M[df_IN_PORT_M["Afp"] == "Integra"]
+
+    PORT_M_HA = Q_AFP(HA, HA_, 'HA-FONDO1', 'HA-FONDO2', 'HA-FONDO3', base.qest_rv, base.qest_rf, fecha_nueva, 'HA')
+    PORT_M_PF = Q_AFP(PF, PF_, 'PF-FONDO1', 'PF-FONDO2', 'PF-FONDO3', base.qest_rv, base.qest_rf, fecha_nueva, 'PF')
+    PORT_M_RI = Q_AFP(RI, RI_, 'RI-FONDO1', 'RI-FONDO2', 'RI-FONDO3', base.qest_rv, base.qest_rf, fecha_nueva, 'RI')
+
+    PORT_M_TOTAL = pd.concat([df_IN_PORT_M_Integra, PORT_M_HA, PORT_M_PF, PORT_M_RI]).sort_index(ignore_index=True)
+
+    PORT_M_EX_IN = pd.concat([PORT_M_HA, PORT_M_PF, PORT_M_RI]).sort_index(ignore_index=True)
+    PORT_M_EX_IN = PORT_M_EX_IN.copy()
+    PORT_M_EX_IN['Afp'] = PORT_M_EX_IN.apply(_renom_afp, axis=1)
+    PORT_M_EX_IN['Key'] = (PORT_M_EX_IN['SBS'] + PORT_M_EX_IN['ISIN'] +
+                           PORT_M_EX_IN['Fondo'] + PORT_M_EX_IN['Strategy'])
+    dic_ex = PORT_M_EX_IN.get(['Key', 'Q'])
+    dic_ex['Suma'] = dic_ex.groupby(["Key"])['Q'].transform('sum')
+    dic_ex = dic_ex.set_index("Key").to_dict()
+    EX_IN = input1.loc[input1['Afp'].isin(['Ex_Integra'])].sort_index(ignore_index=True)
+    EX_IN['Key'] = EX_IN['SBS'] + EX_IN['ISIN'] + EX_IN['Fondo'] + EX_IN['Strategy']
+    EX_IN['Q'] = EX_IN['Key'].map(dic_ex['Suma'])
+    EX_IN = EX_IN.drop(['Key'], axis=1)
+
+    PORT_M_TOTAL = pd.concat([PORT_M_TOTAL, EX_IN]).sort_index(ignore_index=True)
+    PORT_M_TOTAL = PORT_M_TOTAL.drop(['Fecha'], axis=1)
+    PORT_M_TOTAL['codEmisor'] = PORT_M_TOTAL['SBS'].apply(codEmisor)
+
+    # ---- df_p_m + precios ----------------------------------------------------
+    df_p_m = dic_emisor(PORT_M_TOTAL, valor, fecha_nueva, base.param_bu)
+    df_p_m['Precio'] = df_p_m["SBS"].map(base.dic_precio['P'])
+    fecha_time = datetime.strptime('01/' + mes + '/' + anio, '%d/%m/%Y')
+    df_p_m['Fecha'] = fecha_time
+
+    # ---- moneda + inversión (RIESGO cacheado) -------------------------------
+    df_p_m = df_p_m.copy()
+    cod_mon = df_p_m['SBS'].str.get(6)
+    df_p_m['Tipo'] = cod_mon.map(base.dic_moneda['VALOR'])
+    df_p_m['Inversión'] = df_p_m['Precio'] * df_p_m['Q'] * df_p_m['Tipo']
+
+    # ---- escribir BD1 (deliverable) y re-leer (round-trip preservado) -------
+    ruta_bd1 = D_INTERMEDIO + f'{anio}{mes} BD1{suf}.xlsx'
+    try:
+        df_p_m.to_excel(ruta_bd1, index=False)
+    except Exception as e:
+        raise ProcesoError(f"No se pudo escribir BD1{suf}.xlsx: {e}")
+
+    # ---- EPU / ETF -----------------------------------------------------------
+    plantilla_epu, plantilla_ETF = plantilla_epu_etf(anio, mes)
+    df_epu_etf = pd.concat([plantilla_epu, plantilla_ETF])
+
+    df_BD = _operaciones_df_p_m(_leer_bd1_local(ruta_bd1))
+
+    # generar_relacion
+    epu = df_epu_etf.copy(deep=True)
+    dicBD = df_BD.copy(deep=True).set_index("key1").to_dict()
+    for i in ['Weight', 'assetclass', 'Strategy', 'AUM', 'Tipo', 'Precio', 'Q',
+              'Nombre', 'Fecha', 'codEmisor']:
+        epu[i] = epu["key1"].map(dicBD[i])
+    epu = epu.dropna(subset=['Weight'])
+    epu['peso'] = epu["Market Value (%) (P)"] * epu['Weight']
+    epu = epu.drop(['Market Value (%) (P)', 'key1', 'Weight'], axis=1)
+    epu.rename(columns={'peso': 'Weight'}, inplace=True)
+
+    # unir_port_epu
+    dfp = _leer_bd1_local(ruta_bd1)
+    dfp.insert(1, 'SBS2', dfp["SBS"].apply(recor))
+    dfp = dfp.drop(dfp.loc[dfp['SBS2'].isin(["54", "50"])].index).drop(['SBS2'], axis=1)
+    dfp["key1"] = dfp["ISIN"] + dfp["Fondo"] + dfp["Afp"] + dfp["assetclass"] + dfp["Strategy"]
+    df_epu = epu.copy(deep=True)
+    df_epu["key1"] = df_epu["ISIN"] + df_epu["Fondo"] + df_epu["AFP"] + df_epu["assetclass"] + df_epu["Strategy"]
+    dic_epu = df_epu.set_index("key1").to_dict()
+    dfp['Weight2'] = dfp["key1"].map(dic_epu["Weight"])
+    dfp['Weight'] = dfp['Weight'].fillna(0)
+    dfp['Weight2'] = dfp['Weight2'].fillna(0)
+    dfp.insert(2, 'Weight_T', dfp['Weight'] + dfp['Weight2'])
+    df_port_epu = dfp.drop(['Weight', 'Weight2'], axis=1)
+    df_port_epu.rename(columns={'Weight_T': 'Weight', 'Afp': 'AFP'}, inplace=True)
+
+    # unir_port_epu2 (solo EPU/ETF sin match)
+    dfp2 = _leer_bd1_local(ruta_bd1)
+    dfp2.insert(1, 'SBS2', dfp2["SBS"].apply(recor))
+    dfp2 = dfp2.drop(dfp2.loc[dfp2['SBS2'].isin(["54", "50"])].index).drop(['SBS2'], axis=1)
+    dfp2["key1"] = dfp2["ISIN"] + dfp2["Fondo"] + dfp2["Afp"] + dfp2["assetclass"] + dfp2["Strategy"]
+    dic_df = dfp2.set_index("key1").to_dict()
+    df_epu2 = epu.copy(deep=True)
+    df_epu2["key1"] = df_epu2["ISIN"] + df_epu2["Fondo"] + df_epu2["AFP"] + df_epu2["assetclass"] + df_epu2["Strategy"]
+    df_epu2["Eliminar"] = df_epu2["key1"].map(dic_df["SBS"])
+    df_solo_epu = df_epu2[df_epu2['Eliminar'].isin([np.nan])].drop(['Eliminar'], axis=1)
+
+    df_total = pd.concat([df_port_epu, df_solo_epu])
+
+    # ---- nombres (Parametría + VP) ------------------------------------------
+    pb = base.param_bu.copy(deep=True)
+    pb.columns = pb.iloc[0, ::]
+    pb = pb.drop([0], axis=0).set_index("ISIN")
+    dic_par = pb.to_dict()
+    dic_p1 = df_total.copy(deep=True)
+    cond = dic_p1['Strategy'] == 'BU'
+    dic_p1.loc[cond, 'Nombre'] = dic_p1[cond]['ISIN'].map(dic_par['Nombre'])
+    dic_p1['Empresa'] = dic_p1['Nombre']
+
+    vp = leer_xlsx(R_VP, 'CalcP')
+    dv = vp.iloc[4:, [3, 4]].copy()
+    dv.columns = dv.iloc[0, ::]
+    dv = dv.drop([4], axis=0).set_index("ISIN")
+    dic_vp = dv.to_dict()
+
+    def _reemplazar_nombre(row):
+        if str(row['Strategy']) == 'BU':
+            try:
+                return dic_vp['ID'][row["ISIN"]]
+            except Exception:
+                return row['Empresa']
+        return row['Empresa']
+
+    dic_p1['Empresa'] = dic_p1.apply(_reemplazar_nombre, axis=1)
+    column_order = ['SBS', 'ISIN', 'Weight', 'Fondo', 'assetclass', 'Strategy', 'AFP',
+                    'AUM', 'Tipo', 'Precio', 'Q', 'Inversión', 'Nombre', 'Empresa',
+                    'Fecha', 'codEmisor', 'key1']
+    dic_p1 = dic_p1[column_order]
+
+    ruta_port = D_INTERMEDIO + f'{anio}{mes} Portafolio{suf}.xlsx'
+    dic_p1.to_excel(ruta_port, index=False)
+    print(f"[OK] Portafolio{suf} -> {ruta_port}")
+
+    # ---- nuevos instrumentos (Para.xlsx / Para_S.xlsx) ----------------------
+    try:
+        _par_bu(base.param_bu, ruta_port, suf)
+    except Exception as e:
+        print(f"[AVISO] par_bu{suf} falló (no crítico): {e}")
+
+    print(f"[OK] BD1{suf} -> {ruta_bd1}")
+    return {'BD1': ruta_bd1, 'Portafolio': ruta_port}
+
+
+def _par_bu(param_bu, ruta_port, suf):
+    df = param_bu.copy(deep=True)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0)
+    df = df.drop(df.loc[df['ISIN'].isin([None])].index)
+
+    df2 = df.copy(); df2['validador'] = "Existe"; df2 = df2.set_index("ISIN")
+    dic = df2.to_dict()
+
+    dpbu = _leer_bd1_local  # reutilizamos lector; el Portafolio tiene hoja 'Sheet1'
+    df_pbu = leer_xlsx(ruta_port, 'Sheet1')
+    df_pbu.columns = df_pbu.iloc[0, ::]
+    df_pbu = df_pbu.drop([0], axis=0)
+    df_pbu = df_pbu.loc[df_pbu['Strategy'].isin(['BU'])]
+    df_pbu["validador"] = df_pbu["ISIN"].map(dic['validador'])
+    df_pbu = df_pbu.loc[df_pbu["validador"].isin([np.nan])]
+    df_pbu = df_pbu.get(['ISIN', 'SBS', 'codEmisor', 'Nombre'])
+    df_pbu.columns = ['ISIN', 'SBS', 'Cod.Emisor', 'Nombre']
+
+    df3 = param_bu.copy(deep=True)
+    df3.columns = df3.iloc[0, ::]
+    df3 = df3.drop([0], axis=0)
+    df3 = df3.drop(df3.loc[df3['Cod.Emisor'].isin([None])].index).set_index('Cod.Emisor')
+    dic3 = df3.to_dict()
+    df_pbu.insert(4, 'Moneda', df_pbu['Cod.Emisor'].map(dic3['moneda']))
+    df_pbu.insert(5, 'Sector', df_pbu['Cod.Emisor'].map(dic3['Sector']))
+    df_pbu.insert(6, 'Pais', df_pbu['Cod.Emisor'].map(dic3['País']))
+    df_pbu.insert(7, 'Region', df_pbu['Cod.Emisor'].map(dic3['Region']))
+    df_pbu.insert(8, 'Mercado', df_pbu['Cod.Emisor'].map(dic3['mercado']))
+
+    df_Total = pd.concat([df, df_pbu])
+    # DECISIÓN: el original escribía 'Para.xlsx' en ambos scripts (se pisaban al correr
+    # secuencialmente). Aquí soberanos usa 'Para_S.xlsx' para no destruir el normal en
+    # una sola corrida. Si se requiere el nombre único original, quitar {suf}.
+    df_Total.to_excel(R_PARA_OUT.format(suf=suf), index=False)
+
+
+# ============================================================================
+#  MAIN
+# ============================================================================
+_FECHA_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+def _fecha_desde_entorno():
+    """Prioridad: FECHA_FORZADA (variable editable) > argumento CLI con formato
+    YYYY-MM-DD. Ignora flags de Spyder/IPython (p.ej. '-f <kernel.json>')."""
+    if FECHA_FORZADA:
+        return FECHA_FORZADA
+    for a in sys.argv[1:]:
+        if _FECHA_RE.match(a):
+            return a
+    return None
+
+def main():
+    fecha_forzada = _fecha_desde_entorno()
+    try:
+        fecha_dt = detectar_fecha(fecha_forzada)
+        base = construir_base(fecha_dt)
+        res_n = procesar_rama(base, soberanos=False)
+        res_s = procesar_rama(base, soberanos=True)
+        print("\n================  LISTO  ================")
+        print("NORMAL   :", res_n)
+        print("SOBERANOS:", res_s)
+    except ProcesoError as e:
+        print("\n[ERROR CONTROLADO]\n" + str(e))
+        sys.exit(1)
+    except Exception as e:
+        import traceback
+        print("\n[ERROR INESPERADO]")
+        traceback.print_exc()
+        sys.exit(2)
+    finally:
+        global _XW_APP
+        if _XW_APP is not None:
+            try:
+                _XW_APP.quit()
+            except Exception:
+                pass
+            _XW_APP = None  # evita procesos Excel huérfanos
+
+
+if __name__ == '__main__':
+    main()
