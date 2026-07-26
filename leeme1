@@ -1,0 +1,98 @@
+Perfecto, el archivo está y `nuevo123.txt` es una versión nueva (7373 líneas). Reubico las anclas exactas ahí para que las instrucciones tengan las líneas correctas. Verifico el texto exacto de cada punto de enganche.Todo confirmado sobre `nuevo123.txt` (7373 líneas): reubiqué las líneas exactas ahí. Acá van las dos cosas.
+
+---
+
+## PARTE 1 — Instrucciones (paso a paso, sin necesidad de saber Python)
+
+Trabaja sobre `nuevo123.txt`. Haz una **copia de respaldo** antes de tocar nada. En cada paso te digo la línea exacta, qué buscar y qué dejar.
+
+### PASO 0 — Añadir las 2 hojas al Excel principal
+En `Riesgos Fisicos (Mapa Distrital) - 2026.xlsx`, copia las hojas **`Activos Departamentales`** y **`Ponderacion Departamental`** desde el archivo que te entrego (abajo). **Ábrelo y guárdalo en Excel una vez** para que las celdas con fórmula (los pesos) queden con su valor calculado guardado; el pipeline lee ese valor.
+
+### PASO 1 — Pegar el módulo de código
+Abre `nuevo123.txt`. Ve a la **línea 1958** (termina la función `load_empresa_hoja`, dice `    return df`). Justo **debajo**, pega TODO el contenido del archivo `modulo_departamental.py` que te entrego. (Es un bloque nuevo `# %%`, no reemplaza nada.)
+
+### PASO 2 — Insertar el cálculo de la distribución
+Ve a la **línea 7062**, que dice exactamente:
+```python
+    if INCLUIR_FINANCIERO:
+```
+**Justo encima** de esa línea, pega este bloque (respeta los 4 espacios de sangría del inicio):
+```python
+    # ===== Empresas "departamentales" (InRetail y futuros): distribución distrital =====
+    #  Se calcula UNA sola vez y se reutiliza en empresas-hoja y en el holding.
+    DEP_DISTS = {}
+    try:
+        _pob_path = find_file(POBLACION_DIR, POBLACION_PATTERNS, "Población distrital INEI")
+        log(f"Población distrital : {_pob_path}")
+        for _emi in EMPRESAS_DEPARTAMENTAL:
+            _dfd = load_empresa_departamental(risk_path, _pob_path, _emi)
+            if not _dfd.empty:
+                DEP_DISTS[_emi] = _dfd
+    except Exception as _e:
+        log(f"Empresas departamentales: no se pudo construir la distribución: {_e}", "WARN")
+
+```
+
+### PASO 3 — Enganche en empresas-hoja
+Ve a la **línea 7216**, que dice exactamente:
+```python
+                df_e = load_empresa_hoja(risk_path, spec, hoja_real)
+```
+**Reemplázala** por estas 4 líneas (misma sangría):
+```python
+                if spec["empresa"] in EMPRESAS_DEPARTAMENTAL:
+                    df_e = DEP_DISTS.get(spec["empresa"], _df_actividad([]))
+                else:
+                    df_e = load_empresa_hoja(risk_path, spec, hoja_real)
+```
+
+### PASO 4 — Reconocer la fuente "Departamental" en Holdings
+Ve a la **línea 2059**, que dice exactamente:
+```python
+                    "fuente": ("Hoja" if norm(fuente).startswith("HOJA") else "Banca"),
+```
+**Reemplázala** por:
+```python
+                    "fuente": ("Hoja" if norm(fuente).startswith("HOJA")
+                               else "Departamental" if norm(fuente).startswith("DEPARTAMENTAL")
+                               else "Banca"),
+```
+
+### PASO 5 — Enganche en el holding (Intercorp)
+Ve a la **línea 7134**, que dice exactamente:
+```python
+                    elif h["fuente"] == "Hoja":
+```
+**Justo encima** de esa línea, pega este bloque (misma sangría, 20 espacios):
+```python
+                    elif h["fuente"] == "Departamental":
+                        _emi_dep = h["hojas"][0] if h["hojas"] else emisor
+                        df_geo = DEP_DISTS.get(_emi_dep)
+                        if df_geo is None or df_geo.empty:
+                            log(f"Holdings: '{emisor}' sin distribución departamental "
+                                f"para '{_emi_dep}'; se omite ese renglón.", "WARN")
+                            continue
+                        df_geo = df_geo.copy()
+                        df_geo["empresa"] = emisor
+```
+
+### PASO 6 — Editar la hoja `Holdings` del Excel
+En la hoja `Holdings`, **borra las filas de InRetail que cuelgan de Intercorp Perú** (las que apuntaban a `Inretail Consumer` y `InRetail Shopping Mall`) y déjalas como **una sola fila**:
+
+| Emisor | Fuente | Banco | Hoja_Activos | AUM_Factor | Sector | País |
+|---|---|---|---|---|---|---|
+| Intercorp Perú | **Departamental** | *(vacío)* | **InRetail** | **0.40** | Financiero | Perú |
+
+El `0.40` es la suma de lo que InRetail pesaba antes dentro de Intercorp (0.32 + 0.08). Guarda en Excel.
+
+**Con esto:** InRetail se distribuye a distrito con la nueva metodología, impacta el dashboard de Activos y el FEN (departamento = suma de sus distritos), y sigue colgando de Intercorp Perú. Corre el script; en consola verás `[InRetail] departamental: 1969 distrito(s) | activos≈4357 | suma peso=1.0000`.
+
+---
+
+## PARTE 2 — Los archivosAhí tienes las dos cosas:
+
+1. **`Hojas_InRetail_Departamental.xlsx`** — las dos hojas (`Ponderacion Departamental` con la derivación del peso en celdas formuladas, y `Activos Departamentales` en formato largo) para copiar al Excel principal.
+2. **`modulo_departamental.py`** — el bloque de código a pegar en el Paso 1.
+
+Sigue los pasos 0 a 6 en orden y quedará integrado.
