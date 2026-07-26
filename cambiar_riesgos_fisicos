@@ -1,0 +1,117 @@
+Necesito ver el código exacto de dos zonas antes de darte instrucciones precisas: `OVERRIDE_UNIDAD_UBIGEO` y el mecanismo de alias de distritos.Ahora veo los bloques de configuración exactos y cómo se forma la clave del override.Ahora veo cómo se construye la clave del override y cómo geocode usa los alias.Para el override necesito ubigeos **correctos** (no puedo inventarlos: es un mapa de riesgo). Voy a sacar la tabla oficial de ubigeos de tu propio Excel y así los códigos salen de tu fuente, no de mi memoria.La tabla oficial está en tu hoja `Ubigeo Distrital` (columna `id` = ubigeo). Ahora necesito el **distrito exacto** de cada unidad minera para no colocar un ubigeo equivocado. Voy a verificar las ubicaciones.Colquijirca (ambos) → **Tinyahuarco, Pasco**. Confirmado. Sigo con el resto en búsquedas eficientes.Julcani → **Ccochaccasa, Angaraes, Huancavelica**. Ahora Mallay + las de Hochschild.Voy afinando. Ahora Volcan (Carahuacra, San Cristóbal, Ticlio) y Nexa (Atacocha, El Porvenir/Milpo).Volcan: **San Cristóbal y Carahuacra → Yauli (120810)**; **Ticlio → Morococha/Yauli/Chicla** (multi-distrito). Ahora Mallay, Inmaculada, Nexa y Minsur.Inmaculada → **Oyolo (050806)**. Última búsqueda para Nexa (Atacocha, El Porvenir) y Mallay.Ya tengo los distritos confirmados. Ahora extraigo los ubigeos oficiales desde tu propia hoja `Ubigeo Distrital` para que los códigos salgan de tu fuente.Todos los ubigeos salieron de tu hoja. Reviso la función `norm()` para asegurar que las claves del override coincidan exactamente con los nombres de unidad (por los caracteres `N°` vs `Nº`).Reviso cómo se aplican los alias de distrito en `geocode` para darte los alias correctos.Verifico que los nombres oficiales de destino existan tal cual en tu tabla (para que el alias apunte al nombre correcto).Verifiqué todo contra tu propia tabla de ubigeos y confirmé cada distrito con fuentes. Aquí van los **3 cambios exactos**. Todos los ubigeos salen de tu hoja `Ubigeo Distrital`.
+
+---
+
+## CAMBIO 1 — Quitar el dashboard `Mapa_Riesgos_Fisicos`
+
+**Ve a las líneas 7259–7270.** Verás este bloque:
+
+```python
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    xlsx_out = os.path.join(OUT_DIR, f"Riesgos_Fisicos_Cartera_{stamp}.xlsx")
+    html_out = os.path.join(OUT_DIR, f"Mapa_Riesgos_Fisicos_{stamp}.html")
+
+    export_excel(xlsx_out, df_assign_all, exp_comb, scores, geo_idx, um_all,
+                 detalle_all, districts, no_map_all,
+                 universo=universo_all, emp_sector=emp_sector)
+    log(f"Excel generado : {xlsx_out}")
+    export_html(html_out, geojson, districts, exp_comb, scores, geo_idx,
+                emp_sector=emp_sector, exp_clase=exp_clase, aum_cartera=aum_cartera,
+                enfen=enfen, fen_chart=fen_chart)
+    log(f"HTML generado  : {html_out}")
+```
+
+**Reemplázalo por esto** (se borran la línea de `html_out` y toda la llamada a `export_html`):
+
+```python
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    xlsx_out = os.path.join(OUT_DIR, f"Riesgos_Fisicos_Cartera_{stamp}.xlsx")
+
+    export_excel(xlsx_out, df_assign_all, exp_comb, scores, geo_idx, um_all,
+                 detalle_all, districts, no_map_all,
+                 universo=universo_all, emp_sector=emp_sector)
+    log(f"Excel generado : {xlsx_out}")
+```
+
+**Luego ve a las líneas 7338 y 7343** (hay DOS líneas idénticas que dicen `return xlsx_out, html_out`). Cambia **ambas** por:
+
+```python
+    return xlsx_out, None
+```
+
+> Con esto, `fen_chart` y el dashboard de Activos siguen intactos. La función `export_html` y la plantilla quedan definidas pero sin usarse (inofensivas).
+
+---
+
+## CAMBIO 2 — Geolocalizar las 16 unidades mineras
+
+**Ve a las líneas 168–169.** Verás el diccionario vacío:
+
+```python
+OVERRIDE_UNIDAD_UBIGEO = {
+}
+```
+
+**Reemplázalo por esto:**
+
+```python
+OVERRIDE_UNIDAD_UBIGEO = {
+    # --- Verificadas (distrito confirmado; ubigeo tomado de tu hoja 'Ubigeo Distrital') ---
+    ("Buenaventura",        norm("COLQUIJIRCA N°1")):            "190111",  # Tinyahuarco, Pasco, Pasco
+    ("Buenaventura",        norm("COLQUIJIRCA Nº 2")):           "190111",  # Tinyahuarco, Pasco, Pasco
+    ("Buenaventura",        norm("JULCANI")):                    "090304",  # Ccochaccasa, Angaraes, Huancavelica
+    ("Hochschild",          norm("ACUMULACION GRAN INMACULADA")):"050806",  # Oyolo, Páucar del Sara Sara, Ayacucho
+    ("Hochschild",          norm("ACUMULACION INMACULADA 1")):   "050806",  # Oyolo, Páucar del Sara Sara, Ayacucho
+    ("Hochschild",          norm("ACUMULACION PALLANCATA")):     "050703",  # Coronel Castañeda, Parinacochas, Ayacucho
+    ("Hochschild",          norm("GRAN ARCATA")):                "040603",  # Cayarani, Condesuyos, Arequipa
+    ("Nexa Resources Perú", norm("ATACOCHA")):                   "190108",  # San Francisco de Asís de Yarusyacán, Pasco
+    ("Nexa Resources Perú", norm("MILPO Nº1")):                  "190108",  # El Porvenir - San Fco. de Asís de Yarusyacán, Pasco
+    ("Volcan",              norm("CARAHUACRA")):                 "120810",  # Yauli, Yauli, Junín
+    ("Volcan",              norm("SAN CRISTOBAL")):              "120810",  # Yauli, Yauli, Junín
+    ("Volcan",              norm("TICLIO")):                     "120805",  # Morococha, Yauli, Junín (la mina abarca Morococha/Yauli/Chicla; se toma Morococha)
+
+    # --- Pendientes de CONFIRMAR el distrito exacto (NO les inventé ubigeo).
+    #     Descomenta y completa cuando confirmes; si no, esa unidad se sigue excluyendo como hoy: ---
+    # ("Buenaventura",        norm("MALLAY")):        "150901",  # candidato: Oyón, Oyón, Lima  -> CONFIRMAR distrito exacto
+    # ("Hochschild",          norm("ORE BODY 3")):    "050806",  # probable veta de Inmaculada (Oyolo) -> CONFIRMAR
+    # ("Minsur",              norm("FRONTERA UNO")):  "",        # concesión sin ubicación pública clara -> CONFIRMAR
+    # ("Volcan",              norm("MORADA")):        "",        # sin ubicación pública clara (prob. prov. Yauli) -> CONFIRMAR
+}
+```
+
+> Solo dejé como comentario las 4 que no pude confirmar con fuente pública (Mallay, Ore Body 3, Frontera Uno, Morada): meterles un ubigeo a ciegas ensuciaría el mapa. Las otras 12 quedan resueltas.
+
+---
+
+## CAMBIO 3 — Alias de distritos no geocodificados
+
+**Ve a las líneas 173–176.** Verás:
+
+```python
+ALIAS_DISTRITO = {
+    "PUEBLO LIBRE": "MAGDALENA VIEJA",   # Lima: nombre popular vs. oficial
+    "MAGDALENA VIEJA": "PUEBLO LIBRE",
+}
+```
+
+**Reemplázalo por esto** (agrega 6 alias; la clave va en MAYÚSCULAS sin tildes):
+
+```python
+ALIAS_DISTRITO = {
+    "PUEBLO LIBRE": "MAGDALENA VIEJA",   # Lima: nombre popular vs. oficial
+    "MAGDALENA VIEJA": "PUEBLO LIBRE",
+    "BUSTAMANTE Y RIVERO":            "José Luis Bustamante Y Rivero",       # Arequipa/Arequipa
+    "LIMA CERCADO":                   "Lima",                                # Lima/Lima (Cercado de Lima)
+    "LURIGANCHO CHOSICA":             "Lurigancho",                          # Lima/Lima (capital Chosica)
+    "SAN VICENTE":                    "San Vicente de Cañete",               # Lima/Cañete
+    "26 DE OCTUBRE":                  "Veintiseis de Octubre",               # Piura/Piura
+    "CORONEL GREGORIO ALBARRACIN L":  "Coronel Gregorio Albarracín Lanchipa",# Tacna/Tacna (resuelve las filas de ~70,776 y ~26,925 miles S/)
+}
+```
+
+---
+
+### Lo que dejé fuera a propósito (no son alias, son otra cosa)
+- `Lima/Callao/Callao`, `Lima/Lima/Huancayo`, `Lima/Lima/Monterrico`: son **errores de dato de origen** (departamento/distrito mal escrito o zona que no es distrito). No se arreglan con alias; hay que corregirlos en la fuente.
+- `Cusco/La Convención/Megantoni`: distrito real (ubigeo 080914) pero **no está en tu GeoJSON** (es distrito creado en 2016). Requiere agregarlo al suplemento GeoJSON con su polígono, no un alias.
+- Las 16 filas de "Servicios de comunicaciones" van con **0.00 TMF** (impacto nulo): no vale la pena tocarlas.
