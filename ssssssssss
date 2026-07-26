@@ -1,0 +1,4 @@
+{"hoja": "InRetail",         "empresa": "InRetail",     "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Consumer", "InRetail Peru", "InRetail"]},
+    {"hoja": "InRetail Shopping Malls", "empresa": "InRetail Shopping Malls", "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Shopping Malls"]},
