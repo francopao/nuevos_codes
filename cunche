@@ -1,0 +1,39 @@
+Perfecto que corriera bien. Antes de armar el export y propagar el business line, déjame revisar en `version123.txt` cómo se construye hoy la columna D de "Activos por Empresa" y el tooltip del mapa, para impactar exactamente los lugares correctos. Y reviso los warnings de la consola.La integración corrió limpia (`[InRetail] departamental: 1969 distritos | suma peso=1.0000`); los warnings son de minería/bancos, ajenos a esto. Ahora ubico dónde se arma la columna D de "Activos por Empresa" y el tooltip del mapa.Veo cómo se arma la hoja "Activos por Empresa" (columna D) y el tooltip del mapa para propagar el business line en los puntos correctos.Ya entiendo el flujo: `districts[].aportes[].activos` (que viene de `um`) alimenta tanto la columna D como el tooltip. Hoy mi módulo emite **una fila agregada por distrito**, por eso no se ve el business line. Reviso cómo el tooltip del mapa muestra los activos para confirmar el segundo punto de impacto.Ya tengo el mapa completo del flujo. El tooltip del mapa (línea 6742+) usa `it.label = a.activo` (mi `unidad_minera`), y la columna D también. La causa de que solo veas "InRetail" es que mi módulo emite **una fila agregada por distrito**. La solución es emitir **una fila por (distrito × business line)** con la etiqueta del BL. Reviso cómo se construye `aportes` y cómo se reparte la plata por activo, para decidir si puedo hacerlo proporcional sin romper otros sectores.Confirmado el mecanismo. Decisión de diseño (te la explico en la entrega): emito **una fila por (distrito × business line)** con etiqueta granular (Plaza Vea, Vivanda, Makro, Mass separados). Eso hace que el business line aparezca en el tooltip del mapa, en la columna D y en el FEN, sin tocar código compartido. Verifico los nombres de variables de salida en `main` para enganchar el nuevo export.Todo claro y decidido. La clave: como la columna D y el tooltip del mapa leen `unidad_minera`, si emito **una fila por (distrito × business line)** con etiqueta granular, el business line se propaga **solo** a la columna D, al tooltip del mapa y al FEN — sin tocar código compartido. Y el nuevo Excel lo genero desde el mismo núcleo de la metodología. Reescribo el módulo y lo pruebo contra tus archivos reales.Funciona y los números cierran perfecto:
+
+- **DataFrame del pipeline:** 3234 filas (distrito × business line), suma tmf = 1.0, y los business line ya salen **granulares y separados**: Makro, Mass, Pharmacies, **Plaza Vea**, **Vivanda**, Shopping Malls. La etiqueta quedó como `InRetail - {distrito} ({business line})` — justo lo que pediste para la columna D y el tooltip.
+- **Export:** Pharmacies 2595, Mass 1624, Plaza Vea 92, Shopping Malls 21, Makro 16, Vivanda 9 = **4357** (cuadra exacto con el origen). Plaza Vea (0.1657) + Vivanda (0.0162) = 0.1819 = el peso combinado original. ✓
+
+Dejo los entregables.Todo probado contra tus archivos reales. Como la columna D de "Activos por Empresa" y el tooltip del mapa **leen el mismo campo** (`unidad_minera`), basta con que el módulo emita una fila por business line: el desglose se propaga **solo** a la columna D, al mapa y al FEN. **No hay que tocar `generar_excel_riesgos` ni el JavaScript.**
+
+## Instrucciones (2 cambios sobre `version123.txt`)
+
+Haz un respaldo antes. Solo son dos pasos.
+
+### PASO A — Reemplazar el módulo que ya pegaste
+Busca en tu código el bloque que pegaste la vez pasada (empieza con el comentario `# %% ===… EMPRESAS "DEPARTAMENTALES"` y termina en la función `load_empresa_departamental`). **Bórralo completo** y en su lugar pega **todo** el contenido del nuevo archivo `modulo_departamental.py` que te entrego. (Trae el reparto por business line + la nueva función de export.)
+
+### PASO B — Activar el export de la metodología
+En el bloque que insertaste antes de `if INCLUIR_FINANCIERO:` (línea **7062**), busca esta línea:
+```python
+                DEP_DISTS[_emi] = _dfd
+```
+**Reemplázala** por estas tres (misma sangría):
+```python
+                DEP_DISTS[_emi] = _dfd
+                if EXPORT_METODOLOGIA_DEP:
+                    exportar_metodologia_departamental(risk_path, _pob_path, _emi, OUT_DIR)
+```
+
+Eso es todo. Al correr, además de impactar mapas y dashboards, se guardará en tu carpeta `Output` un archivo `Metodologia_Distribucion_InRetail_{fecha}.xlsx`.
+
+## Qué vas a ver ahora
+- **Mapa:** al pasar el cursor sobre cada círculo de InRetail, el título será `InRetail - {distrito} (Makro)`, `… (Plaza Vea)`, `… (Vivanda)`, `… (Mass)`, etc.
+- **Hoja "Activos por Empresa":** la columna D "Activo Físico" mostrará `InRetail - {distrito} ({business line})`.
+- **Excel nuevo** (el resultado tangible): hoja **Resumen** (N° de activos y % por business line y por departamento) + hoja **Detalle por Distrito** (una fila por business line × Departamento/Provincia/Distrito, con N° de activos y % de exposición). Te adjunto un ejemplo generado con tus datos reales.
+
+Una nota honesta: en el mapa, dentro de un mismo distrito, la plata se reparte en partes iguales entre los business line presentes (así trata el pipeline a todos los emisores con varios activos), por lo que en modo "no agregado" los círculos de distintos business line de un mismo distrito se ven de tamaño similar. En modo **agregado** el círculo de InRetail sí refleja el monto total correcto y lista los business line. El desglose exacto por peso está en el Excel nuevo.Listo. Ahí tienes las dos cosas:
+
+1. **`modulo_departamental.py`** (nueva versión) — reemplaza el bloque que pegaste antes (Paso A). Trae el reparto granular por business line + la función de export.
+2. **`EJEMPLO_Metodologia_Distribucion_InRetail.xlsx`** — el resultado tangible de la metodología, generado con tus datos reales, para que veas el formato antes de correr (hojas *Resumen* y *Detalle por Distrito*).
+
+Con el Paso A + Paso B queda impactado en todo: mapa (tooltip con business line), hoja "Activos por Empresa" (columna D con business line), FEN, y el Excel-resultado exportado automáticamente a tu carpeta `Output`.
