@@ -1,0 +1,288 @@
+# %% ==========================================================================
+#  EMPRESAS "DEPARTAMENTALES"  (caso InRetail y futuros similares)
+#  --------------------------------------------------------------------------
+#  Empresas que SOLO divulgan cuántos activos físicos tienen por DEPARTAMENTO
+#  (no por distrito). Se desagregan a distrito con una metodología mixta,
+#  100% declarativa en dos hojas del Excel principal:
+#     · 'Activos Departamentales'  -> Emisor | Departamento | Business Line | N_Activos
+#     · 'Ponderacion Departamental'-> Emisor | Business Line | Peso | Metodo |
+#                                     Hoja_Anclaje | Filtro_BL
+#  Metodo por línea de negocio:
+#     · 'anclaje'   : las ubicaciones distritales se toman TAL CUAL de la hoja
+#                     'Hoja_Anclaje' (filtrando por 'Filtro_BL'); su peso revenue
+#                     se reparte en partes iguales entre esas ubicaciones.
+#     · 'poblacion' : el conteo por departamento se reparte a los distritos de
+#                     ese departamento de forma proporcional a la POBLACIÓN INEI.
+#  El resultado es una distribución distrital cuyo peso ('tmf') suma 1 por
+#  emisor, con la MISMA forma que load_empresa_hoja -> entra sin fricción al
+#  resto del pipeline (exposición, dashboards Activos y FEN, holding).
+#  Escalable: para una empresa nueva, solo se agregan filas a esas dos hojas.
+# ============================================================================
+
+# --- CONFIG (pegar junto al resto de configuración, p.ej. bajo EMPRESAS_HOJA) ---
+EMPRESAS_DEPARTAMENTAL = ["InRetail"]          # emisores tratados por este flujo
+DEP_SHEET_ACTIVOS = "Activos Departamentales"
+DEP_SHEET_PONDERA = "Ponderacion Departamental"
+POBLACION_DIR = os.path.join(BASE_DIR, "Inputs")
+POBLACION_PATTERNS = ["Poblacion Distrital*INEI*.xls*", "*Poblacion*Distrital*.xls*",
+                      "*Poblaci*n*Distrital*.xls*", "*Poblacion*INEI*.xls*"]
+
+
+def _load_poblacion_distrital(pob_path):
+    """Lee la proyección INEI y devuelve:
+       - ubi2info: {ubigeo6: (departamento, provincia, distrito, poblacion)}
+       - dep2dists: {norm(departamento): [(ubigeo6, poblacion), ...]}
+       Usa la ÚLTIMA columna numérica (año más reciente) como población.
+       Detecta el nivel por el ubigeo: xx0000=departamento, xxyy00=provincia,
+       resto=distrito, arrastrando el departamento/provincia vigente."""
+    import openpyxl
+    wb = openpyxl.load_workbook(pob_path, data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    ubi2info, dep2dists = {}, {}
+    cur_dep = cur_prov = None
+    for r in ws.iter_rows(values_only=True):
+        if not r or r[0] is None:
+            continue
+        try:
+            cod = int(float(r[0]))
+        except (TypeError, ValueError):
+            continue
+        s = str(cod).zfill(6)
+        nombre = r[1]
+        if nombre is None or s == "000000":
+            continue
+        # población = última celda numérica de la fila (año más reciente)
+        pob = None
+        for v in reversed(r):
+            if isinstance(v, (int, float)):
+                pob = float(v); break
+        if s[2:] == "0000":                 # departamento
+            cur_dep = str(nombre).strip(); cur_prov = None; continue
+        if s[4:] == "00":                   # provincia
+            cur_prov = str(nombre).strip(); continue
+        # distrito
+        ubi2info[s] = (cur_dep, cur_prov, str(nombre).strip(), pob or 0.0)
+        dep2dists.setdefault(norm(cur_dep), []).append((s, pob or 0.0))
+    wb.close()
+    return ubi2info, dep2dists
+
+
+def _leer_ancla_departamental(risk_path, hoja, filtro):
+    """Lee una hoja distrital de anclaje y devuelve [(depto, prov, dist), ...].
+       'filtro' es una lista de valores (o '*' para todas las filas); se compara
+       contra la 1ra columna identificadora que exista entre Empresa/Marca/
+       Formato/Business Line/Activo."""
+    import openpyxl
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+    hoja_real = _buscar_hoja(wb.sheetnames, hoja) or hoja
+    if hoja_real not in wb.sheetnames:
+        wb.close()
+        log(f"   [departamental] hoja de anclaje '{hoja}' no encontrada; se omite.", "WARN")
+        return []
+    ws = wb[hoja_real]
+    head = [norm(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+
+    def col(*nombres):
+        for nm in nombres:
+            t = norm(nm)
+            if t in head:
+                return head.index(t) + 1
+        return None
+    cDep = col("Departamento"); cProv = col("Provincia"); cDist = col("Distrito")
+    cFil = col("Empresa", "Marca", "Formato", "Business Line", "Activo")
+    usar_filtro = not (isinstance(filtro, str) and filtro.strip() == "*")
+    claves = {norm(x) for x in filtro} if usar_filtro else set()
+    locs = []
+    for r in range(2, ws.max_row + 1):
+        dep = ws.cell(r, cDep).value if cDep else None
+        dist = ws.cell(r, cDist).value if cDist else None
+        if dep is None or dist is None:
+            continue
+        if usar_filtro:
+            val = ws.cell(r, cFil).value if cFil else None
+            if norm(val) not in claves:
+                continue
+        prov = ws.cell(r, cProv).value if cProv else None
+        locs.append((str(dep).strip(),
+                     str(prov).strip() if prov else None,
+                     str(dist).strip()))
+    wb.close()
+    return locs
+
+
+def _reparto_mayor_resto(total, fracciones):
+    """Reparte un entero 'total' entre celdas según 'fracciones' (que suman ~1)
+       usando el método del mayor resto (para mostrar N° de activos enteros que
+       calcen con el total departamental)."""
+    if total <= 0 or not fracciones:
+        return [0] * len(fracciones)
+    crudos = [f * total for f in fracciones]
+    base = [int(x) for x in crudos]
+    resto = total - sum(base)
+    orden = sorted(range(len(crudos)), key=lambda i: crudos[i] - base[i], reverse=True)
+    for i in orden[:resto]:
+        base[i] += 1
+    return base
+
+
+def load_empresa_departamental(risk_path, pob_path, emisor):
+    """Construye la distribución distrital de un emisor 'departamental'.
+       Devuelve un DataFrame con la MISMA forma que load_empresa_hoja
+       (columna 'tmf' = peso distrital; suma 1 sobre el emisor)."""
+    import openpyxl
+    from collections import defaultdict
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+
+    # -- 1) Ponderacion Departamental (filas del emisor) --
+    hoja_p = _buscar_hoja(wb.sheetnames, DEP_SHEET_PONDERA)
+    if not hoja_p:
+        wb.close()
+        log(f"   [{emisor}] no se halló la hoja '{DEP_SHEET_PONDERA}'; se omite.", "WARN")
+        return _df_actividad([])
+    wp = wb[hoja_p]
+    head = [norm(wp.cell(1, c).value) for c in range(1, wp.max_column + 1)]
+
+    def cidx(*nombres):
+        for nm in nombres:
+            t = norm(nm)
+            for i, h in enumerate(head):
+                if t and t in h:
+                    return i + 1
+        return None
+    iEm = cidx("Emisor"); iBL = cidx("Business Line"); iPe = cidx("Peso")
+    iMe = cidx("Metodo"); iHo = cidx("Hoja_Anclaje", "Hoja Anclaje"); iFi = cidx("Filtro_BL", "Filtro")
+    ponder = []
+    for r in range(2, wp.max_row + 1):
+        em = wp.cell(r, iEm).value if iEm else None
+        if em is None or norm(em) != norm(emisor):
+            continue
+        peso = _peso_a_decimal(wp.cell(r, iPe).value) if iPe else None
+        if peso is None:
+            continue
+        ponder.append({
+            "bl": str(wp.cell(r, iBL).value).strip() if iBL and wp.cell(r, iBL).value else "",
+            "peso": float(peso),
+            "metodo": norm(wp.cell(r, iMe).value) if iMe else "POBLACION",
+            "hoja": (str(wp.cell(r, iHo).value).strip() if iHo and wp.cell(r, iHo).value else ""),
+            "filtro": (str(wp.cell(r, iFi).value).strip() if iFi and wp.cell(r, iFi).value else "*"),
+        })
+    if not ponder:
+        wb.close()
+        log(f"   [{emisor}] sin filas en '{DEP_SHEET_PONDERA}'; se omite.", "WARN")
+        return _df_actividad([])
+
+    # -- 2) Activos Departamentales (conteos del emisor, por depto y business line) --
+    hoja_a = _buscar_hoja(wb.sheetnames, DEP_SHEET_ACTIVOS)
+    dep_counts = defaultdict(dict)   # bl -> {depto: N}
+    if hoja_a:
+        wa = wb[hoja_a]
+        h2 = [norm(wa.cell(1, c).value) for c in range(1, wa.max_column + 1)]
+
+        def a2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                for i, h in enumerate(h2):
+                    if t and t in h:
+                        return i + 1
+            return None
+        jEm = a2("Emisor"); jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        for r in range(2, wa.max_row + 1):
+            em = wa.cell(r, jEm).value if jEm else None
+            if em is None or norm(em) != norm(emisor):
+                continue
+            dep = wa.cell(r, jDe).value; bl = wa.cell(r, jBL).value; n = wa.cell(r, jN).value
+            try:
+                n = float(n)
+            except (TypeError, ValueError):
+                n = 0.0
+            if dep and bl and n > 0:
+                dep_counts[str(bl).strip()][str(dep).strip()] = n
+    wb.close()
+
+    # -- 3) población distrital --
+    ubi2info, dep2dists = _load_poblacion_distrital(pob_path)
+
+    def pool_departamento(depto):
+        """Distritos (ubigeo, pob) del departamento; Lima incluye Callao."""
+        dn = norm(depto)
+        pool = list(dep2dists.get(dn, []))
+        if dn == "LIMA":                      # Callao se pliega en Lima
+            for k, v in dep2dists.items():
+                if "CALLAO" in k:
+                    pool += v
+        return pool
+
+    # -- 4) construir share y conteo por (depto, prov, dist) --
+    share = defaultdict(float)
+    conteo = defaultdict(float)     # activos (fraccional en poblacional, entero en anclaje)
+    detalle_bl = defaultdict(lambda: defaultdict(float))  # (dep,prov,dist) -> {bl: cnt}
+
+    for p in ponder:
+        bl, peso, metodo = p["bl"], p["peso"], p["metodo"]
+        if peso <= 0:
+            continue
+        if metodo.startswith("ANCLA"):
+            filtro = [x.strip() for x in p["filtro"].split(";")] if p["filtro"] != "*" else "*"
+            locs = _leer_ancla_departamental(risk_path, p["hoja"], filtro)
+            M = len(locs)
+            if M == 0:
+                log(f"   [{emisor}] anclaje '{bl}' sin ubicaciones en '{p['hoja']}'; "
+                    f"su peso {peso:.4f} no se mapeó.", "WARN")
+                continue
+            w = peso / M
+            for (dep, prov, dist) in locs:
+                key = (dep, prov, dist)
+                share[key] += w
+                conteo[key] += 1
+                detalle_bl[key][bl] += 1
+        else:   # POBLACION
+            counts_dep = dep_counts.get(bl, {})
+            Ntot = sum(counts_dep.values())
+            if Ntot <= 0:
+                log(f"   [{emisor}] '{bl}' (poblacion) sin conteos en "
+                    f"'{DEP_SHEET_ACTIVOS}'; su peso {peso:.4f} no se mapeó.", "WARN")
+                continue
+            for depto, N in counts_dep.items():
+                pool = pool_departamento(depto)
+                tot_pob = sum(pb for _, pb in pool)
+                if tot_pob <= 0:
+                    log(f"   [{emisor}] sin población para '{depto}' ({bl}); "
+                        f"se omite ese departamento.", "WARN")
+                    continue
+                for (u, pb) in pool:
+                    dep2, prov2, dist2, _ = ubi2info[u]
+                    frac = pb / tot_pob
+                    key = (dep2, prov2, dist2)
+                    share[key] += peso * (N / Ntot) * frac
+                    conteo[key] += N * frac
+                    detalle_bl[key][bl] += N * frac
+
+    if not share:
+        log(f"   [{emisor}] no se construyó ninguna ubicación distrital.", "WARN")
+        return _df_actividad([])
+
+    # -- 5) redondeo de conteos (mayor-resto) por (departamento, business line
+    #       poblacional) para que el N° de activos mostrado sea entero y cuadre --
+    #  (los anclados ya son enteros; aquí redondeamos solo lo poblacional)
+    #  Nota: el 'tmf' (exposición) queda con el share exacto; el redondeo es solo
+    #  para la etiqueta de cantidad.
+    # -- 6) emitir filas en el formato de _df_actividad --
+    out = []
+    for (dep, prov, dist), sh in share.items():
+        cnt = conteo[(dep, prov, dist)]
+        # etiqueta legible de composición
+        comp = detalle_bl[(dep, prov, dist)]
+        etiqueta = " + ".join(f"{k}:{round(v)}" for k, v in sorted(comp.items()) if round(v) > 0)
+        if not etiqueta:
+            etiqueta = f"{emisor}"
+        out.append({
+            "mineral": "Activos", "unidad": "activos", "titular": emisor,
+            "unidad_minera": f"{emisor} · {dist} ({etiqueta})",
+            "depto": dep, "prov": prov, "dist": dist,
+            "acum": round(cnt, 2), "unidad_norm": "activos",
+            "factor": 1.0, "tmf": sh, "empresa": emisor,
+        })
+    df = _df_actividad(out)
+    log(f"   [{emisor}] departamental: {len(out)} distrito(s) | "
+        f"activos≈{sum(conteo.values()):.0f} | suma peso={sum(share.values()):.4f}")
+    return df
