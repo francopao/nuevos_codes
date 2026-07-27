@@ -1,0 +1,443 @@
+# %% ==========================================================================
+#  EMPRESAS "DEPARTAMENTALES"  (caso InRetail y futuros similares)
+#  --------------------------------------------------------------------------
+#  Reparto de activos a distrito con metodología mixta declarada en el Excel:
+#     · 'Activos Departamentales'   -> Emisor | Departamento | Business Line | N_Activos
+#     · 'Ponderacion Departamental' -> Emisor | Business Line | Peso | Metodo | Hoja_Anclaje | Filtro_BL
+#  'anclaje'   -> ubicaciones tal cual de la hoja de anclaje (marca real como etiqueta).
+#  'poblacion' -> el conteo por departamento se reparte por población INEI dentro del depto.
+#  Emite una fila por (distrito × business line); 'tmf' suma 1 por emisor.
+# ============================================================================
+
+# --- CONFIG ---
+EMPRESAS_DEPARTAMENTAL = ["InRetail"]
+DEP_SHEET_ACTIVOS = "Activos Departamentales"
+DEP_SHEET_PONDERA = "Ponderacion Departamental"
+POBLACION_DIR = os.path.join(BASE_DIR, "Inputs")
+POBLACION_PATTERNS = ["Poblacion Distrital*INEI*.xls*", "*Poblacion*Distrital*.xls*",
+                      "*Poblaci*n*Distrital*.xls*", "*Poblacion*INEI*.xls*"]
+# Business lines de 'Activos Departamentales' que además cuentan para un emisor
+# separado en el dashboard FEN (los activos físicos suman a ambos).
+FEN_SUBEMISOR_POR_BL = {"Shopping Malls": "InRetail Shopping Malls"}
+
+
+def _load_poblacion_distrital(pob_path):
+    import openpyxl
+    wb = openpyxl.load_workbook(pob_path, data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    ubi2info, dep2dists = {}, {}
+    cur_dep = cur_prov = None
+    for r in ws.iter_rows(values_only=True):
+        if not r or r[0] is None:
+            continue
+        try:
+            cod = int(float(r[0]))
+        except (TypeError, ValueError):
+            continue
+        s = str(cod).zfill(6)
+        nombre = r[1]
+        if nombre is None or s == "000000":
+            continue
+        pob = None
+        for v in reversed(r):
+            if isinstance(v, (int, float)):
+                pob = float(v); break
+        if s[2:] == "0000":
+            cur_dep = str(nombre).strip(); cur_prov = None; continue
+        if s[4:] == "00":
+            cur_prov = str(nombre).strip(); continue
+        ubi2info[s] = (cur_dep, cur_prov, str(nombre).strip(), pob or 0.0)
+        dep2dists.setdefault(norm(cur_dep), []).append((s, pob or 0.0))
+    wb.close()
+    return ubi2info, dep2dists
+
+
+def _leer_ancla_departamental(risk_path, hoja, filtro):
+    import openpyxl
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+    hoja_real = _buscar_hoja(wb.sheetnames, hoja) or hoja
+    if hoja_real not in wb.sheetnames:
+        wb.close()
+        log(f"   [departamental] hoja de anclaje '{hoja}' no encontrada; se omite.", "WARN")
+        return []
+    ws = wb[hoja_real]
+    head = [norm(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+
+    def col(*nombres):
+        for nm in nombres:
+            t = norm(nm)
+            if t in head:
+                return head.index(t) + 1
+        return None
+    cDep = col("Departamento"); cProv = col("Provincia"); cDist = col("Distrito")
+    cFil = col("Empresa", "Marca", "Formato", "Business Line", "Activo")
+    usar_filtro = not (isinstance(filtro, str) and filtro.strip() == "*")
+    claves = {norm(x) for x in filtro} if usar_filtro else set()
+    locs = []
+    for r in range(2, ws.max_row + 1):
+        dep = ws.cell(r, cDep).value if cDep else None
+        dist = ws.cell(r, cDist).value if cDist else None
+        if dep is None or dist is None:
+            continue
+        marca_val = ws.cell(r, cFil).value if cFil else None
+        if usar_filtro and norm(marca_val) not in claves:
+            continue
+        prov = ws.cell(r, cProv).value if cProv else None
+        marca = str(marca_val).strip() if marca_val else None
+        locs.append((str(dep).strip(),
+                     str(prov).strip() if prov else None,
+                     str(dist).strip(), marca))
+    wb.close()
+    return locs
+
+
+def _reparto_mayor_resto(total, fracciones):
+    total = int(round(total))
+    if total <= 0 or not fracciones:
+        return [0] * len(fracciones)
+    crudos = [f * total for f in fracciones]
+    base = [int(x) for x in crudos]
+    resto = total - sum(base)
+    orden = sorted(range(len(crudos)), key=lambda i: crudos[i] - base[i], reverse=True)
+    for i in orden[:max(0, resto)]:
+        base[i] += 1
+    return base
+
+
+def _construir_reparto_departamental(risk_path, pob_path, emisor):
+    """Devuelve una lista de dicts, uno por (distrito × business line), con
+       campos de auditoría de la metodología:
+         depto, prov, dist, business_line, conteo, share,
+         metodo, bl_pond, depto_asig, n_depto, pob_dist, pob_depto,
+         peso_pond, total_pond"""
+    import openpyxl
+    from collections import defaultdict
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+
+    hoja_p = _buscar_hoja(wb.sheetnames, DEP_SHEET_PONDERA)
+    if not hoja_p:
+        wb.close()
+        log(f"   [{emisor}] no se halló la hoja '{DEP_SHEET_PONDERA}'; se omite.", "WARN")
+        return []
+    wp = wb[hoja_p]
+    head = [norm(wp.cell(1, c).value) for c in range(1, wp.max_column + 1)]
+
+    def cidx(*nombres):
+        for nm in nombres:
+            t = norm(nm)
+            for i, h in enumerate(head):
+                if t and t in h:
+                    return i + 1
+        return None
+    iEm = cidx("Emisor"); iBL = cidx("Business Line"); iPe = cidx("Peso")
+    iMe = cidx("Metodo"); iHo = cidx("Hoja_Anclaje", "Hoja Anclaje"); iFi = cidx("Filtro_BL", "Filtro")
+    ponder = []
+    for r in range(2, wp.max_row + 1):
+        em = wp.cell(r, iEm).value if iEm else None
+        if em is None or norm(em) != norm(emisor):
+            continue
+        peso = _peso_a_decimal(wp.cell(r, iPe).value) if iPe else None
+        if peso is None:
+            continue
+        ponder.append({
+            "bl": str(wp.cell(r, iBL).value).strip() if iBL and wp.cell(r, iBL).value else "",
+            "peso": float(peso),
+            "metodo": norm(wp.cell(r, iMe).value) if iMe else "POBLACION",
+            "hoja": (str(wp.cell(r, iHo).value).strip() if iHo and wp.cell(r, iHo).value else ""),
+            "filtro": (str(wp.cell(r, iFi).value).strip() if iFi and wp.cell(r, iFi).value else "*"),
+        })
+    if not ponder:
+        wb.close()
+        log(f"   [{emisor}] sin filas en '{DEP_SHEET_PONDERA}'; se omite.", "WARN")
+        return []
+
+    hoja_a = _buscar_hoja(wb.sheetnames, DEP_SHEET_ACTIVOS)
+    dep_counts = defaultdict(dict)
+    if hoja_a:
+        wa = wb[hoja_a]
+        h2 = [norm(wa.cell(1, c).value) for c in range(1, wa.max_column + 1)]
+
+        def a2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                for i, h in enumerate(h2):
+                    if t and t in h:
+                        return i + 1
+            return None
+        jEm = a2("Emisor"); jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        for r in range(2, wa.max_row + 1):
+            em = wa.cell(r, jEm).value if jEm else None
+            if em is None or norm(em) != norm(emisor):
+                continue
+            dep = wa.cell(r, jDe).value; bl = wa.cell(r, jBL).value; n = wa.cell(r, jN).value
+            try:
+                n = float(n)
+            except (TypeError, ValueError):
+                n = 0.0
+            if dep and bl and n > 0:
+                dep_counts[str(bl).strip()][str(dep).strip()] = n
+    wb.close()
+
+    ubi2info, dep2dists = _load_poblacion_distrital(pob_path)
+
+    def pool_departamento(depto):
+        dn = norm(depto)
+        pool = list(dep2dists.get(dn, []))
+        if dn == "LIMA":
+            for k, v in dep2dists.items():
+                if "CALLAO" in k:
+                    pool += v
+        return pool
+
+    share = defaultdict(float)
+    conteo = defaultdict(float)
+    meta = {}
+
+    for p in ponder:
+        bl_pond, peso, metodo = p["bl"], p["peso"], p["metodo"]
+        if peso <= 0:
+            continue
+        if metodo.startswith("ANCLA"):
+            filtro = [x.strip() for x in p["filtro"].split(";")] if p["filtro"] != "*" else "*"
+            locs = _leer_ancla_departamental(risk_path, p["hoja"], filtro)
+            M = len(locs)
+            if M == 0:
+                log(f"   [{emisor}] anclaje '{bl_pond}' sin ubicaciones; peso {peso:.4f} no mapeado.", "WARN")
+                continue
+            w = peso / M
+            for (dep, prov, dist, marca) in locs:
+                etiqueta = marca or bl_pond
+                key = (dep, prov, dist, etiqueta)
+                share[key] += w
+                conteo[key] += 1
+                meta[key] = {"metodo": "anclaje", "bl_pond": bl_pond, "depto_asig": dep,
+                             "n_depto": None, "pob_dist": None, "pob_depto": None,
+                             "peso_pond": peso, "total_pond": M}
+        else:
+            counts_dep = dep_counts.get(bl_pond, {})
+            Ntot = sum(counts_dep.values())
+            if Ntot <= 0:
+                log(f"   [{emisor}] '{bl_pond}' (poblacion) sin conteos; peso {peso:.4f} no mapeado.", "WARN")
+                continue
+            for depto, N in counts_dep.items():
+                pool = pool_departamento(depto)
+                tot_pob = sum(pb for _, pb in pool)
+                if tot_pob <= 0:
+                    log(f"   [{emisor}] sin población para '{depto}' ({bl_pond}); se omite.", "WARN")
+                    continue
+                for (u, pb) in pool:
+                    dep2, prov2, dist2, _ = ubi2info[u]
+                    frac = pb / tot_pob
+                    key = (dep2, prov2, dist2, bl_pond)
+                    share[key] += peso * (N / Ntot) * frac
+                    conteo[key] += N * frac
+                    meta[key] = {"metodo": "poblacion", "bl_pond": bl_pond, "depto_asig": depto,
+                                 "n_depto": N, "pob_dist": pb, "pob_depto": tot_pob,
+                                 "peso_pond": peso, "total_pond": Ntot}
+
+    filas = []
+    for k, sh in share.items():
+        dep, prov, dist, bl = k
+        m = meta[k]
+        filas.append({"depto": dep, "prov": prov, "dist": dist, "business_line": bl,
+                      "conteo": conteo[k], "share": sh, **m})
+    return filas
+
+
+def load_empresa_departamental(risk_path, pob_path, emisor):
+    filas = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        return _df_actividad([])
+    out = []
+    for f in filas:
+        out.append({
+            "mineral": f["business_line"], "unidad": "activos", "titular": emisor,
+            "unidad_minera": f'{emisor} - {f["dist"]} ({f["business_line"]})',
+            "depto": f["depto"], "prov": f["prov"], "dist": f["dist"],
+            "acum": round(f["conteo"], 2), "unidad_norm": "activos",
+            "factor": 1.0, "tmf": f["share"], "empresa": emisor,
+        })
+    df = _df_actividad(out)
+    n_bl = len({f["business_line"] for f in filas})
+    n_dist = len({(f["depto"], f["prov"], f["dist"]) for f in filas})
+    log(f"   [{emisor}] departamental: {n_dist} distrito(s) x {n_bl} business line | "
+        f"activos≈{sum(f['conteo'] for f in filas):.0f} | suma peso={sum(f['share'] for f in filas):.4f}")
+    return df
+
+
+def _activos_fisicos_por_region_fen(risk_path):
+    """{emisor: {'Región - Categoría': conteo_fisico}} desde 'Activos
+       Departamentales' + 'FEN_Apoyo'. El emisor base recibe todas las business
+       lines; las de FEN_SUBEMISOR_POR_BL suman además a su emisor separado."""
+    import openpyxl
+    from collections import defaultdict
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+    hoja_fen = _buscar_hoja(wb.sheetnames, "FEN_Apoyo") or ("FEN_Apoyo" if "FEN_Apoyo" in wb.sheetnames else None)
+    dep2label = {}
+    if hoja_fen and hoja_fen in wb.sheetnames:
+        wf = wb[hoja_fen]
+        hf = [norm(wf.cell(1, c).value) for c in range(1, wf.max_column + 1)]
+        def f2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                if t in hf:
+                    return hf.index(t) + 1
+            return None
+        cD = f2("Departamento") or 1; cC = f2("Categoria") or 2; cR = f2("Region") or 3
+        for r in range(2, wf.max_row + 1):
+            dep = wf.cell(r, cD).value
+            if not dep:
+                continue
+            cat = wf.cell(r, cC).value; reg = wf.cell(r, cR).value
+            if reg and cat:
+                dep2label[norm(dep)] = f"{str(reg).strip()} - {str(cat).strip()}"
+            elif reg:
+                dep2label[norm(dep)] = str(reg).strip()
+    hoja_a = _buscar_hoja(wb.sheetnames, DEP_SHEET_ACTIVOS)
+    out = defaultdict(lambda: defaultdict(float))
+    if hoja_a:
+        wa = wb[hoja_a]
+        h2 = [norm(wa.cell(1, c).value) for c in range(1, wa.max_column + 1)]
+        def a2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                for i, h in enumerate(h2):
+                    if t and t in h:
+                        return i + 1
+            return None
+        jEm = a2("Emisor"); jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        for r in range(2, wa.max_row + 1):
+            em = wa.cell(r, jEm).value if jEm else None
+            if not em:
+                continue
+            dep = wa.cell(r, jDe).value; bl = wa.cell(r, jBL).value; n = wa.cell(r, jN).value
+            try:
+                n = float(n)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            label = dep2label.get(norm(dep))
+            if not label:
+                continue
+            out[str(em).strip()][label] += n
+            for bl_key, emi2 in FEN_SUBEMISOR_POR_BL.items():
+                if norm(bl_key) in norm(bl):
+                    out[emi2][label] += n
+    wb.close()
+    return {e: {lbl: int(round(v)) for lbl, v in d.items()} for e, d in out.items()}
+
+
+def _agregar_hoja_metodologia_dep(wb, risk_path, pob_path, emisor):
+    """Agrega al workbook 'wb' una hoja auditable del proxy poblacional del emisor,
+       con fórmulas para % pob distrital, activos asignados y % de distribución."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from collections import OrderedDict
+    filas = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        log(f"   [{emisor}] sin datos para la hoja de metodología.", "WARN")
+        return
+    AZUL = "1E2E6E"; CYAN = "00AECB"
+    HDR = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    TIT = Font(name="Calibri", size=13, bold=True, color=AZUL)
+    SUB = Font(name="Calibri", size=9, italic=True, color="595959")
+    BOLD = Font(name="Calibri", size=10, bold=True)
+    BODY = Font(name="Calibri", size=10)
+    fH = PatternFill("solid", fgColor=AZUL)
+    fP = PatternFill("solid", fgColor="EAF6F8")
+    fIn = PatternFill("solid", fgColor="FFF3B0")
+    thin = Side(style="thin", color="D9D9D9")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    AL = Alignment(horizontal="left"); AC = Alignment(horizontal="center"); AR = Alignment(horizontal="right")
+
+    nombre = f"Metodología {emisor}"[:31]
+    if nombre in wb.sheetnames:
+        del wb[nombre]
+    ws = wb.create_sheet(nombre)
+    ws.sheet_view.showGridLines = False
+
+    ws["A1"] = f"Metodología de distribución distrital — {emisor}"; ws["A1"].font = TIT
+    ws["A2"] = ("Mass y Pharmacies se reparten a distrito con POBLACIÓN INEI como proxy dentro de cada "
+                "departamento: activos_distrito = N_depto × (pob_distrito / pob_departamento). "
+                "Makro / Plaza Vea / Vivanda / Shopping Malls se anclan a ubicaciones conocidas.")
+    ws["A2"].font = SUB
+    ws["A3"] = ("Callao se agrupa dentro de 'Lima' para el proxy poblacional. Las celdas amarillas son "
+                "insumos; las columnas J, K y L son fórmulas que puedes auditar. % Distribución suma 100%.")
+    ws["A3"].font = SUB
+
+    # ---- Bloque de parámetros por línea de ponderación (para el VLOOKUP) ----
+    par = OrderedDict()
+    for f in filas:
+        par.setdefault(f["bl_pond"], (f["metodo"], f["peso_pond"], f["total_pond"]))
+    ws["A5"] = "Parámetros por línea de negocio (ponderación)"; ws["A5"].font = BOLD
+    ph = ["Línea (ponderación)", "Método", "Peso (revenue)", "Total activos (nacional)"]
+    for c, h in enumerate(ph, 1):
+        cc = ws.cell(6, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    prow0 = 7
+    for i, (blp, (met, peso, tot)) in enumerate(par.items()):
+        r = prow0 + i
+        ws.cell(r, 1, blp).font = BODY
+        ws.cell(r, 2, met).font = BODY
+        cc = ws.cell(r, 3, peso); cc.font = BODY; cc.number_format = "0.000000"; cc.fill = fIn
+        cc = ws.cell(r, 4, int(round(tot))); cc.font = BODY; cc.number_format = "#,##0"; cc.fill = fIn
+        for c in range(1, 5):
+            ws.cell(r, c).border = box
+    prow1 = prow0 + len(par) - 1
+    PARR = f"$A${prow0}:$D${prow1}"   # rango para VLOOKUP
+
+    # ---- Detalle por distrito × business line ----
+    hrow = prow1 + 3
+    ws.cell(hrow - 1, 1, "Detalle por distrito × business line").font = BOLD
+    dh = ["Business Line", "Línea (ponderación)", "Método", "Departamento",
+          "Provincia", "Distrito", "N activos depto", "Pob. distrito",
+          "Pob. departamento", "% pob. distrito", "Activos asignados", "% Distribución"]
+    for c, h in enumerate(dh, 1):
+        cc = ws.cell(hrow, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    orden = {"Makro": 0, "Plaza Vea": 1, "Vivanda": 2, "Mass": 3, "Pharmacies": 4, "Shopping Malls": 5}
+    filas_ord = sorted(filas, key=lambda f: (orden.get(f["business_line"], 9),
+                                             f["business_line"], f["depto_asig"] or "", -f["share"]))
+    r = hrow + 1
+    first = r
+    for f in filas_ord:
+        pob_line = (f["metodo"] == "poblacion")
+        ws.cell(r, 1, f["business_line"]).font = BODY
+        ws.cell(r, 2, f["bl_pond"]).font = BODY
+        ws.cell(r, 3, f["metodo"]).font = BODY
+        ws.cell(r, 4, f["depto_asig"]).font = BODY
+        ws.cell(r, 5, f["prov"]).font = BODY
+        ws.cell(r, 6, f["dist"]).font = BODY
+        if pob_line:
+            cc = ws.cell(r, 7, int(round(f["n_depto"]))); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 8, round(f["pob_dist"])); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 9, round(f["pob_depto"])); cc.number_format = "#,##0"; cc.fill = fIn
+            ws.cell(r, 10, f"=IF(I{r}=0,0,H{r}/I{r})").number_format = "0.0000%"
+            ws.cell(r, 11, f"=G{r}*J{r}").number_format = "#,##0.00"
+        else:
+            ws.cell(r, 7, "—").alignment = AC
+            ws.cell(r, 8, "—").alignment = AC
+            ws.cell(r, 9, "—").alignment = AC
+            ws.cell(r, 10, "—").alignment = AC
+            cc = ws.cell(r, 11, round(f["conteo"])); cc.number_format = "#,##0"
+        # % Distribución = peso × (asignados / total)  -> VLOOKUP a parámetros
+        ws.cell(r, 12, f"=VLOOKUP($B{r},{PARR},3,0)*(K{r}/VLOOKUP($B{r},{PARR},4,0))").number_format = "0.0000%"
+        for c in range(1, 13):
+            ws.cell(r, c).font = BODY if c != 12 else BOLD
+            ws.cell(r, c).border = box
+        if (r - first) % 2 == 1:
+            for c in range(1, 13):
+                if ws.cell(r, c).fill.fgColor.rgb in (None, "00000000"):
+                    ws.cell(r, c).fill = fP
+        r += 1
+    last = r - 1
+    # fila total
+    ws.cell(r, 1, "TOTAL").font = BOLD
+    cc = ws.cell(r, 11, f"=SUM(K{first}:K{last})"); cc.font = BOLD; cc.number_format = "#,##0.00"
+    cc = ws.cell(r, 12, f"=SUM(L{first}:L{last})"); cc.font = BOLD; cc.number_format = "0.0000%"
+    for c in range(1, 13):
+        ws.cell(r, c).border = box
+
+    ws.freeze_panes = f"A{hrow + 1}"
+    for c, w in zip("ABCDEFGHIJKL", [16, 18, 11, 15, 18, 22, 14, 13, 15, 13, 15, 14]):
+        ws.column_dimensions[c].width = w
+    log(f"   [{emisor}] hoja de metodología agregada al Excel ({last - first + 1} filas).")
+    return nombre
