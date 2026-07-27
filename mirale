@@ -1,0 +1,124 @@
+Todo claro y alineado. Reúno las ubicaciones exactas en tu script para darte instrucciones precisas (quitar el filtro CENEPRED en las dos tablas, el override de conteo para InRetail, la hoja de metodología dentro del Excel, y quitar el archivo separado).Hay dos generadores de Excel. Ubico cuál produce el archivo de cartera (con las hojas por empresa) para meter ahí la hoja de metodología.Ya identifiqué todo: la hoja de metodología va en **`generar_excel_riesgos`** ("Riesgos Climáticos"). Veo las firmas y puntos de enganche exactos.Necesito ver si `risk_path` está disponible donde se llama a `generar_excel_riesgos` (para la hoja de metodología, que lo requiere).Tengo todo mapeado. `generar_dashboard_activos` (que llama a ambos generadores) sí tiene `risk_path`, así que puedo pasarlo. Escribo el módulo actualizado (con el detalle poblacional enriquecido, la hoja de metodología con fórmulas, y la función de conteos FEN) y lo pruebo antes de darte las instrucciones.Ahora escribo el módulo completo actualizado. Es extenso; lo construyo y pruebo end-to-end.Ahora pruebo el módulo v3 completo: reparto enriquecido, conteos FEN (deben dar 4279/989/6), y la hoja de metodología con recálculo de fórmulas.Todo valida perfecto:
+- **Conteos FEN: InRetail total = 4279, Norte = 989; Shopping Malls = 23, Norte = 6** — exactamente tus cifras.
+- Reparto suma tmf = 1.0; hoja metodología recalculada limpia (9142 fórmulas, 0 errores).
+
+Verifico que el % Distribución de la hoja sume 100% y reviso filas de muestra.Todo validado end-to-end. Reviso la muestra: Makro anclado da 0.02273 (=0.36375/16), Mass en Cerro Colorado da %pob=16.01% → asignados=23.06 → %dist=0.00053, y el **TOTAL de % Distribución = 100%**. Las fórmulas se auditan solas. Copio el módulo final y preparo las instrucciones.Todo probado y validado con tus datos reales. Te dejo los dos archivos y luego las instrucciones exactas.Los archivos: **`modulo_departamental.py`** (reemplaza el que pegaste) y **`EJEMPLO_Hoja_Metodologia_InRetail.xlsx`** (cómo se verá la hoja nueva, con datos reales).
+
+Ahora las instrucciones sobre tu script. Haz respaldo antes.
+
+## PASO 1 — Reemplazar el módulo
+Borra el bloque que pegaste antes (desde `# %% ===… EMPRESAS "DEPARTAMENTALES"` hasta el final de `exportar_metodologia_departamental`) y pega **todo** el nuevo `modulo_departamental.py`.
+
+## PASO 2 — Quitar el archivo separado
+En el bloque `DEP_DISTS` (líneas **7505–7506**), **borra** estas dos líneas:
+```python
+                if EXPORT_METODOLOGIA_DEP:
+                    exportar_metodologia_departamental(risk_path, _pob_path, _emi, OUT_DIR)
+```
+(Debe quedar solo `DEP_DISTS[_emi] = _dfd`.)
+
+## PASO 3 — Hoja de metodología dentro de "Riesgos Climáticos"
+
+**3a. Línea 5900** (firma) — agrega `risk_path=None`:
+```python
+                          periodo, fx, stamp=None, logfn=print):
+```
+→
+```python
+                          periodo, fx, stamp=None, risk_path=None, logfn=print):
+```
+
+**3b. Línea 5371** (llamada) — pasa `risk_path`:
+```python
+                              mitigantes, periodo, fx, stamp, logfn=logfn)
+```
+→
+```python
+                              mitigantes, periodo, fx, stamp, risk_path=risk_path, logfn=logfn)
+```
+
+**3c. Línea ~6127** — justo **antes** de `os.makedirs(out_dir, exist_ok=True)`, inserta:
+```python
+    # Hoja(s) de metodología del proxy departamental (InRetail y afines)
+    if risk_path and EMPRESAS_DEPARTAMENTAL:
+        try:
+            _pobp = find_file(POBLACION_DIR, POBLACION_PATTERNS, "Población distrital INEI")
+            for _emi in EMPRESAS_DEPARTAMENTAL:
+                _agregar_hoja_metodologia_dep(wb, risk_path, _pobp, _emi)
+        except Exception as _e:
+            logfn(f"[Activos] No se pudo agregar la hoja de metodología: {_e}")
+
+```
+
+## PASO 4 — FEN: conteo físico por región (sin filtro CENEPRED)
+
+**4a. Línea 4233** (firma `export_html_fen`) — agrega el parámetro al final:
+```python
+                    geojson_distrital, scores, region_dep=None):
+```
+→
+```python
+                    geojson_distrital, scores, region_dep=None, activos_fisicos_fen=None):
+```
+
+**4b. Línea 4250** — después de la línea `"region_dep": region_dep or {},...`, agrega:
+```python
+        "activos_fisicos_fen": activos_fisicos_fen or {},
+```
+
+**4c. En `_generar_fen_chart`:** después de `if not fen_dep:` / `return` (línea ~4907), agrega una línea:
+```python
+        activos_fisicos_fen = _activos_fisicos_por_region_fen(risk_path)
+```
+Y en la llamada a `export_html_fen` (línea ~4927), antes de `region_dep=region_dep,`, agrega:
+```python
+            activos_fisicos_fen=activos_fisicos_fen,
+```
+
+**4d. Línea 4501** (JS) — después de `const REGION_DEP = ...`, agrega:
+```javascript
+const ACTIVOS_FISICOS_FEN = P.activos_fisicos_fen || {};
+```
+
+**4e. Reemplaza toda la función `buildRegionGroups` (líneas 4721–4740)** por esta (quita el filtro CENEPRED y agrega el override):
+```javascript
+function buildRegionGroups(){
+  const grupos = {};
+  D.forEach(d=>{
+    const label = regionLabelOfDep(normDep(d.dep));
+    if(!label) return;
+    const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+    (d.ap||[]).forEach(a=>{
+      const m = a.m * classFrac(a.e);
+      if(m<=0) return;
+      const nAct = (a.ac && a.ac.length) ? a.ac.length : 1;
+      g.aum += m;
+      const e = g.emp[a.e] || (g.emp[a.e]={sector: EMP_SEC[a.e]||a.s||'', n:0, aum:0});
+      e.n += nAct;
+      e.aum += m;
+    });
+  });
+  // Conteo "Activos Físicos" de emisores departamentales (InRetail / Shopping
+  // Malls): usar el conteo físico de 'Activos Departamentales' por región.
+  Object.keys(ACTIVOS_FISICOS_FEN).forEach(emisor=>{
+    const porReg = ACTIVOS_FISICOS_FEN[emisor] || {};
+    Object.keys(porReg).forEach(label=>{
+      const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+      const e = g.emp[emisor] || (g.emp[emisor]={sector: EMP_SEC[emisor]||'', n:0, aum:0});
+      e.n = porReg[label];
+    });
+  });
+  return grupos;
+}
+```
+
+**4f. (opcional) Línea 4450** — actualiza la nota para que no diga que filtra por CENEPRED:
+```html
+    <p class="note">Regiones definidas en FEN_Apoyo, etiquetadas como «Región - Categoría». El conteo de activos físicos de InRetail e InRetail Shopping Malls proviene de la hoja «Activos Departamentales». El AUM respeta la pestaña de clase activa.</p>
+```
+
+## Resultado
+- **FEN:** InRetail mostrará **4279** (todas las regiones), **989** en Norte-Lluvias, y InRetail Shopping Malls **6** en Norte — fiel a `Activos Departamentales` + `FEN_Apoyo`, sin filtro CENEPRED en las dos tablas.
+- **Excel Riesgos Climáticos:** nueva hoja **"Metodología InRetail"** con el bloque de parámetros y el detalle distrito×business line, con fórmulas vivas (`% pob = pob_dist/pob_depto`, `asignados = N_depto × %pob`, `% Distribución` vía VLOOKUP) que suman 100%.
+
+Una nota honesta: en esa hoja el TOTAL de "Activos asignados" da **4256** (refleja el reparto real: anclas Makro 16 / PV-Vivanda 101 / Malls 20 + población 1590/2529), que difiere levemente del **4279** del FEN — porque el FEN, por tu pedido explícito, usa los conteos departamentales de `Activos Departamentales`, mientras que la metodología ancla a las ubicaciones reales de las hojas. Son dos vistas distintas y ambas correctas según tu modelo.
