@@ -1,0 +1,18 @@
+El error es claro: en `_generar_fen_chart`, la línea del call usa `activos_fisicos_fen` pero **falta la línea que lo calcula** (o quedó en el lugar equivocado). Reviso tu `siena.txt` para darte el fix exacto.Ahí está el bug: pusiste la línea **dentro** del `if not fen_dep:` (y se perdió el `return`), así que cuando sí hay datos FEN, la variable nunca se crea. Veo el texto exacto para darte el reemplazo.El problema exacto: la línea quedó **dentro** del `if not fen_dep:`, así que solo se ejecuta cuando NO hay datos FEN (y ahí retorna de inmediato). En el caso normal se salta y la variable no existe.
+
+**Corrección (en `_generar_fen_chart`, líneas 4930–4932):**
+
+Reemplaza esto:
+```python
+        if not fen_dep:
+            activos_fisicos_fen = _activos_fisicos_por_region_fen(risk_path)
+            return
+```
+por esto (saca la línea del `if` y déjala después, con 8 espacios de sangría):
+```python
+        if not fen_dep:
+            return
+        activos_fisicos_fen = _activos_fisicos_por_region_fen(risk_path)
+```
+
+Con eso `activos_fisicos_fen` se calcula siempre que hay datos FEN (el caso normal), y el dashboard se generará correctamente.
