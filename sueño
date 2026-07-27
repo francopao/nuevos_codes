@@ -1,0 +1,157 @@
+Escribo las dos funciones modificadas (con Hamilton/Hare) y las pruebo end-to-end con tus archivos reales.Hamilton funciona: **1118 filas** (cayeron los ceros), **todos enteros**, suma conteo = 4256, cada BL conserva su total, y Habana ya no aparece (quedó en 0). Verifico que los pesos revenue (share por BL) se conserven y pruebo la hoja con las nuevas columnas.Validación perfecta:
+- **Pesos revenue conservados exactos** (Makro 0.363750, Mass 0.036375, etc.), suma share = 1.0.
+- Activos **todos enteros**, totales por BL conservados, Habana y similares caen a 0 (se omiten).
+- Hoja recalculada limpia (2043 fórmulas, 0 errores).
+
+Confirmo dónde terminan las funciones para darte los rangos exactos de reemplazo.Todo probado y correcto. Aquí van **únicamente las dos modificaciones** para tu `siena.txt`.
+
+## Cambio 1 — Aplicar Hamilton/Hare en el reparto
+
+En la función **`_construir_reparto_departamental`**, ubica cerca del final estas líneas:
+```python
+    filas = []
+    for k, sh in share.items():
+```
+**Justo ANTES de `    filas = []`**, inserta este bloque (respeta los 4 espacios de sangría):
+```python
+    # ---- Hamilton/Hare: enteros por (departamento × business line) en método
+    #      'poblacion'. Los distritos con cuota redondeada a 0 se eliminan y su
+    #      peso de exposición se redistribuye entre los que conservan >=1 activo
+    #      (se conservan el total físico por depto y el peso del grupo). ----
+    grupos_pob = defaultdict(list)
+    for k, mm in meta.items():
+        if mm["metodo"] == "poblacion":
+            grupos_pob[(mm["depto_asig"], mm["bl_pond"])].append(k)
+    a_borrar = []
+    for (dep_a, blp), claves in grupos_pob.items():
+        N = int(round(meta[claves[0]]["n_depto"]))
+        suma_c = sum(conteo[k] for k in claves) or 1.0
+        enteros = _reparto_mayor_resto(N, [conteo[k] / suma_c for k in claves])
+        total_grupo = sum(share[k] for k in claves)
+        sobreviven = []
+        for k, e in zip(claves, enteros):
+            meta[k]["cuota_exacta"] = conteo[k]      # cuota fraccional (auditoría)
+            conteo[k] = e
+            (sobreviven if e > 0 else a_borrar).append(k)
+        s_surv = sum(share[k] for k in sobreviven)
+        if s_surv > 0:
+            factor = total_grupo / s_surv
+            for k in sobreviven:
+                share[k] *= factor
+    for k in a_borrar:
+        share.pop(k, None); conteo.pop(k, None); meta.pop(k, None)
+    for k, mm in meta.items():                       # anclaje: cuota = su entero
+        mm.setdefault("cuota_exacta", conteo[k])
+
+```
+Con esto, `conteo` (que alimenta el mapa, tooltips y la columna de activos) queda **entero**, los distritos en 0 se eliminan, y `share` (la exposición) se redistribuye conservando el peso de cada línea y sumando 1.
+
+## Cambio 2 — Mostrar el entero en la hoja de metodología
+
+**Reemplaza toda la función `_agregar_hoja_metodologia_dep`** (desde su `def _agregar_hoja_metodologia_dep(...)` hasta su `return nombre`) por esta versión (columna K = entero, columna L = % exacto, y nueva columna M = "Cuota exacta" con la fracción para que el comité vea de dónde salió el entero):
+
+```python
+def _agregar_hoja_metodologia_dep(wb, risk_path, pob_path, emisor):
+    """Hoja auditable del proxy poblacional. Activos asignados (K) son ENTEROS
+       (Hamilton/Hare); % Distribución (L) es la exposición exacta que suma 100%;
+       Cuota exacta (M) es la fracción proporcional a población, de referencia."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from collections import OrderedDict
+    filas = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        log(f"   [{emisor}] sin datos para la hoja de metodología.", "WARN")
+        return
+    AZUL = "1E2E6E"
+    HDR = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    TIT = Font(name="Calibri", size=13, bold=True, color=AZUL)
+    SUB = Font(name="Calibri", size=9, italic=True, color="595959")
+    BOLD = Font(name="Calibri", size=10, bold=True)
+    BODY = Font(name="Calibri", size=10)
+    fH = PatternFill("solid", fgColor=AZUL); fIn = PatternFill("solid", fgColor="FFF3B0")
+    thin = Side(style="thin", color="D9D9D9"); box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    AC = Alignment(horizontal="center")
+
+    nombre = f"Metodología {emisor}"[:31]
+    if nombre in wb.sheetnames:
+        del wb[nombre]
+    ws = wb.create_sheet(nombre); ws.sheet_view.showGridLines = False
+
+    ws["A1"] = f"Metodología de distribución distrital — {emisor}"; ws["A1"].font = TIT
+    ws["A2"] = ("Mass y Pharmacies: proxy POBLACIÓN INEI dentro del departamento. Cuota exacta = "
+                "N_depto × (pob_distrito / pob_departamento). Los 'Activos asignados' (col K) son ENTEROS "
+                "por el método del mayor resto (Hamilton/Hare): el total por departamento se conserva y los "
+                "distritos con cuota baja quedan en 0 (se omiten). Makro/Plaza Vea/Vivanda/Shopping Malls se anclan.")
+    ws["A2"].font = SUB
+    ws["A3"] = ("'% Distribución' (col L) reparte la EXPOSICIÓN de forma continua y suma 100% (el peso de los "
+                "distritos en 0 se redistribuye entre los que conservan ≥1 activo). Callao se agrupa en 'Lima'.")
+    ws["A3"].font = SUB
+
+    # Parámetros por línea de ponderación
+    par = OrderedDict()
+    for f in filas:
+        par.setdefault(f["bl_pond"], (f["metodo"], f["peso_pond"], f["total_pond"]))
+    ws["A5"] = "Parámetros por línea de negocio (ponderación)"; ws["A5"].font = BOLD
+    for c, h in enumerate(["Línea (ponderación)", "Método", "Peso (revenue)", "Total activos (nacional)"], 1):
+        cc = ws.cell(6, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    pr0 = 7
+    for i, (blp, (met, peso, tot)) in enumerate(par.items()):
+        r = pr0 + i
+        ws.cell(r, 1, blp).font = BODY; ws.cell(r, 2, met).font = BODY
+        cc = ws.cell(r, 3, peso); cc.number_format = "0.000000"; cc.fill = fIn
+        cc = ws.cell(r, 4, int(round(tot))); cc.number_format = "#,##0"; cc.fill = fIn
+        for c in range(1, 5):
+            ws.cell(r, c).border = box
+
+    # Detalle por distrito × business line
+    hrow = pr0 + len(par) + 2
+    ws.cell(hrow - 1, 1, "Detalle por distrito × business line").font = BOLD
+    dh = ["Business Line", "Línea (ponderación)", "Método", "Departamento", "Provincia",
+          "Distrito", "N activos depto", "Pob. distrito", "Pob. departamento",
+          "% pob. distrito", "Activos asignados (entero)", "% Distribución (exposición)",
+          "Cuota exacta (proxy)"]
+    for c, h in enumerate(dh, 1):
+        cc = ws.cell(hrow, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    orden = {"Makro": 0, "Plaza Vea": 1, "Vivanda": 2, "Mass": 3, "Pharmacies": 4, "Shopping Malls": 5}
+    fo = sorted(filas, key=lambda f: (orden.get(f["business_line"], 9), f["business_line"],
+                                      f["depto_asig"] or "", -f["share"]))
+    r = hrow + 1; first = r
+    for f in fo:
+        pob = (f["metodo"] == "poblacion")
+        ws.cell(r, 1, f["business_line"]).font = BODY
+        ws.cell(r, 2, f["bl_pond"]).font = BODY
+        ws.cell(r, 3, f["metodo"]).font = BODY
+        ws.cell(r, 4, f["depto_asig"]).font = BODY
+        ws.cell(r, 5, f["prov"]).font = BODY
+        ws.cell(r, 6, f["dist"]).font = BODY
+        if pob:
+            cc = ws.cell(r, 7, int(round(f["n_depto"]))); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 8, round(f["pob_dist"])); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 9, round(f["pob_depto"])); cc.number_format = "#,##0"; cc.fill = fIn
+            ws.cell(r, 10, f"=IF(I{r}=0,0,H{r}/I{r})").number_format = "0.0000%"
+            ws.cell(r, 13, f"=G{r}*J{r}").number_format = "#,##0.0000"
+        else:
+            for c in (7, 8, 9, 10, 13):
+                ws.cell(r, c, "—").alignment = AC
+        cc = ws.cell(r, 11, int(round(f["conteo"]))); cc.number_format = "#,##0"     # K: entero
+        cc = ws.cell(r, 12, f["share"]); cc.number_format = "0.0000%"                # L: exposición exacta
+        for c in range(1, 14):
+            ws.cell(r, c).font = BODY if c != 11 else BOLD
+            ws.cell(r, c).border = box
+        r += 1
+    last = r - 1
+
+    ws.cell(r, 1, "TOTAL").font = BOLD
+    cc = ws.cell(r, 11, f"=SUM(K{first}:K{last})"); cc.font = BOLD; cc.number_format = "#,##0"
+    cc = ws.cell(r, 12, f"=SUM(L{first}:L{last})"); cc.font = BOLD; cc.number_format = "0.0000%"
+    cc = ws.cell(r, 13, f"=SUM(M{first}:M{last})"); cc.font = BOLD; cc.number_format = "#,##0.00"
+    for c in range(1, 14):
+        ws.cell(r, c).border = box
+
+    ws.freeze_panes = f"A{hrow + 1}"
+    for c, w in zip("ABCDEFGHIJKLM", [16, 18, 11, 15, 18, 22, 13, 12, 15, 12, 15, 15, 14]):
+        ws.column_dimensions[c].width = w
+    log(f"   [{emisor}] hoja de metodología agregada al Excel ({last - first + 1} filas, activos enteros).")
+    return nombre
+```
+
+Eso es todo. Al ejecutar: en el mapa y en la hoja los activos serán enteros (1, 2, 3…), habrá distritos en 0 que desaparecen, el total físico por departamento se mantiene, y la columna "% Distribución" seguirá repartiendo la exposición fina y sumando 100%.
