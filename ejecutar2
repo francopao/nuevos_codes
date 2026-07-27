@@ -1,0 +1,114 @@
+Aquí tienes únicamente los cambios que debes aplicar al script que ya tienes (el que generé la vez anterior). El error de consola es porque `ruta_proxies` apuntaba a un path que no existe; de paso, al revisar tu archivo real encontré que la hoja mensual de proxies tiene la estructura de "TD" (fondos/ETF), no la de "Dashboard MSCI" (BU), así que el mapeo de columnas también estaba mal. Son 4 cambios puntuales:
+
+**1) Bloque "Configuración de la capa de Proxies ESG" — variable `ruta_proxies`**
+
+Reemplaza la línea completa de `ruta_proxies` por:
+
+```python
+ruta_proxies = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\2. Reportes\\Medición Huella de Carbono\\Huella Total  (SURA e Integra)\\Lista Proxies - Huella y Comite mensual ASG.xlsx'
+```
+
+(Ojo: hay **doble espacio** entre "Huella Total" y "(SURA e Integra)" en tu ruta real; respétalo tal cual.)
+
+**2) Mismo bloque de configuración — lista `MAPEO_PROXY_COLUMNAS`**
+
+Reemplázala completa por esta (la hoja mensual de proxies usa los mismos campos que tu función `Detallado_TD`, no los de `Base_BU`):
+
+```python
+MAPEO_PROXY_COLUMNAS = [
+    ('Nombre_MSCI', 'Nombre_MSCI'),
+    ('ISSUER_CNTRY_DOMICILE', 'ISSUER_CNTRY_DOMICILE'),
+    ('RATING', 'RATING'),
+    ('E', 'E'),
+    ('S', 'S'),
+    ('G', 'G'),
+    ('EW', 'EW'),
+    ('SW', 'SW'),
+    ('GW', 'GW'),
+    ('CONTROVERSIES', 'CONTROVERSIES'),
+    ('CO2/Sales', 'CO2/Sales'),
+    ('FUND_ESG_COVERAGE', 'FUND_ESG_COVERAGE'),
+    ('FUND_ESG_LEADERS_PCT', 'FUND_ESG_LEADERS_PCT'),
+    ('FUND_ESG_AVERAGE_PCT', 'FUND_ESG_AVERAGE_PCT'),
+    ('FUND_ESG_LAGGARDS_PCT', 'FUND_ESG_LAGGARDS_PCT'),
+    ('FUND_ESG_QUALITY_SCORE', 'FUND_ESG_QUALITY_SCORE'),
+    ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV'),
+    ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE'),
+    ('FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL', 'FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL'),
+    ('FUND_GOV_GLOBAL_LEADERS_PCT', 'FUND_GOV_GLOBAL_LEADERS_PCT'),
+    ('FUND_GOV_GLOBAL_AVERAGE_PCT', 'FUND_GOV_GLOBAL_AVERAGE_PCT'),
+    ('FUND_GOV_GLOBAL_LAGGARDS_PCT', 'FUND_GOV_GLOBAL_LAGGARDS_PCT'),
+    ('FUND_FINANCED_CARBON_EMISSIONS', 'FUND_FINANCED_CARBON_EMISSIONS'),
+    ('INDUSTRY_ADJUSTED_SCORE', 'INDUSTRY_ADJUSTED_SCORE'),
+    ('CO2/EVIC', 'CO2/EVIC'),
+    ('GOVERNANCE_PILLAR_QUARTILE', 'GOVERNANCE_PILLAR_QUARTILE'),
+    ('ITR', 'FUND_ITR_BAND'),
+]
+```
+
+(Quité `IVA_INDUSTRY`, `IVA_RATING_TREND`, `CARBON_EMISSIONS_SCORE`, `CARBON_EMISSIONS_EXP_SCORE`, `CORP_GOVERNANCE_SCORE`, `GOVERNANCE_PCTL_GLOBAL` y `CO2 Tn`: no existen en la hoja mensual de proxies, igual que en tu `Detallado_TD` original esos campos tampoco se completan para TD.)
+
+**3) Dentro de la función `cargar_mapa_proxies` (hoja "Reporte ASG Mensual")**
+
+Tu hoja real tiene **dos columnas llamadas "Proxy"** (H e I), por lo que seleccionar por nombre de columna trae ambas y rompe el mapeo. Reemplaza estas líneas:
+
+```python
+    isin_col = df_map.columns[1]   # Columna B: ISIN original
+    proxy_col = df_map.columns[7]  # Columna H: Proxy
+
+    df_map = df_map[[isin_col, proxy_col]].dropna()
+    df_map[isin_col] = df_map[isin_col].astype(str).str.strip().str.upper()
+    df_map[proxy_col] = df_map[proxy_col].astype(str).str.strip().str.upper()
+    df_map = df_map.drop_duplicates(subset=[isin_col])
+
+    return df_map.set_index(isin_col)[proxy_col].to_dict()
+```
+
+por:
+
+```python
+    df_map = df_map.iloc[:, [1, 7]].copy()  # Columna B (ISIN original) y H (Proxy), por posición
+    df_map.columns = ['ISIN_original', 'ISIN_proxy']
+    df_map = df_map.dropna()
+    df_map['ISIN_original'] = df_map['ISIN_original'].astype(str).str.strip().str.upper()
+    df_map['ISIN_proxy'] = df_map['ISIN_proxy'].astype(str).str.strip().str.upper()
+    df_map = df_map.drop_duplicates(subset=['ISIN_original'])
+
+    return df_map.set_index('ISIN_original')['ISIN_proxy'].to_dict()
+```
+
+**4) Dentro de la función `cargar_esg_proxy` (hoja mensual "YYYYMM")**
+
+Después de estas dos líneas ya existentes:
+
+```python
+    df_esg = pd.DataFrame(datos)
+    df_esg.columns = df_esg.iloc[0, ::]
+    df_esg = df_esg.drop([0], axis=0)
+```
+
+agrega, en el mismo orden que hace tu `Detallado_TD` original con el archivo TD, estas líneas nuevas (antes de `df_esg['Client_ID'] = ...`):
+
+```python
+    df_esg['INDUSTRY_ADJUSTED_SCORE'] = df_esg['FUND_ESG_QUALITY_SCORE']
+    df_esg['CO2/EVIC'] = df_esg['FUND_FINANCED_CARBON_EMISSIONS']
+    df_esg['GOVERNANCE_PILLAR_QUARTILE'] = df_esg['FUND_GOV_GLOBAL_LEADERS_PCT']
+
+    df_esg = df_esg.rename(columns={
+        "FUND_NAME": "Nombre_MSCI",
+        "FUND_DOMICILE": "ISSUER_CNTRY_DOMICILE",
+        "ESG_ENVIRONMENTAL_SCORE": "E",
+        "ESG_SOCIAL_SCORE": "S",
+        "ESG_GOVERNANCE_SCORE": "G",
+        "FUND_ENVIRONMENTAL_WEIGHT": "EW",
+        "FUND_SOCIAL_WEIGHT": "SW",
+        "FUND_GOVERNANCE_WEIGHT": "GW",
+        "FUND_WEIGHTED_AVG_CARBON_INTEN": "CO2/Sales",
+        "FUND_ESG_RATING": "RATING",
+        "FUND_VERY_SEVERE_CONTROVERSY_PCT": "CONTROVERSIES",
+    })
+```
+
+El resto de la función (`df_esg['Client_ID'] = ...`, `drop_duplicates`, `set_index`, `to_dict()`) queda igual, sin tocarlo.
+
+Con estos 4 cambios el resto del script (bloques `Base_BU`, `Detallado_TD`, `Opr`, `Contribuyentes`, y el orden de ejecución) no se modifica.
