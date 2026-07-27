@@ -1,0 +1,96 @@
+Es un ajuste válido y bien acotado. La columna debe mostrar el **share normalizado** (peso ÷ suma de pesos mapeados), que es justo lo que el motor ya usa para repartir la plata — así siempre suma 1. Déjame ubicar la línea exacta donde se escribe esa columna en las hojas por empresa.Ahora lo veo claro y con matices importantes. Déjame darte el diagnóstico honesto y la propuesta.
+
+## Diagnóstico (sé claro contigo)
+
+**1) La plata está bien.** La columna **Exposición (S/) suma el AUM completo** (InRetail: S/ 472,877,942). El motor usa `tmf_share`, que **normaliza internamente**: reparte el 100% del AUM entre los distritos que sí mapearon. No se pierde ni un sol.
+
+**2) La columna "Distribución (%)" muestra el peso CRUDO** (antes de normalizar), por eso da 0.9222. Es solo cosmético, pero tienes razón: **es inconsistente para quien revisa**.
+
+**3) Las otras empresas que listaste (Alicorp, Casa Andina, Primax, Colegios, Tecsup, Integratel, El Comercio) en realidad SÍ dan ~1.0** — los 0.9990 / 1.0004 que ves son **redondeo** de los 4 decimales, no un hueco real. Ahí te equivocaste (como sospechabas). **Pero sí encontré una que no mencionaste: Aenza suma ~10.0** (sus pesos fuente están en otra escala); su exposición igual sale bien por la normalización.
+
+**4) El caso InRetail (0.9222) tiene una causa que vale la pena que sepas:** ~7.8% del peso está en distritos que no geocodificaron, y **no todos son rurales chicos** — hay errores de dato en `Inretail Consumer`:
+- Un **Makro** con `Departamento = Lima, Distrito = Callao` (Callao es su propia región → no mapea).
+- Un **Makro** con `Departamento = Lima, Distrito = Huancayo` (Huancayo es Junín).
+
+Estos dos por sí solos son ~2.27% cada uno. El resto son distritos con nombres que el mapa no reconoce o rurales sin geometría. La plata de todos ellos se redistribuye a los demás distritos (por la normalización), así que la geografía queda levemente desviada pero el monto total es correcto.
+
+## Propuesta
+
+Dos cosas, y te doy las líneas exactas de la **primera** (la que pediste):
+
+**(A) Ajuste cosmético del Excel** — que "Distribución (%)" muestre el share **normalizado** (suma 100% siempre, para toda empresa), y mover el peso crudo a una columna aparte clara. Verifico las líneas exactas.
+
+**(B) Opcional, aparte:** corregir los 2 Makro mal ubicados en `Inretail Consumer` (Callao→Callao, Huancayo→Junín) para recuperar ~4.5% de cobertura real. Eso lo haces tú en el Excel cuando quieras; no es código.
+
+Déjame ubicar las líneas exactas del ajuste (A).Tengo las líneas. Verifico el bloque exacto para darte ediciones sin ambigüedad.Encontré una consideración importante antes de proponerte el cambio: la hoja por empresa **ya tiene DOS columnas** — la F "Distribución (%)" (peso crudo) y la G "% de la empresa" (que ya está **normalizada y suma 100%** mediante la fórmula `F_i / F_total`). O sea, el 100% correcto ya existe, solo está en la columna de al lado con un nombre poco claro. Verifico la línea del encabezado F.Perfecto, ya tengo la solución más limpia y **de riesgo cero**. 
+
+## Propuesta (clara)
+
+No hay que recalcular nada: la hoja por empresa **ya trae la columna normalizada que suma 100%** — es la columna **G "% de la empresa"** (fórmula `F_i / F_total`). El problema es solo de **nombres**: la columna que se llama "Distribución (%)" (F) es el peso crudo, y la que realmente es la distribución (G) tiene un nombre poco claro.
+
+Así que el ajuste es **renombrar** (no tocar ningún valor ni romper otros sectores como minería):
+- Columna **F** → pasa a llamarse **"Peso fuente"** (el peso crudo; su suma <100% te sirve como señal de cobertura).
+- Columna **G** → pasa a llamarse **"Distribución (%)"** (ya está normalizada, suma 100% siempre).
+- Se agrega el total de G para que veas el 100% en la fila TOTAL.
+
+## Las líneas exactas (en `version123.txt`)
+
+**1) Línea 2539** — subtítulo (para que sea coherente con el nuevo nombre de F):
+```python
+        ws["A2"] = (f"{m['peso']} total: {sub['tmf'].sum():,.2f} {m['unidad']}   ·   "
+```
+→ cambia solo el inicio a:
+```python
+        ws["A2"] = (f"Peso fuente total: {sub['tmf'].sum():,.2f} {m['unidad']}   ·   "
+```
+
+**2) Línea 2546** — encabezado de la columna F:
+```python
+        col_peso = f"{m['peso']} ({m['unidad']})"
+```
+→
+```python
+        col_peso = "Peso fuente"
+```
+
+**3) Línea 2547** — encabezado de la columna G:
+```python
+        col_pct = "% de la empresa"
+```
+→
+```python
+        col_pct = "Distribución (%)"
+```
+
+**4) Línea 2571** — fila TOTAL, agregar la suma de G (hoy está vacía `""`):
+```python
+        ws.append(["TOTAL", "", "", "", "", tot_tmf_cell, "", f"=SUM(H{first}:H{last})",
+```
+→
+```python
+        ws.append(["TOTAL", "", "", "", "", tot_tmf_cell, f"=SUM(G{first}:G{last})", f"=SUM(H{first}:H{last})",
+```
+
+**5) Línea 2580** — incluir la columna 7 en negrita:
+```python
+        for c in (1, 6, 8, 12):
+```
+→
+```python
+        for c in (1, 6, 7, 8, 12):
+```
+
+**6) Línea 2582** — formato del total de G (agrega una línea debajo):
+```python
+        ws.cell(trow, 6).number_format = "#,##0.0000"
+```
+→
+```python
+        ws.cell(trow, 6).number_format = "#,##0.0000"
+        ws.cell(trow, 7).number_format = "0.0%"
+```
+
+## Resultado
+En cada hoja por empresa verás **"Distribución (%)" sumando 100.0%** (para InRetail y para todas). La columna **"Peso fuente"** mostrará el crudo (InRetail 0.9222) como señal honesta de cobertura. Minería no se altera: su "Peso fuente" queda en TMF y su "Distribución (%)" en share.
+
+Y aparte, cuando quieras subir esa cobertura real, corrige en `Inretail Consumer` los dos Makro mal ubicados (Callao y Huancayo) — eso es solo dato, sin código.
