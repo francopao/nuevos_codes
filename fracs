@@ -1,0 +1,103 @@
+Etapa 1 andando. Para la Etapa 2 necesito ver exactamente cómo el chart del FEN aplica los conteos de esa función (si sobre-escribe o suma, y cómo maneja Intercorp), porque eso define qué debe devolver la función reescrita. Reviso.Etapa 1 confirmada. Ya tracé cómo el chart aplica los conteos: en `buildRegionGroups` el AUM sale del distrital `D`, y **el conteo se sobre-escribe** con lo que devuelve `_activos_fisicos_por_region_fen` (por emisor y región). O sea, Etapa 2 es **una sola edición**: reescribir esa función para que emita los conteos solapados con los nombres de emisor correctos. Sin tocar JS. Lo pruebo con tus datos antes de dártelo.Verificado con tus datos, y el solapamiento cuadra perfecto:
+
+| Emisor | Total | Norte | Sur | Centro | Oriente |
+|---|---:|---:|---:|---:|---:|
+| InRetail Consumer | 4,256 | 983 | 520 | 2,571 | 182 |
+| Inretail Peru Corp | 4,279 | 989 | 523 | 2,583 | 184 |
+| InRetail Shopping Malls | 23 | 6 | 3 | 12 | 2 |
+
+Consumer + Malls = 4,256 + 23 = **4,279 = Peru Corp** en cada región (983+6=989, etc.). Es decir: Consumer sin Malls, Peru Corp con todo, y ese 4,279 es el mismo número que antes veías mal rotulado como "InRetail".
+
+## Etapa 2 — una sola edición
+
+En `_activos_fisicos_por_region_fen`. **Selecciona desde la línea `def _activos_fisicos_por_region_fen(risk_path):` (~2260) hasta su última línea `return {e: {lbl: int(round(v)) for lbl, v in d.items()} for e, d in out.items()}` (~2319), bórralo, y pega este bloque completo** (incluye la config nueva encima):
+
+```python
+# Mapa business-line físico -> emisores cuyo footprint la contiene (conteos se
+# solapan). Consumer NO incluye Shopping Malls; Peru Corp incluye todo. Intercorp
+# NO se arma aquí: su conteo sale del footprint distrital (Interbank + Peru Corp).
+FEN_EMISOR_POR_BL = {
+    "Makro":             ["InRetail Consumer", "Inretail Peru Corp"],
+    "Plaza Vea/Vivanda": ["InRetail Consumer", "Inretail Peru Corp"],
+    "Mass":              ["InRetail Consumer", "Inretail Peru Corp"],
+    "Pharmacies":        ["InRetail Consumer", "Inretail Peru Corp"],
+    "Shopping Malls":    ["InRetail Shopping Malls", "Inretail Peru Corp"],
+}
+
+
+def _activos_fisicos_por_region_fen(risk_path):
+    """{emisor: {'Región - Categoría': conteo}} desde 'Activos Departamentales' +
+       'FEN_Apoyo'. Cada business line física suma su conteo a TODOS los emisores
+       cuyo footprint la contiene (ver FEN_EMISOR_POR_BL); por eso los conteos se
+       solapan (un Makro cuenta en Consumer y en Peru Corp). Intercorp no se arma
+       aquí: su conteo sale del footprint distrital (Interbank + Peru Corp)."""
+    import openpyxl
+    from collections import defaultdict
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+    hoja_fen = _buscar_hoja(wb.sheetnames, "FEN_Apoyo") or ("FEN_Apoyo" if "FEN_Apoyo" in wb.sheetnames else None)
+    dep2label = {}
+    if hoja_fen and hoja_fen in wb.sheetnames:
+        wf = wb[hoja_fen]
+        hf = [norm(wf.cell(1, c).value) for c in range(1, wf.max_column + 1)]
+        def f2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                if t in hf:
+                    return hf.index(t) + 1
+            return None
+        cD = f2("Departamento") or 1; cC = f2("Categoria") or 2; cR = f2("Region") or 3
+        for r in range(2, wf.max_row + 1):
+            dep = wf.cell(r, cD).value
+            if not dep:
+                continue
+            cat = wf.cell(r, cC).value; reg = wf.cell(r, cR).value
+            if reg and cat:
+                dep2label[norm(dep)] = f"{str(reg).strip()} - {str(cat).strip()}"
+            elif reg:
+                dep2label[norm(dep)] = str(reg).strip()
+    bl_map = {norm(k): v for k, v in FEN_EMISOR_POR_BL.items()}
+    hoja_a = _buscar_hoja(wb.sheetnames, DEP_SHEET_ACTIVOS)
+    out = defaultdict(lambda: defaultdict(float))
+    if hoja_a:
+        wa = wb[hoja_a]
+        h2 = [norm(wa.cell(1, c).value) for c in range(1, wa.max_column + 1)]
+        def a2(*nombres):
+            for nm in nombres:
+                t = norm(nm)
+                for i, h in enumerate(h2):
+                    if t and t in h:
+                        return i + 1
+            return None
+        jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        for r in range(2, wa.max_row + 1):
+            bl = wa.cell(r, jBL).value if jBL else None
+            if not bl:
+                continue
+            emisores = bl_map.get(norm(bl))
+            if not emisores:
+                continue
+            dep = wa.cell(r, jDe).value; n = wa.cell(r, jN).value
+            try:
+                n = float(n)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            label = dep2label.get(norm(dep))
+            if not label:
+                continue
+            for emi in emisores:
+                out[emi][label] += n
+    wb.close()
+    return {e: {lbl: int(round(v)) for lbl, v in d.items()} for e, d in out.items()}
+```
+
+No hay que tocar el JS: `buildRegionGroups` ya sobre-escribe el conteo con estas claves, y como ahora emiten "InRetail Consumer" / "Inretail Peru Corp" / "InRetail Shopping Malls" (los mismos nombres que ya levantan en el mapa tras la Etapa 1), calzan solos. La vieja `FEN_SUBEMISOR_POR_BL` (línea ~1984) queda sin uso; puedes dejarla, no molesta.
+
+## Nota sobre Intercorp (a propósito)
+
+Intercorp **no** entra en esta función: su conteo en el Resumen sigue saliendo del footprint distrital, que tras la Etapa 1 ya incluye Interbank + Peru Corp (por eso "levanta bien"). Lo dejé así para **no borrarle las sucursales Interbank** (esta función solo sabe de BLs InRetail). Si algún día quieres que su porción InRetail use también el conteo *departamental* exacto en vez del distrital, es un ajuste chico aparte — me avisas.
+
+## Para verificar
+
+Corre y abre el Resumen del FEN: debes ver **InRetail Consumer ≈ 4,256**, **Inretail Peru Corp ≈ 4,279**, **InRetail Shopping Malls = 23**, cada uno con su AUM propio, e Intercorp con su conteo absorbido. Si cuadra, cerramos el círculo completo.
