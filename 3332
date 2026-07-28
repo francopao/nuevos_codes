@@ -1,0 +1,75 @@
+Cargo "8mil.txt" como referencia y re-ubico todos los anclajes (las líneas cambiaron por tus ediciones previas). Termino de rastrear el conteo del dashboard principal y armo los ajustes de Opción 2 contra este archivo.Re-anclado a 8mil.txt. Ya ubiqué el punto único del dashboard principal donde se cuentan activos (`activosDeDistrito`) — todos los conteos del mapa pasan por ahí. Leo ese bloque y el del Excel para dar los ajustes exactos.Ya tengo todo. Con Opción 2, el camino de **menos ediciones** y totalmente consistente es **expandir el conteo físico en la fuente**: cada tienda pasa a ser un activo en la lista, entonces `len(activos)` = tiendas reales en TODAS las salidas (mapa, Excel, FEN) sin tocar cada una. Confirmo el bloque exacto del override del FEN a quitar.Todo confirmado. Con Opción 2, la solución de **mínimo riesgo y máxima consistencia** es expandir el conteo físico en la **fuente**: cada tienda se vuelve un activo en la lista `activos`. Así `len(activos)` = tiendas reales y **todas las salidas cuentan igual sin tocarlas una por una**. Son **3 ediciones** en 8mil.txt.
+
+## EDIT 1 — construir el conteo físico por activo
+
+Busca este bloque (línea ~1372):
+```python
+    um = (dfm.groupby(["empresa", "ubigeo"])["unidad_minera"]
+          .apply(lambda s: sorted(set(str(x) for x in s.dropna()))).to_dict())
+```
+**Justo debajo**, agrega:
+```python
+    # Conteo físico por nombre de activo: el retail departamental (unidad_norm
+    # 'activos') pesa por 'acum' (nº de tiendas); el resto (minería, banca, malls)
+    # cuenta 1 por unidad. Fuente única de conteo = distrital.
+    um_det = {}
+    for (e, u), g in dfm.groupby(["empresa", "ubigeo"]):
+        d_ = {}
+        for _, rr in g.iterrows():
+            nm = rr["unidad_minera"]
+            if pd.isna(nm):
+                continue
+            nm = str(nm)
+            nf = int(round(rr["acum"])) if str(rr["unidad_norm"]) == "activos" else 1
+            d_[nm] = d_.get(nm, 0) + nf
+        um_det[(e, u)] = d_
+```
+
+## EDIT 2 — expandir `activos` por conteo físico
+
+Busca (línea ~1459):
+```python
+            activos = list(um.get((emp_n, u), [])) if isinstance(um, dict) else []
+```
+Reemplázala por:
+```python
+            # Expandir por conteo físico: cada tienda es un activo (retail pesa por
+            # 'acum'; minería/banca/malls quedan 1 a 1). Así len(activos) = nº físico
+            # y mapa, Excel y FEN cuentan tiendas reales desde la misma fuente.
+            _det = um_det.get((emp_n, u), {})
+            activos = [nm for nm, k in sorted(_det.items()) for _ in range(int(k))]
+```
+
+(No toques `um` — se sigue usando para el peso de asignación. Solo cambia lo que va a `activos`.)
+
+## EDIT 3 — revertir el override del FEN (ya no hace falta)
+
+Ahora el conteo distrital ya es físico, así que el FEN debe leerlo directo. Busca y **borra COMPLETO** este bloque dentro de `buildRegionGroups` (líneas ~4932–4946):
+```javascript
+  // Conteo "Activos Físicos" de emisores departamentales (InRetail / Shopping
+  // Malls): usar el conteo físico de 'Activos Departamentales' por región.
+  // Intercorp SUMA su porción InRetail (Peru Corp) sobre su conteo distrital
+  // (Interbank); los emisores InRetail departamentales REEMPLAZAN (su conteo
+  // distrital es artefacto del proxy).
+  const FEN_CONTEO_SUMA = {"Intercorp Perú": true};
+  Object.keys(ACTIVOS_FISICOS_FEN).forEach(emisor=>{
+    const porReg = ACTIVOS_FISICOS_FEN[emisor] || {};
+    Object.keys(porReg).forEach(label=>{
+      const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+      const e = g.emp[emisor] || (g.emp[emisor]={sector: EMP_SEC[emisor]||'', n:0, aum:0});
+      if(FEN_CONTEO_SUMA[emisor]) e.n += porReg[label];
+      else e.n = porReg[label];
+    });
+  });
+```
+Debe quedar el cierre `});` del `D.forEach` seguido directamente de `return grupos;`. No toques la línea `const nAct = (a.ac && a.ac.length) ? a.ac.length : 1;` (ahora ya cuenta físico).
+
+La función `_activos_fisicos_por_region_fen` y `FEN_EMISOR_POR_BL` quedan sin uso; puedes dejarlas, no estorban.
+
+## Qué esperar al correr
+
+Ahora **todo** (mapa, FEN, Excel Riesgos Climáticos) cuenta desde la misma fuente distrital física:
+- InRetail Consumer ≈ **4,236** · Inretail Peru Corp ≈ **4,256** · Shopping Malls = **20** · **Intercorp Perú ≈ 4,336** (4,256 + 80 Interbank), idéntico en las tres salidas.
+- Cuando alinees el dato en Excel (que anclaje = 137 food + 23 malls como el departamental), subirán solos a 4,256 / 4,279 / 23 / **4,359**.
+
+**Un aviso honesto (cosmético, no rompe nada):** al expandir, en la hoja "Activos por Empresa" del Excel habrá una fila por tienda (nombres repetidos, ~miles de filas retail) y los tooltips del mapa mostrarán conteos físicos más altos (que es lo que quieres). Si luego prefieres el Excel compacto con una columna "N tiendas" en vez de filas repetidas, es un ajuste chico aparte — me avisas y te lo doy.
