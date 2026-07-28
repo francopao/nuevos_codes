@@ -1,0 +1,68 @@
+Claro: Intercorp muestra ~80 porque toma su conteo del distrital, y ahí solo están sus sucursales Interbank — la porción de Peru Corp no se está sumando en el conteo. El fix es hacer que Intercorp **sume** el conteo departamental de Peru Corp (4,279) encima de sus 80 de Interbank. Son 2 ediciones chicas.
+
+## Edición 1 (Python) — meter Intercorp al mapa de BLs
+
+En la config `FEN_EMISOR_POR_BL` que pegaste en la Etapa 2, agrega `"Intercorp Perú"` a las 5 listas. Reemplaza el bloque:
+
+```python
+FEN_EMISOR_POR_BL = {
+    "Makro":             ["InRetail Consumer", "Inretail Peru Corp"],
+    "Plaza Vea/Vivanda": ["InRetail Consumer", "Inretail Peru Corp"],
+    "Mass":              ["InRetail Consumer", "Inretail Peru Corp"],
+    "Pharmacies":        ["InRetail Consumer", "Inretail Peru Corp"],
+    "Shopping Malls":    ["InRetail Shopping Malls", "Inretail Peru Corp"],
+}
+```
+
+por:
+
+```python
+FEN_EMISOR_POR_BL = {
+    "Makro":             ["InRetail Consumer", "Inretail Peru Corp", "Intercorp Perú"],
+    "Plaza Vea/Vivanda": ["InRetail Consumer", "Inretail Peru Corp", "Intercorp Perú"],
+    "Mass":              ["InRetail Consumer", "Inretail Peru Corp", "Intercorp Perú"],
+    "Pharmacies":        ["InRetail Consumer", "Inretail Peru Corp", "Intercorp Perú"],
+    "Shopping Malls":    ["InRetail Shopping Malls", "Inretail Peru Corp", "Intercorp Perú"],
+}
+```
+
+Esto hace que la función emita también `Intercorp Perú` con el conteo InRetail (= 4,279, igual que Peru Corp).
+
+## Edición 2 (JavaScript) — que Intercorp SUME en vez de reemplazar
+
+En `buildRegionGroups` (línea ~4773). Busca este bloque:
+
+```javascript
+  Object.keys(ACTIVOS_FISICOS_FEN).forEach(emisor=>{
+    const porReg = ACTIVOS_FISICOS_FEN[emisor] || {};
+    Object.keys(porReg).forEach(label=>{
+      const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+      const e = g.emp[emisor] || (g.emp[emisor]={sector: EMP_SEC[emisor]||'', n:0, aum:0});
+      e.n = porReg[label];
+    });
+  });
+```
+
+Reemplázalo por:
+
+```javascript
+  // Intercorp SUMA su porción InRetail (Peru Corp) sobre su conteo distrital
+  // (Interbank); los emisores InRetail departamentales REEMPLAZAN (su conteo
+  // distrital es artefacto del proxy).
+  const FEN_CONTEO_SUMA = {"Intercorp Perú": true};
+  Object.keys(ACTIVOS_FISICOS_FEN).forEach(emisor=>{
+    const porReg = ACTIVOS_FISICOS_FEN[emisor] || {};
+    Object.keys(porReg).forEach(label=>{
+      const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+      const e = g.emp[emisor] || (g.emp[emisor]={sector: EMP_SEC[emisor]||'', n:0, aum:0});
+      if(FEN_CONTEO_SUMA[emisor]) e.n += porReg[label];
+      else e.n = porReg[label];
+    });
+  });
+```
+
+## Cómo verificar
+
+Corre y abre el Resumen: **Intercorp Perú ≈ 4,359** (80 Interbank + 4,279 Peru Corp). Los demás quedan igual (Consumer 4,256, Peru Corp 4,279, Malls 23).
+
+**Un chequeo de sanidad:** esto asume que los ~80 actuales de Intercorp son **puros Interbank** (que fue justo lo que observaste). Si al correr te sale ~8,600 en vez de ~4,359, significaría que el distrital ya le estaba metiendo algo de Peru Corp y estaríamos duplicando — en ese caso me avisas y cambiamos el `+=` por `=` para Intercorp. Pero con lo que reportaste, debe dar 4,359 clavado.
