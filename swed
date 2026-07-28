@@ -1,0 +1,323 @@
+# Instrucciones — FEN Departamental (Entrega 1: datos + hoja auditable)
+
+Todo esto es **aditivo y de bajo riesgo**: crea la hoja auditable "InRetail Departamental FEN",
+corrige la columna L (homogénea) y quita la columna M. **No toca la estructura del mapa distrital**
+(solo cambia levemente el reparto *dentro* de cada departamento, con totales por depto idénticos).
+
+La Entrega 2 (conectar estos números a las 2 tablas del dashboard HTML + desglose por BL) va
+**después** de que corras esto y verifiques que la hoja cuadra en Excel.
+
+Los números de línea son aproximados (tu archivo puede variar unas líneas). Usa el **texto ancla**
+en negrita para ubicarte con Ctrl+F.
+
+---
+
+## PARTE 0 — Excel: agregar 10 filas (Opción B)
+
+Abre `1. Riesgos Fisicos (Mapa Distrital) - 2026.xlsx`, hoja **"Ponderacion Departamental"**.
+**NO toques las filas existentes de "InRetail"** (esas alimentan el mapa distrital y deben quedar igual).
+Debajo de todo (a partir de la primera fila vacía en la columna A), agrega estas 10 filas.
+Solo necesitas llenar **Emisor / Business Line / Peso** (columnas A, B, C). Deja Metodo/Hoja/Filtro en blanco.
+
+| Emisor (col A) | Business Line (col B) | Peso (col C) |
+|---|---|---|
+| InRetail Consumer | Makro | 0.375 |
+| InRetail Consumer | Plaza Vea/Vivanda | 0.1875 |
+| InRetail Consumer | Mass | 0.0375 |
+| InRetail Consumer | Pharmacies | 0.40 |
+| Inretail Peru Corp | Makro | 0.36375 |
+| Inretail Peru Corp | Plaza Vea/Vivanda | 0.181875 |
+| Inretail Peru Corp | Mass | 0.036375 |
+| Inretail Peru Corp | Pharmacies | 0.388 |
+| Inretail Peru Corp | Shopping Malls | 0.03 |
+| InRetail Shopping Malls | Shopping Malls | 1.0 |
+
+**Reglas de oro:**
+- Los nombres de Emisor deben ser **idénticos** a como aparecen en "Valorización de Instrumentos"
+  col AE "Nombre (G&P)": `InRetail Consumer`, `Inretail Peru Corp`, `InRetail Shopping Malls`.
+- Los Business Line deben escribirse **igual** que en "Activos Departamentales" (ej. `Plaza Vea/Vivanda`).
+- El Peso de cada emisor debe **sumar 1** (Consumer: 0.375+0.1875+0.0375+0.40=1 ; Peru Corp suma 1 ; Malls=1).
+- Si mañana cambias un peso o agregas un emisor, solo editas aquí. Cero código.
+
+---
+
+## PARTE 1 — Código (en "Dashboard - Intento 69.txt")
+
+### ADD 1 — nueva variable de configuración  (después de la línea ~1984)
+
+**Ancla:** busca la línea:
+```python
+FEN_SUBEMISOR_POR_BL = {"Shopping Malls": "InRetail Shopping Malls"}
+```
+**Justo debajo**, agrega:
+```python
+FEN_EMISORES = ["InRetail Consumer", "InRetail Shopping Malls", "Inretail Peru Corp"]
+```
+
+---
+
+### EDIT 1 — columna L homogénea  (en `_construir_reparto_departamental`, línea ~2214)
+
+Esto hace que cada tienda Mass/Pharmacies valga lo mismo en AUM sin importar el distrito
+(como debe ser). **Ancla:** busca este bloque exacto:
+
+```python
+        total_grupo = sum(share[k] for k in claves)
+        sobreviven = []
+        for k, e in zip(claves, enteros):
+            meta[k]["cuota_exacta"] = conteo[k]      # cuota fraccional (auditoría)
+            conteo[k] = e
+            (sobreviven if e > 0 else a_borrar).append(k)
+        s_surv = sum(share[k] for k in sobreviven)
+        if s_surv > 0:
+            factor = total_grupo / s_surv
+            for k in sobreviven:
+                share[k] *= factor
+```
+
+**Reemplázalo COMPLETO por:**
+
+```python
+        for k, e in zip(claves, enteros):
+            meta[k]["cuota_exacta"] = conteo[k]      # cuota fraccional (auditoría)
+            conteo[k] = e
+            if e > 0:
+                # L homogéneo: cada activo del BL vale lo mismo en AUM, sin importar el
+                # distrito. peso_pond = peso del BL ; total_pond = N nacional del BL.
+                share[k] = e * meta[k]["peso_pond"] / meta[k]["total_pond"]
+            else:
+                a_borrar.append(k)
+```
+
+(Los totales por departamento no cambian; solo se reparte parejo dentro del depto.)
+
+---
+
+### ADD 2 — dos funciones nuevas  (después de la línea ~2424)
+
+**Ancla:** busca el final de la función `_agregar_hoja_metodologia_dep`, que termina así:
+```python
+    log(f"   [{emisor}] hoja de metodología agregada al Excel ({last - first + 1} filas, activos enteros).")
+    return nombre
+```
+Y justo antes del comentario `# 7-quinquies) FUSIÓN DE SECTORES`.
+**Pega este bloque completo entremedio** (usa `norm`, `_buscar_hoja`, `log` que ya existen en tu script):
+
+```python
+
+
+def _fen_dep_datos(risk_path):
+    wb = openpyxl.load_workbook(risk_path, data_only=True)
+    hp = _buscar_hoja(wb.sheetnames, "Ponderacion Departamental"); wp = wb[hp]
+    Hp = [norm(wp.cell(1, c).value) for c in range(1, wp.max_column + 1)]
+    def ci(*n):
+        for nm in n:
+            for i, h in enumerate(Hp):
+                if norm(nm) and norm(nm) in h: return i + 1
+    iE, iB, iP = ci("Emisor"), ci("Business Line"), ci("Peso")
+    fem = {norm(x) for x in FEN_EMISORES}
+    pesos = defaultdict(dict)
+    for r in range(2, wp.max_row + 1):
+        em = wp.cell(r, iE).value
+        if not em or norm(em) not in fem: continue
+        bl, pe = wp.cell(r, iB).value, wp.cell(r, iP).value
+        try: pe = float(pe)
+        except (TypeError, ValueError): continue
+        if bl and pe > 0: pesos[norm(em)][str(bl).strip()] = pe
+    ha = _buscar_hoja(wb.sheetnames, "Activos Departamentales"); wa = wb[ha]
+    H2 = [norm(wa.cell(1, c).value) for c in range(1, wa.max_column + 1)]
+    def a2(*n):
+        for nm in n:
+            for i, h in enumerate(H2):
+                if norm(nm) and norm(nm) in h: return i + 1
+    jD, jBL, jN, jR, jC = a2("Departamento"), a2("Business Line"), a2("N_Activos", "Activos"), a2("Region"), a2("Categor")
+    ntot = defaultdict(float); ndep = defaultdict(lambda: defaultdict(float)); deplabel = {}
+    for r in range(2, wa.max_row + 1):
+        dep, bl, n = wa.cell(r, jD).value, wa.cell(r, jBL).value, wa.cell(r, jN).value
+        reg = wa.cell(r, jR).value if jR else None; cat = wa.cell(r, jC).value if jC else None
+        try: n = float(n)
+        except (TypeError, ValueError): continue
+        if not (dep and bl and n > 0): continue
+        bl, dep = str(bl).strip(), str(dep).strip()
+        ntot[bl] += n; ndep[bl][dep] += n
+        deplabel[dep] = (f"{str(reg).strip()} - {str(cat).strip()}" if reg and cat
+                         else str(reg).strip() if reg else "Sin region")
+    hv = _buscar_hoja(wb.sheetnames, "Valorización de Instrumentos"); wv = wb[hv]
+    hrow = cK = cAE = None
+    for rr in range(1, 8):
+        for c in range(1, wv.max_column + 1):
+            v = norm(wv.cell(rr, c).value)
+            if v == "VALOR_VECTOR_LOCAL": cK, hrow = c, rr
+            if "NOMBRE" in v and "G&P" in v.replace(" ", ""): cAE = c
+        if cK and cAE: break
+    aum = defaultdict(float)
+    if hrow and cK and cAE:
+        for r in range(hrow + 1, wv.max_row + 1):
+            nm = wv.cell(r, cAE).value
+            if nm and norm(nm) in fem:
+                try: aum[norm(nm)] += float(wv.cell(r, cK).value)
+                except (TypeError, ValueError): pass
+    wb.close()
+    return pesos, ntot, ndep, deplabel, aum
+
+def _agregar_hoja_fen_departamental(wb, risk_path):
+    pesos, ntot, ndep, deplabel, aum = _fen_dep_datos(risk_path)
+    if not pesos:
+        log("   [FEN dep] no hay filas de los emisores FEN en 'Ponderacion Departamental' "
+            "(agrega las filas de la Opcion B). Se omite la hoja.", "WARN"); return
+    AZUL = "1E2E6E"
+    HDR = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    TIT = Font(name="Calibri", size=13, bold=True, color=AZUL)
+    SUB = Font(name="Calibri", size=9, italic=True, color="595959")
+    BOLD = Font(name="Calibri", size=10, bold=True); BODY = Font(name="Calibri", size=10)
+    fH = PatternFill("solid", fgColor=AZUL); fIn = PatternFill("solid", fgColor="FFF3B0")
+    fTot = PatternFill("solid", fgColor="E8EAF3")
+    thin = Side(style="thin", color="D9D9D9"); box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    AC = Alignment(horizontal="center")
+    nombre = "InRetail Departamental FEN"
+    if nombre in wb.sheetnames: del wb[nombre]
+    ws = wb.create_sheet(nombre); ws.sheet_view.showGridLines = False
+    ws["A1"] = "Impacto FEN departamental — reparto de AUM por emisor, business line y region"; ws["A1"].font = TIT
+    ws["A2"] = ("Cada emisor reparte su propio AUM entre sus business lines segun 'Ponderacion Departamental' (peso), "
+                "y dentro de cada BL entre departamentos segun N de 'Activos Departamentales'. Region tomada de 'Activos Departamentales'.")
+    ws["A2"].font = SUB
+    ws["A3"] = ("AUM del depto = N activos depto x Peso BL x AUM emisor / N total BL (nacional). "
+                "La suma de cada emisor = su AUM total. Amarillo = insumo; blanco = formula.")
+    ws["A3"].font = SUB
+    hrow = 5
+    dh = ["Emisor", "Business Line", "Departamento", "Region", "N activos depto", "Peso BL",
+          "N total BL (nac.)", "AUM emisor", "Contrib. por unidad", "AUM del depto", "% del AUM emisor"]
+    for c, h in enumerate(dh, 1):
+        cc = ws.cell(hrow, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    orden = {"Makro": 0, "Plaza Vea/Vivanda": 1, "Mass": 2, "Pharmacies": 3, "Shopping Malls": 4}
+    filas = []
+    for e in FEN_EMISORES:
+        en = norm(e)
+        for bl, pe in sorted(pesos.get(en, {}).items(), key=lambda x: orden.get(x[0], 9)):
+            Nt = ntot.get(bl, 0)
+            for dep, Nd in sorted(ndep.get(bl, {}).items()):
+                filas.append((e, bl, dep, deplabel.get(dep, "Sin region"), Nd, pe, Nt, aum.get(en, 0.0)))
+    r = hrow + 1; first = r
+    for (e, bl, dep, lab, Nd, pe, Nt, au) in filas:
+        ws.cell(r, 1, e).font = BODY; ws.cell(r, 2, bl).font = BODY
+        ws.cell(r, 3, dep).font = BODY; ws.cell(r, 4, lab).font = BODY
+        cc = ws.cell(r, 5, int(round(Nd))); cc.number_format = "#,##0"; cc.fill = fIn
+        cc = ws.cell(r, 6, pe); cc.number_format = "0.0000%"; cc.fill = fIn
+        cc = ws.cell(r, 7, int(round(Nt))); cc.number_format = "#,##0"; cc.fill = fIn
+        cc = ws.cell(r, 8, au); cc.number_format = "#,##0"; cc.fill = fIn
+        ws.cell(r, 9, f"=IF(G{r}=0,0,F{r}*H{r}/G{r})").number_format = "#,##0.00"
+        ws.cell(r, 10, f"=E{r}*I{r}").number_format = "#,##0"
+        ws.cell(r, 11, f"=IF(H{r}=0,0,J{r}/H{r})").number_format = "0.0000%"
+        for c in range(1, 12): ws.cell(r, c).border = box
+        r += 1
+    last = r - 1
+    ws.cell(r, 1, "TOTAL (debe = suma de AUM de los 3 emisores)").font = BOLD
+    cc = ws.cell(r, 10, f"=SUM(J{first}:J{last})"); cc.font = BOLD; cc.number_format = "#,##0"; cc.fill = fTot
+    for c in range(1, 12): ws.cell(r, c).border = box
+    regs = sorted({deplabel.get(d, "Sin region") for bl in ndep for d in ndep[bl]})
+    def _matriz(titulo, hdr_ini, claves, crit_col):
+        ws.cell(hdr_ini, 1, titulo).font = BOLD
+        hr = hdr_ini + 1
+        for c, h in enumerate(["Region"] + claves + ["Total region"], 1):
+            cc = ws.cell(hr, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+        ncol = len(claves) + 2; rr = hr + 1
+        for lab in regs:
+            ws.cell(rr, 1, lab).font = BODY
+            for j in range(2, ncol):
+                col = chr(64 + j)
+                f = (f"=SUMIFS($J${first}:$J${last},$D${first}:$D${last},$A{rr},"
+                     f"${crit_col}${first}:${crit_col}${last},{col}${hr})")
+                ws.cell(rr, j, f).number_format = "#,##0"
+            ws.cell(rr, ncol, f"=SUM(B{rr}:{chr(64+ncol-1)}{rr})").number_format = "#,##0"; ws.cell(rr, ncol).font = BOLD
+            for c in range(1, ncol + 1): ws.cell(rr, c).border = box
+            rr += 1
+        ws.cell(rr, 1, "Total").font = BOLD
+        for c in range(2, ncol + 1):
+            ws.cell(rr, c, f"=SUM({chr(64+c)}{hr+1}:{chr(64+c)}{rr-1})").number_format = "#,##0"
+            ws.cell(rr, c).font = BOLD; ws.cell(rr, c).fill = fTot
+        for c in range(1, ncol + 1): ws.cell(rr, c).border = box
+        return rr
+    fin_a = _matriz("Resumen A — AUM por Region y Emisor", last + 3, list(FEN_EMISORES), "A")
+    bls = sorted({bl for bl in ndep}, key=lambda x: orden.get(x, 9))
+    _matriz("Resumen B — AUM por Region y Business Line", fin_a + 3, bls, "B")
+    ws.freeze_panes = f"A{hrow + 1}"
+    for c, w in zip("ABCDEFGHIJK", [22, 18, 15, 20, 13, 11, 14, 15, 16, 16, 14]):
+        ws.column_dimensions[c].width = w
+    log(f"   [FEN dep] hoja 'InRetail Departamental FEN' agregada ({len(filas)} filas de detalle).")
+    return nombre
+```
+
+---
+
+### WIRE 1 — llamar la hoja nueva en el export  (línea ~6177)
+
+**Ancla:** busca este bloque (dentro de la función que arma el Excel de Riesgos Climáticos):
+```python
+            for _emi in EMPRESAS_DEPARTAMENTAL:
+                _agregar_hoja_metodologia_dep(wb, risk_path, _pobp, _emi)
+        except Exception as _e:
+            logfn(f"[Activos] No se pudo agregar la hoja de metodología: {_e}")
+```
+**Justo debajo** de ese bloque (antes de `os.makedirs(out_dir, exist_ok=True)`), agrega:
+```python
+
+    # Hoja auditable FEN departamental (InRetail: Consumer / Shopping Malls / Peru Corp)
+    if risk_path:
+        try:
+            _agregar_hoja_fen_departamental(wb, risk_path)
+        except Exception as _e:
+            logfn(f"[Activos] No se pudo agregar 'InRetail Departamental FEN': {_e}")
+```
+
+---
+
+### EDIT 2 (COSMÉTICO — quitar columna M)  — opcional, puedes dejarlo para después
+
+Dentro de `_agregar_hoja_metodologia_dep`. Son 5 micro-cambios. Si te da miedo, sáltalo:
+la columna M queda ahí sin dañar nada.
+
+1. **Encabezados.** Busca:
+   ```python
+             "% pob. distrito", "Activos asignados (entero)", "% Distribución (exposición)",
+             "Cuota exacta (proxy)"]
+   ```
+   Cámbialo por (quita la última línea):
+   ```python
+             "% pob. distrito", "Activos asignados (entero)", "% Distribución (exposición)"]
+   ```
+
+2. **Borra** esta línea:
+   ```python
+               ws.cell(r, 13, f"=G{r}*J{r}").number_format = "#,##0.0000"
+   ```
+
+3. Busca `for c in (7, 8, 9, 10, 13):` → cámbialo a `for c in (7, 8, 9, 10):`
+
+4. Hay **dos** líneas `for c in range(1, 14):` (una en el detalle, otra en el TOTAL).
+   Cambia **ambas** a `for c in range(1, 13):`
+
+5. **Borra** esta línea:
+   ```python
+       cc = ws.cell(r, 13, f"=SUM(M{first}:M{last})"); cc.font = BOLD; cc.number_format = "#,##0.00"
+   ```
+
+6. Busca los anchos de columna:https://github.com/francopao/nuevos_codes/tree/main
+   ```python
+       for c, w in zip("ABCDEFGHIJKLM", [16, 18, 11, 15, 18, 22, 13, 12, 15, 12, 15, 15, 14]):
+   ```
+   Cámbialo a (quita la M y el último 14):
+   ```python
+       for c, w in zip("ABCDEFGHIJKL", [16, 18, 11, 15, 18, 22, 13, 12, 15, 12, 15, 15]):
+   ```
+
+---
+
+## Cómo verificar que quedó bien
+
+1. Corre tu script normal.
+2. Abre el Excel "Riesgos Climáticos - ...xlsx". Debe aparecer una hoja nueva: **"InRetail Departamental FEN"**.
+3. En "Resumen A", la fila **Total** debe dar: Consumer **169,163,335** · Shopping Malls **110,460,796** ·
+   Peru Corp **472,877,941** · Total **752,502,073**. Si cuadra, todo el reparto está correcto.
+4. "Resumen B" te dice cuánto AUM aporta **cada business line por región**.
+
+Cuando confirmes que la hoja cuadra, seguimos con la Entrega 2 (dashboard).
