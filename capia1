@@ -1,0 +1,98 @@
+Elegiste (b) — acumulación permitida — lo que simplifica: el mapa mantiene su suma por distrito como hoy. Antes de darte la Etapa 1 (Excel) necesito confirmar un acoplamiento crítico: si el proxy distrital filtra "Activos Departamentales" por nombre de emisor, renombrar rompería el conteo. Déjame verificar.Confirmado (b): el mapa mantiene la acumulación por distrito como hoy — más simple. Pero al verificar encontré un acoplamiento que **obliga** a que la parte declarativa vaya pegada a 3 ediciones mínimas de código, y es justo lo que te salva de romper el script:
+
+**El hallazgo:** el proxy distrital (`_construir_reparto_departamental`) filtra **tanto "Ponderacion Departamental" como "Activos Departamentales" por nombre EXACTO de emisor**. Entonces si solo renombras en Excel a "Inretail Peru Corp"/"InRetail Consumer" pero el código sigue buscando "InRetail", las business line poblacionales (Mass, Pharmacies) **se quedan sin conteos** y el mapa de InRetail se cae. Por eso Etapa 1 = Excel **+** 3 líneas de código, juntas.
+
+Te doy la Etapa 1 completa. **Aplica las 5 cosas juntas y recién ahí corre el script** (no corras a medias).
+
+---
+
+## Etapa 1 — Parte Excel (declarativa)
+
+### A) Hoja "Ponderacion Departamental"
+
+Tu bloque InRetail debe quedar **exactamente así** (columnas A–F). Pasos:
+
+1. En las **5 filas originales** con Emisor `InRetail` (Makro…Shopping Malls): cambia **solo la columna A** a `Inretail Peru Corp`. No toques las demás columnas (así conservas las fórmulas de la col Peso y su derivación).
+2. Si ya habías agregado filas de la Opción B con Emisor `Inretail Peru Corp`, **bórralas** (duplican a las renombradas).
+3. Las 4 filas `InRetail Consumer`: complétales las columnas **D, E, F** como abajo (hoy solo tienen A/B/C).
+4. Deja **una** fila `InRetail Shopping Malls | Shopping Malls | 1.0` (solo la usa la hoja auditable de Entrega 1).
+
+| Emisor (A) | Business Line (B) | Peso (C) | Metodo (D) | Hoja_Anclaje (E) | Filtro_BL (F) |
+|---|---|---|---|---|---|
+| Inretail Peru Corp | Makro | 0.36375 | anclaje | Inretail Consumer | Makro |
+| Inretail Peru Corp | Plaza Vea/Vivanda | 0.181875 | anclaje | Inretail Consumer | Plaza Vea;Vivanda |
+| Inretail Peru Corp | Mass | 0.036375 | poblacion | | |
+| Inretail Peru Corp | Pharmacies | 0.388 | poblacion | | |
+| Inretail Peru Corp | Shopping Malls | 0.03 | anclaje | 28. InRetail Shopping Malls | * |
+| InRetail Consumer | Makro | 0.375 | anclaje | Inretail Consumer | Makro |
+| InRetail Consumer | Plaza Vea/Vivanda | 0.1875 | anclaje | Inretail Consumer | Plaza Vea;Vivanda |
+| InRetail Consumer | Mass | 0.0375 | poblacion | | |
+| InRetail Consumer | Pharmacies | 0.40 | poblacion | | |
+| InRetail Shopping Malls | Shopping Malls | 1.0 | | | |
+
+(La celda "Suma (control)" de la fila 7 es solo cosmética; el código no la lee, ignórala si ya no da 1.)
+
+### B) Hoja "Holdings"
+
+Fila de `Intercorp Perú` con Fuente `Departamental` (la del factor 0.4): cambia **columna D "Hoja_Activos"** de `InRetail` → `Inretail Peru Corp`. Deja igual la fila `Banca INTERBANK` (0.6). Con esto Intercorp absorbe físicamente Peru Corp (= Consumer + Malls) + Interbank.
+
+---
+
+## Etapa 1 — 3 ediciones de código (obligatorias, van con el Excel)
+
+**Edit 1 — `EMPRESAS_HOJA` (líneas ~462–465).** Busca:
+```python
+    {"hoja": "InRetail",         "empresa": "InRetail",     "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Consumer", "InRetail Peru", "InRetail"]},
+    {"hoja": "InRetail Shopping Malls", "empresa": "InRetail Shopping Malls", "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Shopping Malls"]},
+```
+Reemplaza por:
+```python
+    {"hoja": "Inretail Consumer", "empresa": "InRetail Consumer", "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Consumer"]},
+    {"hoja": "Inretail Consumer", "empresa": "Inretail Peru Corp", "sector": SECTOR_CONSUMO,
+     "exp": ["Inretail Peru Corp"]},
+    {"hoja": "InRetail Shopping Malls", "empresa": "InRetail Shopping Malls", "sector": SECTOR_CONSUMO,
+     "exp": ["InRetail Shopping Malls"]},
+```
+
+**Edit 2 — `EMPRESAS_DEPARTAMENTAL` (línea ~1976).** Busca:
+```python
+EMPRESAS_DEPARTAMENTAL = ["InRetail"]
+```
+Reemplaza por:
+```python
+EMPRESAS_DEPARTAMENTAL = ["InRetail Consumer", "Inretail Peru Corp"]
+# Consumer y Peru Corp comparten el mismo footprint físico rotulado 'InRetail'
+# en 'Activos Departamentales'; de ahí leen sus conteos (Mass/Pharmacies).
+DEP_COUNT_SOURCE = {"InRetail Consumer": "InRetail", "Inretail Peru Corp": "InRetail"}
+```
+
+**Edit 3 — dentro de `_construir_reparto_departamental` (línea ~2131).** Busca:
+```python
+        jEm = a2("Emisor"); jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        for r in range(2, wa.max_row + 1):
+            em = wa.cell(r, jEm).value if jEm else None
+            if em is None or norm(em) != norm(emisor):
+                continue
+```
+Reemplaza por:
+```python
+        jEm = a2("Emisor"); jDe = a2("Departamento"); jBL = a2("Business Line"); jN = a2("N_Activos", "N Activos", "Activos")
+        emisor_cuentas = DEP_COUNT_SOURCE.get(emisor, emisor)   # comparten conteos 'InRetail'
+        for r in range(2, wa.max_row + 1):
+            em = wa.cell(r, jEm).value if jEm else None
+            if em is None or norm(em) != norm(emisor_cuentas):
+                continue
+```
+
+---
+
+## Qué logra la Etapa 1 y qué queda para la 2
+
+Después de esto, el **Dashboard_Activos_Riesgo (mapa distrital) y la exposición AUM** quedan correctos: Consumer (169M, footprint sin Malls), Inretail Peru Corp (472M, Consumer+Malls), Shopping Malls (110M), e Intercorp absorbiendo Peru Corp+Interbank. Conteos solapados, AUM acumulada por distrito (opción b). La hoja auditable de Entrega 1 sigue igual y válida.
+
+**Queda para Etapa 2:** reescribir `_activos_fisicos_por_region_fen` para que el **Resumen del FEN** muestre los conteos por emisor correctos (hoy ese "InRetail" con 4279 es en realidad Consumer+Malls; hay que separarlo en Consumer sin Malls, Peru Corp con Malls, e Intercorp = Peru Corp+Interbank).
+
+Aplica la Etapa 1 completa, corre, y avísame si el mapa levanta bien los 3 emisores + Intercorp. Con eso te paso la Etapa 2.
