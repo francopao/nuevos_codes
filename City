@@ -1,0 +1,49 @@
+Intercorp cuenta solo sus 80 de Interbank — la porción de Peru Corp que absorbe vía Holdings no está llegando al conteo `um_det`. Necesito ver qué guarda `DEP_DISTS` y cómo se fusiona el `df_geo` del holding, porque ahí está el eslabón que no propaga las tiendas.
+
+Los datos departamentales sí traen `unidad_minera`+`acum`+`unidad_norm="activos"`, y `build_model` construye `um_det`. Entonces el problema está en cómo se fusionan las DOS llamadas a `_add_sector` de Intercorp (Interbank + Peru Corp). Reviso `_add_sector` y `merge_sectores`.
+
+Analíticamente el conteo de Intercorp debería ser 80 + Peru Corp; que salga 80 sugiere que las aportaciones de Peru Corp se están saltando por `monto<=0`, o hay un filtro en `build_model`. Necesito ver cómo se llena `d["empresas"]` (lo que dispara los aportes) para Intercorp. Leo el núcleo de `build_model`.
+
+Ojo — 8mil.txt es la versión **antes** de tus 3 ediciones de expansión (línea 1459 aún muestra el `um.get` original), así que lo uso solo para la lógica circundante; tu archivo real ya tiene el `um_det`. El conteo de 80 apunta a que la exposición del holding Departamental de Intercorp llega en 0 (y se salta por `monto<=0`). Reviso cómo se calcula el `aum` de cada renglón de holding.
+
+El `aum` del holding Departamental sí llega positivo (0.4×92M=37M), así que no es eso. Como Consumer/Peru Corp sí cuentan bien y son el mismo tipo de df, el problema debe estar en cómo `build_model` procesa el df copiado del holding. Leo el inicio de `build_model`.
+
+El conteo de 80 = solo Interbank; la porción de Peru Corp no entra. La causa más probable: la búsqueda `DEP_DISTS.get(_emi_dep)` es **case-sensitive**, y si el `Hoja_Activos` de Intercorp en "Holdings" no coincide EXACTO con la clave de `EMPRESAS_DEPARTAMENTAL`, el renglón se salta silenciosamente. Verifico la ortografía exacta que usaste en el script.
+
+Encontré la causa muy probable. La clave `DEP_DISTS` se busca con `.get()` **exacto (case-sensitive)**. Tu `EMPRESAS_DEPARTAMENTAL` usa exactamente `"Inretail Peru Corp"` (I mayúscula, resto minúsculas). Si el `Hoja_Activos` de Intercorp en la hoja "Holdings" no coincide **carácter por carácter** (ej. "In**R**etail", tilde en "Perú", o un espacio de más), `DEP_DISTS.get()` devuelve `None`, el renglón Departamental **se salta en silencio**, y a Intercorp solo le quedan sus 80 de Interbank — que es justo lo que ves.
+
+## Confirmación rápida (10 seg)
+
+Revisa el log de tu corrida. Si aparece una línea tipo:
+```
+Holdings: 'Intercorp Perú' sin distribución departamental para '...'; se omite ese renglón.
+```
+→ confirmado, es esto. (De paso: si es así, a Intercorp también le falta su AUM de Peru Corp, no solo el conteo.)
+
+## Fix robusto (recomendado) — búsqueda tolerante
+
+Hace que el enlace holding→departamental aguante mayúsculas/acentos/espacios, y nunca se rompa por un typo en Excel. En 8mil.txt, dentro de la rama `elif h["fuente"] == "Departamental":` (línea ~7814). Busca:
+```python
+                        _emi_dep = h["hojas"][0] if h["hojas"] else emisor
+                        df_geo = DEP_DISTS.get(_emi_dep)
+                        if df_geo is None or df_geo.empty:
+```
+Reemplázalo por:
+```python
+                        _emi_dep = h["hojas"][0] if h["hojas"] else emisor
+                        df_geo = DEP_DISTS.get(_emi_dep)
+                        if df_geo is None:   # tolerante a mayúsculas/acentos/espacios
+                            _lk = {norm(k): v for k, v in DEP_DISTS.items()}
+                            df_geo = _lk.get(norm(_emi_dep))
+                        if df_geo is None or df_geo.empty:
+```
+
+## Alternativa (o además) — arreglar el dato en Excel
+
+En la hoja "Holdings", el `Hoja_Activos` del renglón `Departamental` de Intercorp Perú debe decir **exactamente** `Inretail Peru Corp` (igual que en `EMPRESAS_DEPARTAMENTAL`, línea 1978): I mayúscula, sin tilde en "Peru", sin espacios extra.
+
+## Qué esperar
+
+Con el enlace resuelto, Intercorp absorbe el df distrital de Peru Corp (tiendas + AUM), y como ese df ya cuenta físico por tu `um_det`, Intercorp pasa a **80 + 4,256 = 4,336** activos (y recupera su AUM de Peru Corp) en mapa, FEN y Excel por igual.
+
+Si tras aplicarlo sigue en 80, significa que el renglón sí entra pero los aportes salen sin activos — otro punto distinto — y ahí te doy una línea de diagnóstico para ubicarlo exacto. Pero con lo que veo, esto debería cerrarlo.
