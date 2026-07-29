@@ -1,0 +1,24 @@
+Interesante: si el mapa y Excel ya muestran 4,336, la corrección del holding sí entró en los `districts` fusionados. Que el FEN siga en 80 significa que el FEN arma su conteo desde otro lado (o quedó lógica residual). Reviso de dónde toma sus `districts`/aportes el FEN, sin tocar nada más.El FEN usa el mismo `districts` y el `ac` expandido — así que debería dar 4,336. Que dé 80 apunta a que el FEN recibe un `districts` distinto (o previo al sector financiero), o quedó el override. Veo la llamada al FEN y qué `districts` recibe vs el mapa.El FEN recibe el mismo `districts` que el mapa, así que su conteo de Intercorp debería dar 4,336. Que dé 80 con el mismo dato sugiere que el override del FEN sigue presente e interfiere. Confirmo qué `districts` recibe el mapa (para descartar que sean objetos distintos) antes de darte el ajuste.El mapa y el Excel leen el conteo de Intercorp desde `a.ac` (los aportes expandidos) del objeto `districts`, y el FEN recibe **ese mismo objeto** (confirmado: `districts = merge_sectores(...)` en línea 7934 alimenta a los tres). Así que el dato ya está bien; si el FEN muestra 80, es porque en `buildRegionGroups` quedó el **bloque override** pisando a Intercorp.
+
+## Fix (solo el FEN)
+
+Lo más probable: no se eliminó del todo el override que quitamos en la etapa pasada. En la función `buildRegionGroups` de tu FEN, busca y **borra completo** este bloque si sigue presente:
+```javascript
+  const FEN_CONTEO_SUMA = {"Intercorp Perú": true};
+  Object.keys(ACTIVOS_FISICOS_FEN).forEach(emisor=>{
+    const porReg = ACTIVOS_FISICOS_FEN[emisor] || {};
+    Object.keys(porReg).forEach(label=>{
+      const g = grupos[label] || (grupos[label]={aum:0, emp:{}});
+      const e = g.emp[emisor] || (g.emp[emisor]={sector: EMP_SEC[emisor]||'', n:0, aum:0});
+      if(FEN_CONTEO_SUMA[emisor]) e.n += porReg[label];
+      else e.n = porReg[label];
+    });
+  });
+```
+Debe quedar el cierre `});` del `D.forEach` seguido directamente de `return grupos;`. Sin ese override, el FEN cuenta Intercorp desde el mismo `a.ac` distrital → **4,336**, idéntico a mapa/Excel. No toques la línea `const nAct = (a.ac && a.ac.length) ? a.ac.length : 1;`.
+
+## Si ya lo habías borrado y aún sale 80
+
+Entonces hay otra cosa pisando el conteo en esa función y necesito verla. Pégame tu `buildRegionGroups` actual completa (son ~30 líneas, desde `function buildRegionGroups` hasta su `return grupos;`) y te doy el ajuste exacto — sin tocar nada más del script.
+
+Una duda rápida que ayuda a descartar: cuando corregiste el holding, ¿volviste a correr el script completo (regenerando el `FEN_Impacto_*.html`), o estás mirando un HTML del FEN de una corrida anterior? Si es lo segundo, basta con regenerarlo.
