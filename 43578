@@ -1,0 +1,56 @@
+Reviso el `MarketCapLoader` actual y la estructura real de `Market Cap.xlsx` para que el redireccionamiento sea exacto.Confirmado y verificado todo. El archivo `Market Cap.xlsx` que ya está en tu ruta tiene una hoja llamada **`MKT`** con **exactamente el mismo layout** que el loader espera (fila 2 = tickers, col B = fecha efectiva, valores ya en USD MM). Así que el arreglo es **una sola línea**: apuntar el `MarketCapLoader` al archivo separado en vez del workbook.
+
+---
+
+### Cambio único — redirigir el MarketCapLoader a `Market Cap.xlsx`
+
+**Bloque:** clase `MarketCapLoader`, dentro de su `__init__`.
+
+Ojo: la línea a cambiar aparece **dos veces** en el script (hay otra clase con la misma línea). La correcta es la que tiene **justo debajo** una línea con `self.aum: Dict[str, float] = {}`. Confírmalo mirando el contexto:
+
+```python
+        self.config = config
+        self.path = getattr(config, "path_workbook", None)
+        self.verbose = verbose
+        self.aum: Dict[str, float] = {}      # alias (ILF/EMB/ACWI/CEMB) -> USD MM
+```
+
+En **esa** ocurrencia, busca:
+```python
+        self.path = getattr(config, "path_workbook", None)
+```
+y reemplázala por:
+```python
+        self.path = getattr(config, "path_market_cap", None)
+```
+
+Eso es todo lo funcional. El nombre de hoja (`MKT`), el `skiprows` y el mapeo de tickers ya coinciden con `Market Cap.xlsx`; no toques nada más de la clase.
+
+### (Opcional, cosmético) Corregir la etiqueta que dice "obsoleto"
+
+**Bloque:** Módulo 0, dentro del diccionario `labels` de `Config.from_semestre`.
+
+Busca:
+```python
+            "path_market_cap": "Market Cap.xlsx (obsoleto: se usa la hoja MKT)",
+```
+Reemplázala por:
+```python
+            "path_market_cap": "Market Cap.xlsx (AUM de benchmarks, hoja MKT)",
+```
+
+---
+
+### Lo que debes verificar en disco (sin código)
+
+- `Market Cap.xlsx` debe estar en la ruta que ya define el código para `path_market_cap`, que es **separada** del workbook:
+  `…\1.Data Histórica\Dataset\Comparables\Market Cap.xlsx`
+  (no en `Inputs\`, ni dentro de cada `Reporte de Huella con Proxies - YYYYMM.xlsm`). Es justo lo que querías.
+
+### Qué esperar tras el cambio
+
+- El aviso `Worksheet named 'MKT' not found` desaparece y verás en consola algo tipo `[MarketCap] fila 2026-06-30 | AUM MM: {...}`.
+- El panel **gComp49 (Huella: Integra vs benchmarks)** pasará de 1 barra (solo Integra) a mostrar también **ACWI, ILF y CEMB** con huella real (esas columnas sí existen en el `MKT` de `Market Cap.xlsx`).
+- **EMB**: en `Market Cap.xlsx` no hay columna `EMB US Equity` (solo IEMG/EEM/CEMB/ILF/ACWI…), así que la huella de EMB seguirá en cero salvo que su fallback ya la cubra —igual que hoy, no es una regresión introducida por este cambio. Si quieres que EMB también aparezca, ese es un tema aparte (definir su market cap o proxy) y lo vemos cuando digas.
+
+Si además quieres que el pipeline **avise fuerte** cuando falte `Market Cap.xlsx` (en vez de dejar el panel vacío en silencio), dime y te paso la línea para reincorporarlo al blindaje de inputs.
