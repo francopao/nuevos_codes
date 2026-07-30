@@ -1,0 +1,29 @@
+import http.server, socketserver, webbrowser, os, threading
+
+# Carpeta donde el pipeline dejó el HTML:
+OUTPUT_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\2. Reportes\Medición Huella de Carbono\Python\Output"
+ARCHIVO    = "Dashboard_Huella.html"
+
+os.chdir(OUTPUT_DIR)
+
+# Busca un puerto libre (por si 8000 está ocupado/bloqueado)
+httpd = None
+for port in range(8000, 8020):
+    try:
+        socketserver.TCPServer.allow_reuse_address = True
+        httpd = socketserver.TCPServer(("127.0.0.1", port),
+                                       http.server.SimpleHTTPRequestHandler)
+        break
+    except OSError:
+        continue
+
+if httpd is None:
+    raise SystemExit("No se pudo abrir ningún puerto entre 8000 y 8019.")
+
+url = f"http://127.0.0.1:{port}/{ARCHIVO}"
+print("Dashboard sirviéndose en:", url)
+print("Deja ESTA ejecución corriendo mientras lo miras.")
+print("Para cerrarlo: botón rojo (Stop) en PyCharm.")
+
+threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+httpd.serve_forever()
