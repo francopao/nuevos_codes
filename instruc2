@@ -1,0 +1,76 @@
+¡Excelente, eso es oro! Los paneles en blanco son **exactamente** los que dibuja la función `apiladoPorCorte` (los de bloques, estrategia, tipo de renta, categoría/sector y soberana por país). Los que funcionan usan otras funciones (líneas, pie, ranking, comparables). El sospechoso común es el arreglo del eje que te di antes (`type:'category'` + `tickvals` con los códigos), que en el navegador real rompe justo las barras apiladas. Déjame ver la función actual para darte un reemplazo verificado.Dos llamadas idénticas (`gSoberanos` funciona, `gEstrategia` no) apuntan a que es la **data** de ciertos objetos lo que rompe el render de las barras apiladas. Voy a buscar valores patológicos (NaN, Infinity, negativos raros) en los objetos de los paneles vacíos.Datos limpios en todos (sin NaN/Infinity). Así que el problema no es la data sino el **render de las barras apiladas**: los paneles vacíos son todos los de `apiladoPorCorte`, y lo único que los distingue de un panel que SÍ funciona (`comparables`) es la manipulación del eje que te di (`tickvals`/`ticktext`) combinada con `barmode:'stack'`. Voy a reescribir esa función poniendo las etiquetas Dic25/Jun26 **directo en la X** (como ya lo hace `comparables`, que funciona) y quitando `tickvals`. Primero lo verifico con Plotly real.Verificado en Plotly real: la versión con etiquetas directas en la X renderiza las barras apiladas + totales + % sin problema (6 barras, 2 anotaciones, cero errores). Es exactamente el patrón que ya usa `comparables` (uno de los que SÍ funciona). El único cambio es quitar `tickvals`/`ticktext` y poner "Dic25"/"Jun26" directo en la X.
+
+### Reemplazo completo de `apiladoPorCorte`
+
+Busca la función que empieza así:
+
+```javascript
+function apiladoPorCorte(div, objeto, metrica, cAct, cCmp, opts){
+```
+
+y reemplaza **toda la función** (hasta su `}` de cierre) por esta:
+
+```javascript
+function apiladoPorCorte(div, objeto, metrica, cAct, cCmp, opts){
+  opts = opts || {};
+  const orden = opts.orden || null;
+  const serie = (corte) => {
+    const met = metricaDisponible(objeto, metrica, corte);
+    const m = new Map();
+    for(const r of HIST){
+      if(r.OBJETO!==objeto || r.METRICA!==met) continue;
+      if(String(r.FECHA_CORTE)!==String(corte)) continue;
+      if(opts.excluir && opts.excluir.includes(r.DIM_1)) continue;
+      const k = opts.clave ? opts.clave(r) : r.DIM_1;
+      if(!k) continue;
+      m.set(k, (m.get(k)||0) + (+r.VALOR||0));
+    }
+    return m;
+  };
+  const a = serie(cAct), b = serie(cCmp);
+  let keys = [...new Set([...a.keys(), ...b.keys()])];
+  keys = keys.filter(k => Math.abs(a.get(k)||0) > 1e-9 || Math.abs(b.get(k)||0) > 1e-9);
+  if(orden) keys.sort((x,y)=>{
+    const ix = orden.indexOf(x), iy = orden.indexOf(y);
+    return (ix<0?99:ix) - (iy<0?99:iy);
+  });
+  else keys.sort((x,y)=>(a.get(y)||0)-(a.get(x)||0));
+
+  const etiqCmp = etiquetaCorte(cCmp), etiqAct = etiquetaCorte(cAct);
+  const ejeX = [etiqCmp, etiqAct];
+  const traces = keys.map((k,i)=>({
+    type:'bar', name:k, x:ejeX,
+    y:[b.get(k)||0, a.get(k)||0],
+    marker: opts.marker ? opts.marker(k, i) : {color:P[i % P.length]},
+    text:[fmt(b.get(k)||0), fmt(a.get(k)||0)],
+    textposition:'inside', insidetextanchor:'middle',
+    textfont:{size:10, color:CFG.color_texto}
+  }));
+  const totB = keys.reduce((s,k)=>s+(b.get(k)||0),0);
+  const totA = keys.reduce((s,k)=>s+(a.get(k)||0),0);
+  const lay = LAYOUT();
+  lay.xaxis.type = 'category';
+  lay.barmode = 'stack';
+  lay.bargap = 0.55;
+  lay.yaxis.title = opts.y || metrica;
+  const varPct = totB ? (totA/totB - 1) : null;
+  lay.annotations = [
+    {x:etiqCmp, y:totB, text:'<b>'+fmt(totB)+'</b>', showarrow:false, yshift:16},
+    {x:etiqAct, y:totA, text:'<b>'+fmt(totA)+'</b>' +
+      (varPct===null ? '' :
+        '<br><span style="color:'+(varPct<0?'#1B8F5A':'#C0392B')+'">'+
+        (varPct>0?'+':'')+(varPct*100).toFixed(1)+'%</span>'),
+     showarrow:false, yshift:24}
+  ];
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+Qué cambia y qué NO:
+- Se eliminan `lay.xaxis.tickvals` y `lay.xaxis.ticktext` (lo frágil).
+- La X ahora lleva las etiquetas "Dic25"/"Jun26" directamente, y las anotaciones de totales se anclan a esas etiquetas.
+- **Se conserva todo lo visual**: barras apiladas, colores, patrón de rayas de Proxies, colores por país, orden, totales encima y el % de variación. No toca ninguna otra función ni el estilo.
+
+Esto arregla de un golpe los 8 paneles: bloques (Huella e Intensidad), Estrategia (Huella e Intensidad), tipo de renta, categoría MSCI vs Proxies (52 y 63) y soberana por país — porque todos pasan por `apiladoPorCorte`.
+
+Deja el `safe(...)` que ya agregaste (protege el dashboard y ayuda si algo más apareciera). Re-corre el pipeline, ábrelo con `abrir_dashboard.py`, y dime si ya salen todos. Si quedara alguno en blanco, ahora sí saldría con recuadro rojo y su mensaje — pero con esto deberían verse completos.
