@@ -1,0 +1,36 @@
+Ya encontré el problema principal en el log: **todas** las alertas muestran el mismo ISIN `'nan'`, cientos de veces seguidas — eso no es un instrumento real, es una fila en blanco (fantasma). Esto pasa porque `sheet.used_range.value` de xlwings a veces trae filas vacías de más al final de la hoja (residuo de formato antiguo del Excel), y como esas filas no tienen ISIN, se leen como `NaN`. Ese mismo problema ya venía arrastrado del `Analisis BD.xlsx` (una fila fantasma ahí también queda con `RATING` vacío → se clasifica como "NoCov" con ISIN vacío), entonces el script termina comparando "fila fantasma vs fila fantasma" cientos de veces y todo lo demás queda opacado en el log.
+
+**Lo que sí puedo corregirte ya mismo** (esto es un bug real, hay que arreglarlo sí o sí):
+
+**Bloque a modificar: función `agregar_columna_proxies`**
+
+Busca esta línea dentro de la función:
+```python
+    for pos, idx in enumerate(df.index):
+        isin_actual = isin_norm.loc[idx]
+        if isin_actual in isin_sin_cobertura:
+```
+
+Y reemplázala por esto (agrega una validación al inicio del `for` para saltar filas sin ISIN real, antes de comparar nada):
+
+```python
+    for pos, idx in enumerate(df.index):
+        isin_actual = isin_norm.loc[idx]
+
+        # Si la fila no tiene un ISIN real (fila en blanco/fantasma), se ignora
+        # por completo: no se compara, no se sustituye, no se alerta.
+        if isin_actual in ('', 'NAN', 'NONE'):
+            continue
+
+        if isin_actual in isin_sin_cobertura:
+```
+
+Con esto dejarán de salir las alertas falsas por filas vacías, y el log te va a mostrar solo los casos reales (instrumentos con ISIN de verdad que no tienen proxy).
+
+**Lo que sí necesito de tu parte para confirmar que el benchmarking ya funciona correctamente:**
+
+Adjunta el archivo **`202607 Analisis BD.xlsx`** (el que genera "4. Linkeado con MSCI con proxies - FRANCO" para ese mismo periodo). Con ese archivo puedo verificar dos cosas puntuales:
+1. Que la columna `Cobertura` realmente tenga instrumentos `NoCov` con ISIN válido (no solo la fila fantasma).
+2. Que esos ISIN "NoCov" de verdad existan también en `202607 Portafolio.xlsx` / `202607 BD1.xlsx` (para descartar algún desfase de formato de ISIN entre archivos, que sería la otra causa posible de que no haya habido ninguna sustitución real).
+
+Con ese archivo te confirmo si el único ajuste necesario es el de arriba, o si hay algo adicional que corregir.
