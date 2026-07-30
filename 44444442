@@ -1,0 +1,19 @@
+Que siga vacío **servido por http** confirma que no es `file://`: es un problema real de render de esos paneles concretos en el navegador, que mi motor headless no reproduce porque no hace *layout* real. Los datos sí existen en `Huella_Historico.xlsx` (verifiqué los 17 objetos en ambos cortes), así que el fallo está en cómo esos paneles se dibujan.
+
+Los paneles "únicos" que mencionas (los de barras rayadas para Proxies y colores fijos por país) son justo los que usan un `marker` especial. Voy a probar con Plotly real si ese `marker` con patrón deja las barras invisibles.El patrón de rayas renderiza bien en Plotly (barras sólidas con color y las de Proxies con `fill:url(#patrón)`, y los `<pattern>` se crean). O sea, tampoco es eso. La verdad incómoda: **todo lo que puedo probar aquí renderiza completo** — tu código y tus datos están bien en mi motor. Por eso no puedo "modificar a ciegas" sin arriesgar justo los estilos únicos que no quieres perder.
+
+Me falta un solo dato que solo tu navegador tiene: **el tamaño real y el nº de formas de cada panel en tu pantalla**. Con eso sé al instante si el panel sale en `0x0` (problema de tamaño) o con `formas:0` (problema de datos en ese panel), y te doy el cambio exacto. Ya lo tienes servido por `http://`, así que ahora sí funciona pegarlo:
+
+1. En el dashboard abierto (`http://127.0.0.1:8000/...`), pulsa **F12** → pestaña **Console**.
+2. Como te pidió pegar permiso, escribe exactamente `allow pasting` y **Enter**.
+3. Ahora pega esta línea y **Enter**:
+
+```javascript
+(function(){var ids=["gSerie","gHuellaBloque","gIntBloque","gEstrategia","gIntEstrategia","gSoberanos","gTipoRenta","gGrupoEcon","gAUM","gSector52","gSector63","gComp49","gComp48","gSobPais","gContribBUTD","gContribGral"];var o=ids.map(function(id){var d=document.getElementById(id);if(!d)return id+": SIN DIV";var svg=d.querySelector("svg");var f=d.querySelectorAll(".barlayer path,.scatterlayer path,.pielayer path,.js-line").length;return id+" | "+d.clientWidth+"x"+d.clientHeight+" | svg:"+(svg?"si":"NO")+" | formas:"+f;});console.log(o.join("\n"));return o.join("\n");})()
+```
+
+4. Copia las **16 líneas** que salen y pégamelas aquí.
+
+Atajo si aún así se complica: dime **los títulos exactos** de los paneles que ves en blanco (los que aparecen sobre cada gráfico, p. ej. "Huella por categoría — MSCI vs Proxies", "Huella soberana por país"…). 
+
+Con las 16 líneas **o** con los títulos exactos, te doy la modificación precisa sin tocar formas ni colores. Es el último paso, te lo aseguro — sin ese dato estaría adivinando.
