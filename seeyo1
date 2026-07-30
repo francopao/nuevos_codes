@@ -1,0 +1,126 @@
+Reviso las líneas exactas de los anclajes para darte instrucciones precisas.Ya tengo todo verificado. No hay riesgo adicional: el armado ya está parametrizado por `semestre`, el AUM sale de "Cálculo Caja" dentro de cada workbook (queda cubierto solo), y el fallo de comparables está blindado. Aquí van los **4 cambios**, en orden. Anclajes por texto (Ctrl+F), porque los números de línea se corren al editar.
+
+---
+
+### Cambio 1 — Que cada período lea SU propio workbook
+
+**Bloque:** Módulo 0, dentro de `Config.from_semestre` (≈línea 221).
+
+Busca:
+```python
+            else str(inp / NOMBRE_WORKBOOK)
+```
+Reemplázala por:
+```python
+            else str(inp / f"Reporte de Huella con Proxies - {semestre}.xlsm")
+```
+
+### Cambio 2 — (Opcional, cosmético) Mensaje de blindaje correcto
+
+Busca (≈línea 226):
+```python
+            "path_workbook": f"{NOMBRE_WORKBOOK} (query base, B1={b1_yyyymmdd})",
+```
+Reemplázala por:
+```python
+            "path_workbook": f"Reporte de Huella con Proxies - {semestre}.xlsm (query base, B1={b1_yyyymmdd})",
+```
+
+### Cambio 3 — Eliminar por completo el uso de "CO2 T-1"
+
+**Bloque:** `construir_valorizacion` (≈línea 3308).
+
+Busca:
+```python
+        intensidad_t1=bd_t1.as_intensidad_lookup(),
+```
+Reemplázala por:
+```python
+        intensidad_t1={},
+```
+(Con esto la columna "CO2 T-1" nunca se alimenta del período anterior; queda vacía y no la consume nada más.)
+
+### Cambio 4 — Armar T-1 idéntico a T, en una sola corrida
+
+**Paso 4a — Añadir una función nueva.** Justo **antes** de la línea que dice:
+```python
+def run_pipeline(semestre: str,
+```
+pega este bloque completo (deja una línea en blanco antes y después):
+
+```python
+def _procesar_corte(cfg, exp, verbose=True):
+    """Módulos 1..13 para UN corte: arma Valorización + pivots y lo exporta
+    al histórico. Se usa IDÉNTICO para T y para T-1."""
+    val, ctx = construir_valorizacion(cfg, verbose=verbose)
+    comp = ComparablesLoader(cfg, verbose=verbose).build()
+    mkt = ctx.get("market_cap_loader")
+    pres = PresentacionBuilder(
+        val, cfg.semestre,
+        sector_lookup=ctx.get("sector_lookup", {}),
+        intensidades_comp=comp.intensidades,
+        aum_comp=(mkt.aum if mkt is not None else {}),
+    )
+    objetos = pres.build_all()
+    if verbose:
+        print(f"  [Módulo 12] {len(objetos)} objetos ({len(pres.df)} registros) "
+              f"para corte {cfg.semestre}.")
+    exp.exportar(pres)
+    if verbose:
+        print(f"  [Módulo 13] Corte {cfg.semestre} -> histórico.")
+    return val, ctx, objetos
+```
+
+**Paso 4b — Reemplazar el cuerpo central de `run_pipeline`.** Busca este bloque (empieza en el comentario `# --- Módulos 1..10 ---` y termina justo antes de `# --- Módulo 14: dashboard ---`):
+
+```python
+    # --- Módulos 1..10 -------------------------------------------------------
+    val, ctx = construir_valorizacion(cfg, verbose=verbose)
+
+    # --- Módulo 12: pivots (PresentacionBuilder de Huella2) ------------------
+    comp = ComparablesLoader(cfg, verbose=verbose).build()
+    mkt = ctx.get("market_cap_loader")
+    pres = PresentacionBuilder(
+        val, cfg.semestre,
+        sector_lookup=ctx.get("sector_lookup", {}),
+        intensidades_comp=comp.intensidades,
+        aum_comp=(mkt.aum if mkt is not None else {}),
+    )
+    objetos = pres.build_all()
+    if verbose:
+        print(f"  [Módulo 12] {len(objetos)} objetos construidos "
+              f"({len(pres.df)} registros tras filtros de pivot).")
+
+    # --- Módulo 13: histórico estructurado (una hoja por corte) --------------
+    exp = HistoricoExporter(ruta_historico)
+    exp.exportar(pres)
+    if verbose:
+        print(f"  [Módulo 13] Histórico -> {ruta_historico}")
+```
+
+y reemplázalo **completo** por:
+
+```python
+    exp = HistoricoExporter(ruta_historico)
+
+    # --- T-1: se arma IDÉNTICO a T, desde su propio workbook -----------------
+    try:
+        cfg_t1 = Config.from_semestre(cfg.semestre_t1)
+        cfg_t1.validate_workbook_b1(verbose=verbose)
+        _procesar_corte(cfg_t1, exp, verbose=verbose)
+    except Exception as exc:
+        if verbose:
+            print(f"  [T-1] [AVISO] no se pudo armar {cfg.semestre_t1}: {exc}")
+
+    # --- T: corte actual -----------------------------------------------------
+    val, ctx, objetos = _procesar_corte(cfg, exp, verbose=verbose)
+```
+
+No toques nada de `# --- Módulo 14: dashboard ---` en adelante, ni el `return`.
+
+---
+
+### Qué logra esto y qué debes tener en `Inputs\`
+- Una sola corrida (con `SEMESTRE = "202606"` en la línea del `__main__`) arma **202606 y 202512 con el mismo método**, graba ambos en el histórico y dibuja el dashboard sin tocar estilo ni colores.
+- El T-1 quedó unificado: ya no existe el "CO2 T-1" interno (Cambio 3) ni el T-1 reciclado.
+- Para que T-1 no salga con el aviso `[T-1]`, en la carpeta `Inputs\` deben estar los archivos del período anterior con el patrón nuevo (`Reporte de Huella con Proxies - 202512.xlsm`) **y** sus insumos externos de ese corte (hoja `202512` en Base MSCI, hoja del semestre en Comparables, `Nueva Lista Proxies (corte 122025).xlsx` y `G&P_MLab_122025.xlsm`). Si falta alguno, el `try/except` deja pasar la corrida con T completo y solo omite T-1, sin romper nada.
