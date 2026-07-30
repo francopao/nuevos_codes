@@ -1,0 +1,71 @@
+Tienes razón, dejemos el diagnóstico. Y de hecho, releyendo todo, hay una explicación que encaja con TODO lo que observaste y que sí se arregla con código: tu `render()` llama a los ~16 gráficos **uno tras otro sin ningún control de error**. Si en tu navegador **un solo** gráfico falla al dibujarse, esa excepción **aborta el `render()` completo**, y todos los gráficos que venían **después** quedan en blanco. Eso explica que sea "la mitad", que se vea idéntico en Edge/Chrome/varios equipos (mismo código, mismo punto de fallo) y que en mi motor —donde probé cada gráfico por separado— se dibujaran todos. Los dashboards "sólidos" que tuviste antes seguramente aislaban cada panel.
+
+Déjame ver tu `render()` actual para darte el parche exacto.Perfecto, tengo tu `render()` exacto. El arreglo es blindar cada panel para que un fallo no tumbe a los demás **y** que el panel que falle muestre su error en pantalla (así por fin vemos la causa real, sin F12). **No toca las funciones de los gráficos**, así que formas y colores quedan idénticos.
+
+### Cambio único — en tu `render()`
+
+**Bloque:** la función `render()` del dashboard (Módulo 14, dentro del string JS).
+
+Busca este bloque (empieza en `kpis(cAct, cCmp);` y termina en la línea de `gContribGral`):
+
+```javascript
+  kpis(cAct, cCmp);
+  serieMetricas('gSerie');
+  bloquesPorCorte('gHuellaBloque','Huella',     cAct, cCmp);
+  bloquesPorCorte('gIntBloque',   'Intensidad', cAct, cCmp);
+  apiladoPorCorte('gEstrategia',   'Estrategia_x_Plus1','Huella',     cAct,cCmp,{y:'Tn CO2'});
+  apiladoPorCorte('gIntEstrategia','Estrategia_x_Plus1','Intensidad', cAct,cCmp,{y:'Intensidad'});
+  apiladoPorCorte('gSoberanos',    'Soberanos','Huella',              cAct,cCmp,{y:'Tn CO2'});
+  apiladoPorCorte('gTipoRenta','Por_Tipo_Renta','Huella', cAct,cCmp,{y:'Tn CO2'});
+  barrasComparadas('gGrupoEcon','', 'Por_Grupo_Economico','Huella', cAct,cCmp,{y:'Tn CO2',top:12});
+  pieAUM('gAUM', cAct, cCmp);
+  sectorMsciProxies('gSector52','Huella',     cAct, cCmp);
+  sectorMsciProxies('gSector63','Intensidad', cAct, cCmp);
+  comparables('gComp49','Huella',     cAct, cCmp);
+  comparables('gComp48','Intensidad', cAct, cCmp);
+  soberanosPais('gSobPais','Huella',  cAct, cCmp);
+  ranking('gContribBUTD','Contrib_BU_TD',cAct,15);
+  ranking('gContribGral','Contrib_General',cAct,20);
+```
+
+Y reemplázalo **completo** por esto:
+
+```javascript
+  const safe = (id, fn) => {
+    try { fn(); }
+    catch (e) {
+      console.error('[chart]', id, e);
+      const d = document.getElementById(id);
+      if (d) d.innerHTML =
+        '<div style="padding:10px;font:12px monospace;color:#C0392B;white-space:pre-wrap">'
+        + id + ' — error al dibujar:\n' + (e && e.message ? e.message : e) + '</div>';
+    }
+  };
+
+  safe('kpis',          () => kpis(cAct, cCmp));
+  safe('gSerie',        () => serieMetricas('gSerie'));
+  safe('gHuellaBloque', () => bloquesPorCorte('gHuellaBloque','Huella', cAct, cCmp));
+  safe('gIntBloque',    () => bloquesPorCorte('gIntBloque','Intensidad', cAct, cCmp));
+  safe('gEstrategia',   () => apiladoPorCorte('gEstrategia','Estrategia_x_Plus1','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gIntEstrategia',() => apiladoPorCorte('gIntEstrategia','Estrategia_x_Plus1','Intensidad', cAct,cCmp,{y:'Intensidad'}));
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gTipoRenta',    () => apiladoPorCorte('gTipoRenta','Por_Tipo_Renta','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gGrupoEcon',    () => barrasComparadas('gGrupoEcon','','Por_Grupo_Economico','Huella', cAct,cCmp,{y:'Tn CO2',top:12}));
+  safe('gAUM',          () => pieAUM('gAUM', cAct, cCmp));
+  safe('gSector52',     () => sectorMsciProxies('gSector52','Huella', cAct, cCmp));
+  safe('gSector63',     () => sectorMsciProxies('gSector63','Intensidad', cAct, cCmp));
+  safe('gComp49',       () => comparables('gComp49','Huella', cAct, cCmp));
+  safe('gComp48',       () => comparables('gComp48','Intensidad', cAct, cCmp));
+  safe('gSobPais',      () => soberanosPais('gSobPais','Huella', cAct, cCmp));
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_BU_TD',cAct,15));
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+```
+
+### Qué hacer después
+1. Guarda, **re-corre el pipeline** (regenera el HTML).
+2. Ábrelo con `abrir_dashboard.py` (http, como ya lograste).
+3. Mira el resultado. Van a pasar una de dos cosas, y ambas nos sirven:
+   - **Varios paneles que estaban en blanco ahora se dibujan** (eran víctimas del corte en cadena). Ganancia directa.
+   - El panel que **realmente** falla mostrará un recuadro rojo con el mensaje del error. **Cópiame ese texto rojo** y con eso te doy la corrección de raíz de ese panel, sin tocar estilos ni colores.
+
+Nota: los 404 de tu log (`favicon.ico`, `com.chrome.devtools.json`) son ruido normal del navegador, no tienen que ver con el dashboard; el `GET /Dashboard_Huella.html` respondió `200`, o sea que se sirvió bien.
