@@ -1,0 +1,43 @@
+Ese resultado me dice exactamente qué pasó: el JavaScript va **dentro de un string de Python**, y en el código que te pasé incluí un `\n`. Si ese string de Python no es "raw", Python convierte `\n` en un salto de línea real **dentro** del texto JS, lo que rompe una comilla del JavaScript → se cae **todo** el script → todos los charts en blanco. Es un problema de escape, no del enfoque. Déjame confirmar el tipo de string y darte la versión sin ese carácter.Confirmado: tu JS vive dentro de `JS_DASHBOARD = """ ... """`, que es un string **normal** de Python. Ahí un `\n` se convierte en un salto de línea de verdad y **parte en dos una comilla del JavaScript**, tumbando todo el script. Por eso quedó todo en blanco. El enfoque del `try/catch` es correcto; solo hay que **quitar ese `\n`** (y no meter ningún otro `\`).
+
+Vuelve a reemplazar el bloque por esta versión corregida (idéntica, pero sin `\n` — la línea del mensaje va en una sola pieza):
+
+```javascript
+  const safe = (id, fn) => {
+    try { fn(); }
+    catch (e) {
+      console.error('[chart]', id, e);
+      const d = document.getElementById(id);
+      if (d) d.innerHTML =
+        '<div style="padding:10px;font:12px monospace;color:#C0392B">'
+        + id + ' — error: ' + (e && e.message ? e.message : e) + '</div>';
+    }
+  };
+
+  safe('kpis',          () => kpis(cAct, cCmp));
+  safe('gSerie',        () => serieMetricas('gSerie'));
+  safe('gHuellaBloque', () => bloquesPorCorte('gHuellaBloque','Huella', cAct, cCmp));
+  safe('gIntBloque',    () => bloquesPorCorte('gIntBloque','Intensidad', cAct, cCmp));
+  safe('gEstrategia',   () => apiladoPorCorte('gEstrategia','Estrategia_x_Plus1','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gIntEstrategia',() => apiladoPorCorte('gIntEstrategia','Estrategia_x_Plus1','Intensidad', cAct,cCmp,{y:'Intensidad'}));
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gTipoRenta',    () => apiladoPorCorte('gTipoRenta','Por_Tipo_Renta','Huella', cAct,cCmp,{y:'Tn CO2'}));
+  safe('gGrupoEcon',    () => barrasComparadas('gGrupoEcon','','Por_Grupo_Economico','Huella', cAct,cCmp,{y:'Tn CO2',top:12}));
+  safe('gAUM',          () => pieAUM('gAUM', cAct, cCmp));
+  safe('gSector52',     () => sectorMsciProxies('gSector52','Huella', cAct, cCmp));
+  safe('gSector63',     () => sectorMsciProxies('gSector63','Intensidad', cAct, cCmp));
+  safe('gComp49',       () => comparables('gComp49','Huella', cAct, cCmp));
+  safe('gComp48',       () => comparables('gComp48','Intensidad', cAct, cCmp));
+  safe('gSobPais',      () => soberanosPais('gSobPais','Huella', cAct, cCmp));
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_BU_TD',cAct,15));
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+```
+
+La única diferencia con lo anterior: el mensaje ya **no** lleva `\n`. Nada más de ese bloque cambia, y no toca estilos ni colores.
+
+Pasos:
+1. Reemplaza el bloque (si ya tienes pegada la versión con `\n`, bórrala y pon esta).
+2. Re-corre el pipeline y ábrelo con `abrir_dashboard.py`.
+3. Cuéntame el resultado: cuántos paneles se dibujan ahora y, si alguno muestra el **recuadro rojo con "— error:"**, cópiame ese texto. Con eso ataco la causa de raíz de ese panel puntual.
+
+Regla útil para el futuro: dentro de `JS_DASHBOARD` nunca metas `\` suelto (ni `\n`, `\t`, etc.); si necesitas un salto de línea en JS usa `<br>` (en HTML) o escríbelo como `\\n`.
