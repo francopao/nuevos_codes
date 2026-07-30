@@ -1,0 +1,80 @@
+Déjame ubicar las líneas exactas en tu archivo.Confirmado: **esta versión no tiene `ANIO_REPORTE`**. Olvida eso. El cambio para re-correr 202512 es **una sola línea**.
+
+## Para re-correr el corte 202512
+
+**Línea 3393.** Dice:
+
+```
+    SEMESTRE = "202606"                 # semestre en revisión (yyyymm)
+```
+
+Pasos:
+1. Cambia `"202606"` por `"202512"` en esa línea. Guarda y ejecuta el script una vez (esto rellena el corte 202512 con los objetos que faltaban).
+2. Vuelve a poner `"202606"` en esa misma línea. Guarda y ejecuta de nuevo (esto regenera el dashboard con 202606 como corte actual y 202512 ya completo).
+
+Nada más. No toques ninguna otra línea. Requisito: que en tus `Inputs\` sigan estando los archivos de ese corte (hoja `202512` en Base MSCI, la hoja del semestre en Comparables MSCI, y la fila de Market Cap con fecha ≤ cierre de 202512).
+
+---
+
+Ahora ubico las líneas exactas del arreglo del eje X.Perfecto. Aquí van los 3 cambios del eje X, explicados para hacerlos a mano en un editor de texto (Bloc de notas, VS Code, etc.). 
+
+Importante: **busca cada "línea ancla" por su texto** (Ctrl+F), no por el número, porque al agregar líneas los números se corren. La sangría/espacios no importan aquí (es texto dentro de un bloque de JavaScript).
+
+### Cambio 1 — Agregar el "traductor" de fechas (una sola vez)
+
+Busca esta línea (≈2813):
+
+```
+                                       : v.toLocaleString('es-PE',{maximumFractionDigits:2});
+```
+
+**Justo debajo** de ella, pega estas dos líneas nuevas:
+
+```
+const MESES = {'06':'Jun','12':'Dic'};
+const etiquetaCorte = c => { c=String(c); return (MESES[c.slice(4,6)]||c.slice(4,6))+c.slice(2,4); };
+```
+
+### Cambio 2 — Gráfico de evolución histórica (gSerie)
+
+Busca esta línea (≈2874):
+
+```
+  lay.yaxis.title = 'Huella (miles Tn CO2)';
+```
+
+Baja unas 3–4 líneas hasta encontrar esta otra:
+
+```
+  Plotly.react(div, [
+```
+
+(la primera que aparezca después de la anterior). **Justo encima** de esa línea `Plotly.react(div, [`, pega estas cuatro líneas:
+
+```
+  lay.xaxis.type = 'category';
+  lay.xaxis.tickmode = 'array';
+  lay.xaxis.tickvals = cs;
+  lay.xaxis.ticktext = cs.map(etiquetaCorte);
+```
+
+### Cambio 3 — Barras apiladas por corte (bloques, soberanos por país, etc.)
+
+Busca esta línea (≈2976). Ojo: hay **varias** que dicen `const lay = LAYOUT();`. La que necesitas es la que **inmediatamente después** tiene una línea que dice `lay.barmode='stack';`. Confírmalo mirando abajo:
+
+```
+  const lay = LAYOUT();
+  lay.barmode='stack';
+```
+
+**Justo debajo** de `const lay = LAYOUT();` (la de `'stack'`), pega estas tres líneas:
+
+```
+  lay.xaxis.type = 'category';
+  lay.xaxis.tickvals = cortesX;
+  lay.xaxis.ticktext = cortesX.map(etiquetaCorte);
+```
+
+---
+
+Guarda y ejecuta. En el dashboard los ejes mostrarán **Dic25** y **Jun26** en lugar de `202.512k` / `202.606k`. Si algo no coincide con las líneas ancla, dime qué ves alrededor y lo ajustamos.
