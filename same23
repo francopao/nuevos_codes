@@ -1,0 +1,67 @@
+Ya tengo la estructura clara. Déjame verificar exactamente qué objetos existen por corte en el HISTORICO embebido, que es la clave del problema.Causa raíz confirmada. Ahora reviso el código de los builders, el exportador M13 y el render M14 (incluyendo el tema del eje X).Déjame verificar un punto analítico: si el corte 202512 trae la métrica `Intensidad` oficial o solo `Intensidad-M` (el fallback), porque eso afecta la línea de intensidad histórica.Ya tengo todo. Analicé inputs, código y el HTML de salida (el `HISTORICO` embebido). Aquí está el diagnóstico.
+
+## Por qué salen vacíos esos 3 charts (202512)
+
+Causa raíz **única**: la hoja del corte **202512** dentro de `Huella_Historico.xlsx` fue generada por una **versión anterior del script**, antes de que existieran esos builders. El dashboard (M14) renderiza client-side leyendo el `HISTORICO` acumulado; si un corte no tiene filas para un `OBJETO`, la barra de ese corte queda vacía.
+
+Lo comprobé listando los `OBJETO` presentes por corte en el `HIST` del HTML:
+
+| OBJETO | 202512 | 202606 |
+|---|:--:|:--:|
+| `Sector_MSCI_Proxies` (gSector52 / gSector63) | ❌ | ✅ |
+| `Soberanos_Por_Pais` (gSobPais) | ❌ | ✅ |
+| `Comparables` (gComp49 / gComp48) | ❌ | ✅ |
+| resto (AUM, Contrib, Soberanos, Bloques…) | ✅ | ✅ |
+
+Como por defecto `selCorte=202606` (actual) y `selCorteComparacion=202512`, la barra de comparación (202512) sale vacía en esos tres paneles → se ve "medio chart". No es un bug de cálculo del corte actual: 202606 sí produce los tres objetos correctamente (`build_all` los incluye siempre y `to_long` sólo omite DataFrames vacíos).
+
+**Corolario que no habías notado:** `Comparables` **también** falta en 202512, así que `gComp49` y `gComp48` están igual de vacíos para ese corte — no saltan a la vista sólo porque esas cards arrancan colapsadas (`visible:False`).
+
+### Cómo corregirlo
+Dos caminos:
+
+1. **Re-correr el pipeline para `semestre=202512`** con el código actual. M13 (`HistoricoExporter.exportar`) purga el corte y lo reinserta, así que reescribe esa hoja con los 17 objetos. Requisito: que sigan disponibles los inputs de ese corte (hoja `202512` en Base MSCI, hoja del semestre en Comparables MSCI, y fila de Market Cap con fecha ≤ cierre 202512). Si los tienes, es la solución definitiva.
+2. Si **no** puedes regenerar 202512 (inputs ya no disponibles), lo prolijo para comité es que cada card se **oculte o muestre "sin datos para este corte"** cuando el `OBJETO` no existe en el corte comparado, en lugar de dejar el panel en blanco.
+
+## Otro problema serio (analítico, no cosmético)
+
+La **intensidad histórica mezcla dos métricas distintas entre cortes**:
+
+- 202512 → sólo trae `Intensidad-M` (÷ AUM vivo)
+- 202606 → trae `Intensidad` (oficial, CO2-H × Weight) **y** `Intensidad-M`
+
+El helper `metricaDisponible(...,'Intensidad',c)` cae a `Intensidad-M` cuando falta `Intensidad`. Resultado: el **KPI de Intensidad**, la **línea de intensidad en gSerie** y la **variación "% vs 202512"** comparan `Intensidad` (202606) contra `Intensidad-M` (202512). Son escalas diferentes → la tendencia y el % son engañosos, y justo Intensidad es la métrica oficial del comité. Se arregla solo al regenerar 202512 (opción 1). Si no, conviene marcar el punto como "no comparable" en vez de mostrar un %.
+
+## Estética del eje X ("202.512k" → "Dic25"/"Jun26")
+
+Tienes razón. En `serieMetricas` pasas `x:cs` con strings tipo `"202512"`; Plotly los detecta como **numéricos**, pone eje lineal y formatea con sufijo SI (`202.512k`). El `LAYOUT()` no fuerza `type:'category'`.
+
+Patch — helper global (ponlo junto a `fmt`):
+
+```javascript
+const MESES = {'06':'Jun','12':'Dic'};
+const etiquetaCorte = c => { c=String(c); return (MESES[c.slice(4,6)]||c.slice(4,6))+c.slice(2,4); };
+```
+
+En `serieMetricas`, antes del `Plotly.react`:
+
+```javascript
+  lay.xaxis.type   = 'category';
+  lay.xaxis.tickmode = 'array';
+  lay.xaxis.tickvals = cs;
+  lay.xaxis.ticktext = cs.map(etiquetaCorte);
+```
+
+En `apiladoPorCorte` (para que las barras apiladas también muestren Dic25/Jun26), tras `const lay = LAYOUT();`:
+
+```javascript
+  lay.xaxis.type = 'category';
+  lay.xaxis.tickvals = cortesX;                 // cortesX = [cCmp, cAct]
+  lay.xaxis.ticktext = cortesX.map(etiquetaCorte);
+```
+
+Las `annotations` (`x:cCmp`, `x:cAct`) siguen funcionando porque referencian el valor de categoría (el código del corte), que coincide con `tickvals`.
+
+---
+
+Resumen: los 3 (en realidad 5, sumando gComp49/48) paneles vacíos y la mezcla de intensidad tienen el **mismo origen** — la hoja 202512 es de una versión vieja del script. Regenerar ese corte lo soluciona de raíz; el eje X es un fix aparte con el patch de arriba. ¿Tienes disponibles los inputs de 202512 para re-correrlo, o prefieres que te arme la variante que oculta cards sin datos?
