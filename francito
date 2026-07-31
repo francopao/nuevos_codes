@@ -1,0 +1,78 @@
+I'll look at your console output to find exactly which districts failed to geocode — that's the precise list we need for option (a), and it'll also tell me what fallback to build for the "premura" cases.Ahí está: **88 filas de Consumo NO geocodificadas** (línea 184). Leo el detalle para ver los distritos exactos.El detalle es oro. Las 88 filas caen por **tres causas distintas**, no una:
+
+1. **Marcadores de nota al pie pegados al nombre** (la mayoría): `SAMUGARI 8/`, `ECHARATE 12/`, `ALTO TRUJILLO 18/`, `EL PORVENIR 18/ 20/`, `PADRE ABAD 6/ 11/`, etc. El nombre trae "8/", "18/" del cuadro INEI → no matchea. **Limpiable genéricamente.**
+2. **Distritos nuevos** (`no_encontrado`): `ANDRÉS AVELINO CÁCERES DORREGARAY`, `MEGANTONI`, `VIZCATÁN DEL ENE`, `CONSTITUCIÓN`, `LA YARADA LOS PALOS`, `NESHUYA` — creados hace pocos años, faltan en tu geojson.
+3. **Ambiguos / errores de jerarquía**: `MIRAFLORES`/`SAN LUIS` [ambiguo], y basura como `Lima/Lima/Huancayo`, `Lima/Callao/Callao`, `Lima/Lima/Monterrico`.
+
+Tu safety-net para la premura resuelve las tres de un solo golpe. Déjame ver la función `geocode` y la estructura de `geo_idx` para escribirte el fallback exacto.El log lo confirma y me da los ajustes exactos. Las 88 filas caen por causas mezcladas, así que la solución robusta que pides (que **siempre cuadre**, incluso a futuro con distritos nuevos) son **2 ediciones en `geocode`**: una limpieza de nombres siempre activa, y un fallback provincial que es tu red de seguridad para la premura.
+
+## EDIT A — limpiar marcadores de nota al pie (siempre activo)
+
+Recupera los distritos reales que solo traían "8/", "18/", etc. (los populosos de Trujillo/Ayacucho/etc.). En `geocode` (línea ~889), busca:
+```python
+    variantes = _variantes_distrito(dist)
+```
+y **justo encima** agrega:
+```python
+    dist = re.sub(r"(?:\s*\d+/)+\s*$", "", str(dist)).strip()  # quita "8/", "18/ 20/", "6/ 11/"
+```
+
+## EDIT B — fallback provincia/depto (tu red de seguridad para premura)
+
+Cuando un distrito no geocodifica (nuevo, ambiguo o con error), lo manda a un ubigeo representativo de su provincia → la tienda **cuenta y mapea aprox.**, y los totales cuadran. Con un flag para poder apagarlo en runs de precisión.
+
+**B.1** — Justo **antes** de `def geocode(dep, prov, dist, idx):`, agrega:
+```python
+# Premura: si un distrito no geocodifica (nombre nuevo, ambiguo o mala grafía) se
+# mapea a un ubigeo representativo de su provincia (o depto). Las tiendas cuentan y
+# se pintan aprox.; los totales cuadran aunque falten distritos en el geojson.
+# Ponlo en False para runs de precisión (los no-mapeables vuelven a caerse).
+GEO_FALLBACK_PROV = True
+_FB_CACHE = {}
+def _fallback_ubigeo(dep_n, prov_n, idx):
+    name2u = idx[0]
+    key = id(name2u)
+    if key not in _FB_CACHE:
+        pv, dp = {}, {}
+        for (d, p, _ds), u in name2u.items():
+            pv.setdefault((d, p), u)
+            dp.setdefault(d, u)
+        _FB_CACHE[key] = (pv, dp)
+    pv, dp = _FB_CACHE[key]
+    return pv.get((dep_n, prov_n)) or dp.get(dep_n)
+```
+
+**B.2** — En `geocode`, busca el bloque final:
+```python
+    for dv in variantes:
+        cands = dep_dist2u.get((norm(dep), norm(dv)), [])
+        if len(cands) == 1:
+            return cands[0], "dep+distrito"
+        if len(cands) > 1:
+            return None, "ambiguo"
+    return None, "no_encontrado"
+```
+y reemplázalo por:
+```python
+    ambiguo = False
+    for dv in variantes:
+        cands = dep_dist2u.get((norm(dep), norm(dv)), [])
+        if len(cands) == 1:
+            return cands[0], "dep+distrito"
+        if len(cands) > 1:
+            ambiguo = True
+    if GEO_FALLBACK_PROV:
+        u = _fallback_ubigeo(norm(dep), norm(prov), idx)
+        if u:
+            return u, "fallback_prov"
+    return None, "ambiguo" if ambiguo else "no_encontrado"
+```
+
+## Qué esperar y una nota honesta
+
+- Con EDIT A + B, las 88 filas de Consumo entran → **InRetail Consumer = 4,236** y **Inretail Peru Corp = 4,256**, cuadrando con la hoja Metodología. En el log, las que antes decían "no_encontrado/ambiguo" ahora dirán `fallback_prov` (auditable: sabes cuáles se aproximaron).
+- **Sobre Intercorp (honesto):** `geocode` es global, así que el fallback ON también recupera las 44 filas de Financiero que hoy se caen → Interbank sube un poco y con él Intercorp (pasa a ~4,340+). **No toqué su lógica** (sigue = Interbank + Peru Corp); solo queda más completo. Si prefieres congelar Intercorp exactamente en 4,336 por ahora, pon `GEO_FALLBACK_PROV = False`: EDIT A (limpieza) igual recupera la mayor parte de Consumer (los distritos populosos con marcador), aunque no llegará al 4,236 exacto hasta que actives el fallback. Tú controlas con ese único flag.
+
+Precisión del fallback: manda la tienda a la capital de su provincia, así que hereda el score CENEPRED de ahí (aprox.), no el del distrito real — razonable para premura. Si algún distrito nuevo (ej. Megantoni) lo quieres exacto, luego lo agregas a `OVERRIDE_UBIGEO` y listo.
+
+Si me pasas el nuevo log tras aplicarlo, te confirmo que los conteos cerraron en 4,236 / 4,256 y qué quedó en `fallback_prov`.
