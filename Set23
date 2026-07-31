@@ -1,0 +1,557 @@
+#%% md
+# 4. Linkeado con MSCI (con capa adicional de Proxies ESG, matching por SBS)
+
+### Archivos utilizados:
+
+#### VP: Z:\Benchmarking\VP.xlsm
+#### Emisores Latam: Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\MSCI\202405 LATAM.xlsx
+#### TD: Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\MSCI\202405 TD
+#### Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\MSCI\202405 Dashboard MSCI.xlsx
+#### Proxies: Z:\Mesa de Inversiones\Bottom-Up\...\Huella de Carbono\...\Lista Proxies - Huella y Comite mensual ASG.xlsx  (hoja "Reporte ASG Mensual" + hojas mensuales "YYYYMM")
+#%%
+### Librerías
+import os
+import pandas as pd
+import numpy as np
+import xlwings as xw
+import re
+import time
+from datetime import datetime
+#%%
+## falta revisar el codigo originador omogenizado para el analsis  contribuyentes
+mes = '06'
+anio = '2026'
+
+# ------------------------------------------------------------------
+# Configuración de la capa de Proxies ESG
+# ------------------------------------------------------------------
+ruta_proxies = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\2. Reportes\Reporte Mensual ASG\Lista Proxies - Huella y Comite mensual ASG.xlsx"
+
+# Si el usuario quiere fijar manualmente el período (formato 'YYYYMM'), lo define aquí.
+# Si se deja en None, el período se calcula automáticamente según la fecha de ejecución.
+periodo_proxy_manual = None  # Ej: '202608'
+
+MAPEO_PROXY_COLUMNAS = [
+    ('Nombre_MSCI', 'Nombre_MSCI'),
+    ('ISSUER_CNTRY_DOMICILE', 'ISSUER_CNTRY_DOMICILE'),
+    ('RATING', 'RATING'),
+    ('E', 'E'),
+    ('S', 'S'),
+    ('G', 'G'),
+    ('EW', 'EW'),
+    ('SW', 'SW'),
+    ('GW', 'GW'),
+    ('CONTROVERSIES', 'CONTROVERSIES'),
+    ('CO2/Sales', 'CO2/Sales'),
+    ('FUND_ESG_COVERAGE', 'FUND_ESG_COVERAGE'),
+    ('FUND_ESG_LEADERS_PCT', 'FUND_ESG_LEADERS_PCT'),
+    ('FUND_ESG_AVERAGE_PCT', 'FUND_ESG_AVERAGE_PCT'),
+    ('FUND_ESG_LAGGARDS_PCT', 'FUND_ESG_LAGGARDS_PCT'),
+    ('FUND_ESG_QUALITY_SCORE', 'FUND_ESG_QUALITY_SCORE'),
+    ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV'),
+    ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE'),
+    ('FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL', 'FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL'),
+    ('FUND_GOV_GLOBAL_LEADERS_PCT', 'FUND_GOV_GLOBAL_LEADERS_PCT'),
+    ('FUND_GOV_GLOBAL_AVERAGE_PCT', 'FUND_GOV_GLOBAL_AVERAGE_PCT'),
+    ('FUND_GOV_GLOBAL_LAGGARDS_PCT', 'FUND_GOV_GLOBAL_LAGGARDS_PCT'),
+    ('FUND_FINANCED_CARBON_EMISSIONS', 'FUND_FINANCED_CARBON_EMISSIONS'),
+    ('INDUSTRY_ADJUSTED_SCORE', 'INDUSTRY_ADJUSTED_SCORE'),
+    ('CO2/EVIC', 'CO2/EVIC'),
+    ('GOVERNANCE_PILLAR_QUARTILE', 'GOVERNANCE_PILLAR_QUARTILE'),
+    ('ITR', 'FUND_ITR_BAND'),
+]
+#%%
+def abrir_libro(ruta, descripcion="archivo"):
+    """
+    Valida que el archivo exista y lo abre con xlwings. Si algo falla, lanza un
+    error claro indicando cuál archivo y cuál ruta causaron el problema (en vez
+    del error críptico de Excel/COM).
+    """
+    if not os.path.exists(ruta):
+        raise FileNotFoundError(f"[ALERTA] No se encontró el {descripcion}. Verifica la ruta:\n{ruta}")
+    try:
+        return xw.Book(ruta, read_only=True, update_links=False)
+    except Exception as e:
+        raise RuntimeError(f"[ALERTA] No se pudo abrir el {descripcion} en:\n{ruta}\nDetalle: {e}")
+
+
+def abrir_hoja(wb, nombre_hoja, descripcion="hoja"):
+    """
+    Busca una hoja por nombre dentro de un libro ya abierto; si no existe, lanza
+    un error claro indicando qué hoja faltó.
+    """
+    nombres_hojas = [s.name for s in wb.sheets]
+    if nombre_hoja not in nombres_hojas:
+        wb.close()
+        raise ValueError(f"[ALERTA] No existe la {descripcion} '{nombre_hoja}'. Hojas disponibles: {nombres_hojas}")
+    return wb.sheets[nombre_hoja]
+#%%
+def traer_BD(anio, mes):
+    ruta = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Output\\Intermedio\\' + anio + mes + ' BD1.xlsx'
+    wb = abrir_libro(ruta, "archivo BD1")
+    sheet = wb.sheets['Sheet1']
+    sheet = sheet.used_range.value
+    df = pd.DataFrame(sheet)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0)
+    df_BU = df.loc[df['Strategy'].isin(['BU'])]
+    df_TD = df.loc[df['Strategy'].isin(['TD'])]
+    wb.close()
+    return df_BU, df_TD
+#%%
+def Base_BU(anio, mes, df_BU):
+    ruta = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Dataset\\MSCI\\" + anio + mes + " Dashboard MSCI.xlsx"
+    wb = abrir_libro(ruta, "archivo Dashboard MSCI")
+    sheet = wb.sheets[0]
+    sheet = sheet.used_range.value
+    wb.close()
+    df = pd.DataFrame(sheet)
+    df.columns = df.iloc[0, ::]
+    df_p_m = df.drop([0], axis=0)
+
+    ruta = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Dataset\\Parametria.xlsx"
+    wb = abrir_libro(ruta, "archivo Parametria")
+    sheet = wb.sheets['BU']
+    sheet = sheet.used_range.value
+    wb.close()
+
+    df = pd.DataFrame(sheet)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0)
+    df = df.set_index("ISIN")
+    dic = df.to_dict()
+
+    df_p_m.insert(0, 'Cod. OriginadorMSCI', df_p_m["Client_ID"].map(dic['Código Originador']))
+    df_p_m.insert(1, 'Sector', df_p_m["Client_ID"].map(dic['Sector']))
+    df_p_m.insert(2, 'País', df_p_m["Client_ID"].map(dic['País']))
+    df_p_m = df_p_m.dropna(subset=['Cod. OriginadorMSCI'])
+    df_p_m = df_p_m.drop_duplicates(subset=['Cod. OriginadorMSCI'])
+
+    df_BU.insert(0, 'Cod. OriginadorBU', df_BU["ISIN"].map(dic['Código Originador']))
+
+    df_p_bu = df_p_m.set_index("Cod. OriginadorMSCI")
+    dic = df_p_bu.to_dict()
+
+    columnas = [
+        ('Sector', 'Sector'),
+        ('País', 'País'),
+        ('Nombre_MSCI', 'ISSUER_NAME'),
+        ('ISSUER_CNTRY_DOMICILE', 'ISSUER_CNTRY_DOMICILE'),
+        ('IVA_INDUSTRY', 'IVA_INDUSTRY'),
+        ('RATING', 'IVA_COMPANY_RATING'),
+        ('IVA_RATING_TREND', 'IVA_RATING_TREND'),
+        ('E', 'ENVIRONMENTAL_PILLAR_SCORE'),
+        ('S', 'SOCIAL_PILLAR_SCORE'),
+        ('G', 'GOVERNANCE_PILLAR_SCORE'),
+        ('EW', 'ENVIRONMENTAL_PILLAR_WEIGHT'),
+        ('SW', 'SOCIAL_PILLAR_WEIGHT'),
+        ('GW', 'GOVERNANCE_PILLAR_WEIGHT'),
+        ('CONTROVERSIES', 'TOTAL_NUMBER_CONTROVERSIES'),
+        ('CO2 Tn', 'CARBON_EMISSIONS_SCOPE_12'),
+        ('CO2/Sales', 'CARBON_EMISSIONS_SCOPE_12_INTEN'),
+        ('CARBON_EMISSIONS_SCORE', 'CARBON_EMISSIONS_SCORE'),
+        ('CARBON_EMISSIONS_EXP_SCORE', 'CARBON_EMISSIONS_EXP_SCORE'),
+        ('CORP_GOVERNANCE_SCORE', 'CORP_GOVERNANCE_SCORE')
+    ]
+
+    for columna, clave in columnas:
+        df_BU.insert(len(df_BU.columns), columna, df_BU["Cod. OriginadorBU"].map(dic[clave]))
+
+    df_BU['FUND_ESG_COVERAGE'] = 'rt'
+    df_BU['FUND_ESG_LEADERS_PCT'] = 'rt'
+    df_BU['FUND_ESG_AVERAGE_PCT'] = 'rt'
+    df_BU['FUND_ESG_LAGGARDS_PCT'] = 'rt'
+    df_BU['FUND_ESG_QUALITY_SCORE'] = 'rt'
+    df_BU['FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV'] = 'rt'
+    df_BU['FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE'] = 'rt'
+
+    columnas_nuevas = [
+        ('GOVERNANCE_PILLAR_QUARTILE', 'GOVERNANCE_PILLAR_QUARTILE'),
+        ('GOVERNANCE_PCTL_GLOBAL', 'GOVERNANCE_PCTL_GLOBAL'),
+        ('INDUSTRY_ADJUSTED_SCORE', 'INDUSTRY_ADJUSTED_SCORE'),
+        ('CO2/EVIC', 'CARBON_EMISSIONS_EVIC_SCOPE_12_INTEN'),
+    ]
+
+    for columna, clave in columnas_nuevas:
+        df_BU.insert(len(df_BU.columns), columna, df_BU["Cod. OriginadorBU"].map(dic[clave]))
+
+    df_BU['FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL'] = 'rt'
+    df_BU['FUND_GOV_GLOBAL_LEADERS_PCT'] = 'rt'
+    df_BU['FUND_GOV_GLOBAL_AVERAGE_PCT'] = 'rt'
+    df_BU['FUND_GOV_GLOBAL_LAGGARDS_PCT'] = 'rt'
+    df_BU['FUND_FINANCED_CARBON_EMISSIONS'] = 'rt'
+
+    columnas_nuevas = [
+        ('ITR', 'ITR_BANDS'),
+    ]
+
+    for columna, clave in columnas_nuevas:
+        df_BU.insert(len(df_BU.columns), columna, df_BU["Cod. OriginadorBU"].map(dic[clave]))
+
+    return df_BU
+#%%
+def Detallado_TD(df_TD):
+    ruta = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Dataset\\MSCI\\' + anio + mes + ' TD.xlsx'
+    wb = abrir_libro(ruta, "archivo TD")
+    sheet = wb.sheets[0]
+    sheet = sheet.used_range.value
+    df = pd.DataFrame(sheet)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0)
+    df['INDUSTRY_ADJUSTED_SCORE'] = df['FUND_ESG_QUALITY_SCORE']
+    df['CO2/EVIC'] = df['FUND_FINANCED_CARBON_EMISSIONS']
+    df['GOVERNANCE_PILLAR_QUARTILE'] = df['FUND_GOV_GLOBAL_LEADERS_PCT']
+
+    df = df.rename(
+        columns={"FUND_NAME": "Nombre", "FUND_DOMICILE": "ISSUER_CNTRY_DOMICILE", "ESG_ENVIRONMENTAL_SCORE": "E"
+            , "ESG_SOCIAL_SCORE": "S", "ESG_GOVERNANCE_SCORE": "G", "FUND_ENVIRONMENTAL_WEIGHT": "EW",
+                 "FUND_SOCIAL_WEIGHT": "SW"
+            , "FUND_GOVERNANCE_WEIGHT": "GW", "FUND_WEIGHTED_AVG_CARBON_INTEN": "CO2/Sales"
+            , "FUND_ESG_RATING": "RATING", "FUND_VERY_SEVERE_CONTROVERSY_PCT": "CONTROVERSIES",
+                 "FUND_ASSET_CLASS": "Sector", "FUND_GEO_FOCUS": "País"})
+
+    wb.close()
+
+    df_TD = df_TD.copy(deep=True)
+
+    df_p_TD = df.set_index("Client_ID")
+    dic = df_p_TD.to_dict()
+
+    columnas = [
+        ('Sector', 'Sector'),
+        ('País', 'País'),
+        ('Nombre_MSCI', 'Nombre'),
+        ('ISSUER_CNTRY_DOMICILE', 'ISSUER_CNTRY_DOMICILE'),
+        ('RATING', 'RATING'),
+        ('E', 'E'),
+        ('S', 'S'),
+        ('G', 'G'),
+        ('EW', 'EW'),
+        ('SW', 'SW'),
+        ('GW', 'GW'),
+        ('CONTROVERSIES', 'CONTROVERSIES'),
+        ('CO2/Sales', 'CO2/Sales'),
+        ('FUND_ESG_COVERAGE', 'FUND_ESG_COVERAGE'),
+        ('FUND_ESG_LEADERS_PCT', 'FUND_ESG_LEADERS_PCT'),
+        ('FUND_ESG_AVERAGE_PCT', 'FUND_ESG_AVERAGE_PCT'),
+        ('FUND_ESG_LAGGARDS_PCT', 'FUND_ESG_LAGGARDS_PCT'),
+        ('FUND_ESG_QUALITY_SCORE', 'FUND_ESG_QUALITY_SCORE'),
+        ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_IMPROV'),
+        ('FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE', 'FUND_CARBON_SCOPE_12_INTEN_3Y_TREND_M_WORSE'),
+        ('FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL', 'FUND_ESG_QUALITY_SCORE_PCTL_GLOBAL'),
+        ('FUND_GOV_GLOBAL_LEADERS_PCT', 'FUND_GOV_GLOBAL_LEADERS_PCT'),
+        ('FUND_GOV_GLOBAL_AVERAGE_PCT', 'FUND_GOV_GLOBAL_AVERAGE_PCT'),
+        ('FUND_GOV_GLOBAL_LAGGARDS_PCT', 'FUND_GOV_GLOBAL_LAGGARDS_PCT'),
+        ('FUND_FINANCED_CARBON_EMISSIONS', 'FUND_FINANCED_CARBON_EMISSIONS'),
+        ('INDUSTRY_ADJUSTED_SCORE', 'INDUSTRY_ADJUSTED_SCORE'),
+        ('CO2/EVIC', 'CO2/EVIC'),
+        ('GOVERNANCE_PILLAR_QUARTILE', 'GOVERNANCE_PILLAR_QUARTILE'),
+        ('ITR', 'FUND_ITR_BAND')
+    ]
+
+    for columna, clave in columnas:
+        df_TD.insert(len(df_TD.columns), columna, df_TD["ISIN"].map(dic[clave]))
+    df_TD['Cod. OriginadorBU'] = df_TD['SBS']
+
+    return df_TD
+#%% md
+# Capa adicional: Proxies ESG para instrumentos "NoCov" (matching por SBS)
+#%%
+def calcular_periodo_proxy(periodo_manual=None, fecha_ejecucion=None):
+    """
+    Determina la hoja mensual (formato 'YYYYMM') a utilizar del archivo de proxies.
+    Prioridad: 1) periodo_manual definido por el usuario, 2) cálculo automático
+    según la fecha de ejecución (<=15 -> mes actual, >15 -> mes siguiente).
+    """
+    if periodo_manual:
+        return periodo_manual
+
+    fecha_ejecucion = fecha_ejecucion or datetime.now()
+
+    if fecha_ejecucion.day <= 15:
+        anio_p, mes_p = fecha_ejecucion.year, fecha_ejecucion.month
+    else:
+        if fecha_ejecucion.month == 12:
+            anio_p, mes_p = fecha_ejecucion.year + 1, 1
+        else:
+            anio_p, mes_p = fecha_ejecucion.year, fecha_ejecucion.month + 1
+
+    return f"{anio_p}{mes_p:02d}"
+#%%
+def cargar_mapa_proxies(ruta_proxies):
+    """
+    Lee la hoja 'Reporte ASG Mensual' del archivo de proxies y arma el diccionario
+    SBS del instrumento original (columna A) -> ISIN del proxy (columna H).
+    """
+    wb = abrir_libro(ruta_proxies, "archivo de proxies")
+    sheet = abrir_hoja(wb, 'Reporte ASG Mensual', "hoja de proxies")
+    datos = sheet.used_range.value
+    wb.close()
+
+    df_map = pd.DataFrame(datos)
+    df_map.columns = df_map.iloc[0, ::]
+    df_map = df_map.drop([0], axis=0)
+
+    df_map = df_map.iloc[:, [0, 7]].copy()  # Columna A (SBS) y H (Proxy ISIN), por posición
+    df_map.columns = ['SBS', 'ISIN_proxy']
+    df_map = df_map.dropna()
+    df_map['SBS'] = df_map['SBS'].astype(str).str.strip().str.upper()
+    df_map['ISIN_proxy'] = df_map['ISIN_proxy'].astype(str).str.strip().str.upper()
+    df_map = df_map.drop_duplicates(subset=['SBS'])
+
+    if df_map.empty:
+        print("[ALERTA] El mapeo de proxies (hoja 'Reporte ASG Mensual') quedó vacío. "
+              "Revisa que las columnas A (SBS) y H (Proxy) tengan datos.")
+
+    return df_map.set_index('SBS')['ISIN_proxy'].to_dict()
+#%%
+def cargar_esg_proxy(ruta_proxies, periodo):
+    """
+    Lee la hoja mensual 'YYYYMM' del archivo de proxies con la información ESG MSCI
+    asociada a los ISIN proxy, y arma un diccionario de diccionarios por campo,
+    indexado por 'Client_ID' (ISIN del proxy).
+    """
+    wb = abrir_libro(ruta_proxies, "archivo de proxies")
+    sheet = abrir_hoja(wb, periodo, f"hoja mensual de proxies '{periodo}'")
+    datos = sheet.used_range.value
+    wb.close()
+
+    df_esg = pd.DataFrame(datos)
+    df_esg.columns = df_esg.iloc[0, ::]
+    df_esg = df_esg.drop([0], axis=0)
+
+    df_esg['INDUSTRY_ADJUSTED_SCORE'] = df_esg['FUND_ESG_QUALITY_SCORE']
+    df_esg['CO2/EVIC'] = df_esg['FUND_FINANCED_CARBON_EMISSIONS']
+    df_esg['GOVERNANCE_PILLAR_QUARTILE'] = df_esg['FUND_GOV_GLOBAL_LEADERS_PCT']
+
+    df_esg = df_esg.rename(columns={
+        "FUND_NAME": "Nombre_MSCI",
+        "FUND_DOMICILE": "ISSUER_CNTRY_DOMICILE",
+        "ESG_ENVIRONMENTAL_SCORE": "E",
+        "ESG_SOCIAL_SCORE": "S",
+        "ESG_GOVERNANCE_SCORE": "G",
+        "FUND_ENVIRONMENTAL_WEIGHT": "EW",
+        "FUND_SOCIAL_WEIGHT": "SW",
+        "FUND_GOVERNANCE_WEIGHT": "GW",
+        "FUND_WEIGHTED_AVG_CARBON_INTEN": "CO2/Sales",
+        "FUND_ESG_RATING": "RATING",
+        "FUND_VERY_SEVERE_CONTROVERSY_PCT": "CONTROVERSIES",
+    })
+
+    df_esg['Client_ID'] = df_esg['Client_ID'].astype(str).str.strip().str.upper()
+    df_esg = df_esg.drop_duplicates(subset=['Client_ID'])
+    df_esg = df_esg.set_index('Client_ID')
+
+    return df_esg.to_dict()
+#%%
+def aplicar_proxies_esg(result_bd, ruta_proxies, periodo_manual=None):
+    """
+    Para los registros sin cobertura MSCI directa (RATING nulo, i.e. 'NoCov'),
+    busca su proxy por código SBS (no por ISIN) en 'Reporte ASG Mensual', y
+    completa los campos ESG con la información del proxy desde la hoja mensual
+    'YYYYMM' correspondiente. No modifica los atributos propios del instrumento
+    (ISIN, SBS, Cod. Originador, Fondo, Afp, Weight, Fecha, etc.).
+    """
+    if 'SBS' not in result_bd.columns:
+        raise KeyError("[ALERTA] La base consolidada no tiene columna 'SBS'; "
+                        "no se puede hacer el benchmarking de proxies por SBS.")
+
+    periodo = calcular_periodo_proxy(periodo_manual)
+    mapa_proxy = cargar_mapa_proxies(ruta_proxies)
+    esg_proxy_dict = cargar_esg_proxy(ruta_proxies, periodo)
+
+    result_bd = result_bd.copy()
+    sbs_norm = result_bd['SBS'].astype(str).str.strip().str.upper()
+
+    sin_cobertura = result_bd['RATING'].isna()
+
+    proxy_isin = pd.Series(np.nan, index=result_bd.index, dtype=object)
+    proxy_isin.loc[sin_cobertura] = sbs_norm.loc[sin_cobertura].map(mapa_proxy)
+
+    # --- Alertas del paso de matching (lo más sensible del proceso) ---
+    sbs_con_proxy = int((sin_cobertura & proxy_isin.notna()).sum())
+    sbs_sin_proxy = sorted(
+        result_bd.loc[sin_cobertura & proxy_isin.isna(), 'SBS'].dropna().astype(str).unique().tolist()
+    )
+    print(f"\n[INFO] Periodo de proxies utilizado: {periodo}")
+    print(f"[INFO] Instrumentos sin cobertura directa benchmarkeados vía proxy (match por SBS): {sbs_con_proxy}")
+    if sbs_sin_proxy:
+        print(f"[ALERTA] {len(sbs_sin_proxy)} instrumento(s) sin cobertura ESG NO tienen proxy definido "
+              f"en 'Reporte ASG Mensual'. Códigos SBS a revisar/completar:\n{sbs_sin_proxy}")
+
+    for columna, clave in MAPEO_PROXY_COLUMNAS:
+        if columna not in result_bd.columns:
+            continue
+        diccionario_campo = esg_proxy_dict.get(clave, {})
+        valores_proxy = proxy_isin.map(diccionario_campo)
+        mascara = sin_cobertura & result_bd[columna].isna() & proxy_isin.notna()
+        result_bd.loc[mascara, columna] = valores_proxy.loc[mascara]
+
+    return result_bd
+#%%
+def imprimir_resumen_benchmarking(result_bd):
+    """
+    Imprime en consola:
+    - Cantidad de instrumentos con cobertura ESG (directa o vía proxy) vs sin
+      cobertura, tras aplicar Opr() (columna 'Cobertura' ya calculada).
+    - % de cobertura ponderado por Weight (suma de Weight con Cobertura='Cov'
+      sobre el total de Weight), agrupado por Fondo y Afp, y el total general.
+    """
+    total = len(result_bd)
+    benchmarkeados = int((result_bd['Cobertura'] == 'Cov').sum())
+    no_benchmarkeados = int((result_bd['Cobertura'] == 'NoCov').sum())
+
+    print("\n=== Resumen de Benchmarking ===")
+    print(f"Instrumentos con cobertura ESG (directa o vía proxy): {benchmarkeados} de {total}")
+    print(f"Instrumentos SIN cobertura ESG: {no_benchmarkeados} de {total}")
+
+    if no_benchmarkeados > 0 and 'SBS' in result_bd.columns:
+        sbs_pendientes = sorted(
+            result_bd.loc[result_bd['Cobertura'] == 'NoCov', 'SBS'].dropna().astype(str).unique().tolist()
+        )
+        print(f"Códigos SBS pendientes de identificar un proxy: {sbs_pendientes}")
+
+    print("\n=== % de Cobertura ponderado por Weight (Fondo x Afp) ===")
+    resumen_pct = (
+        result_bd.groupby(['Fondo', 'Afp'])
+        .apply(lambda g: (g.loc[g['Cobertura'] == 'Cov', 'Weight'].sum() / g['Weight'].sum() * 100)
+               if g['Weight'].sum() else np.nan)
+        .reset_index(name='Cobertura_%')
+    )
+    for _, fila in resumen_pct.iterrows():
+        valor = fila['Cobertura_%']
+        valor_txt = f"{valor:.2f}%" if pd.notna(valor) else "N/A"
+        print(f"Fondo: {fila['Fondo']} | Afp: {fila['Afp']} -> Cobertura ponderada: {valor_txt}")
+
+    peso_total = result_bd['Weight'].sum()
+    cobertura_total = (result_bd.loc[result_bd['Cobertura'] == 'Cov', 'Weight'].sum() / peso_total * 100) if peso_total else np.nan
+    cobertura_total_txt = f"{cobertura_total:.2f}%" if pd.notna(cobertura_total) else "N/A"
+    print(f"\nCobertura ponderada TOTAL (todos los Fondos/Afp): {cobertura_total_txt}")
+#%%
+def Opr(result):
+    def replace_rating(value):
+        if pd.isna(value):
+            return "NoCov"
+        else:
+            return "Cov"
+
+    result['Cobertura'] = result['RATING'].apply(lambda x: replace_rating(x))
+
+    def sumar_condicional(fila):
+        rating_value = fila['RATING']
+        if pd.isna(rating_value):
+            rating_value = ''
+        return result[(result['Fondo'] == fila['Fondo']) & (result['Afp'] == fila['Afp']) & (
+                    result['Cobertura'] == fila['Cobertura'])]['Weight'].sum()
+
+    def sumar_condicional2(fila):
+        rating_value = fila['RATING']
+        if pd.isna(rating_value):
+            rating_value = ''
+        return result[(result['Fondo'] == fila['Fondo']) & (result['Afp'] == fila['Afp'])]['Weight'].sum()
+
+    result['Weight_Ingresado'] = result.apply(sumar_condicional2, axis=1)
+    result['Weight_Cubierto'] = result.apply(sumar_condicional, axis=1)
+    result['Weight_N'] = result['Weight'] / result['Weight_Cubierto']
+
+    result['trend*Wn'] = result['Weight_N'] * result['IVA_RATING_TREND']
+    result['E*Wn'] = result['Weight_N'] * result['E']
+    result['S*Wn'] = result['Weight_N'] * result['S']
+    result['G*Wn'] = result['Weight_N'] * result['G']
+    result['ESG*Wn'] = result['Weight_N'] * result['INDUSTRY_ADJUSTED_SCORE']
+    result['Controversia*Wn'] = result['Weight_N'] * result['CONTROVERSIES']
+    result['CO2/Sales*Wn'] = result['Weight_N'] * result['CO2/Sales']
+    result['CO2/EVIC*Wn'] = result['Weight_N'] * result['CO2/EVIC']
+    result['CO2*Wn'] = result['Weight_N'] * result['CO2 Tn']
+    result['Gov*Wn'] = result['Weight_N'] * result['GOVERNANCE_PILLAR_QUARTILE']
+
+    return result
+#%%
+df_BU, df_TD = traer_BD(anio, mes)
+
+df_BU = Base_BU(anio, mes, df_BU)
+df_TD = Detallado_TD(df_TD)
+df_BU
+df_TD
+result_bd = pd.concat([df_BU, df_TD])
+# Capa adicional de proxies ESG: completa registros 'NoCov' antes de calcular
+# 'Cobertura' en Opr(), de modo que un instrumento con proxy pase a 'Cov' de
+# forma transparente, sin alterar su identidad dentro del portafolio.
+result_bd = aplicar_proxies_esg(result_bd, ruta_proxies, periodo_proxy_manual)
+result_bd['Nombre'] = result_bd['Nombre_MSCI']
+result_bd = result_bd.drop(['Nombre_MSCI'], axis=1)
+result_bd1 = Opr(result_bd)
+imprimir_resumen_benchmarking(result_bd1)
+result_bd1.to_excel(
+    'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Output\\Base Comité Mensual\\' + anio + mes + ' Analisis BD.xlsx',
+    index=False)
+#%%
+# Plantilla de Peores Contribuyentes:
+def Contribuyentes(result_bd):
+    result_bd['Peso'] = result_bd.groupby(["Fecha", "Afp", "Fondo", 'Nombre'])['Weight'].transform('sum')
+    result_bd = result_bd.drop(['Weight'], axis=1)
+    result_bd["Fecha"] = pd.to_datetime(result_bd["Fecha"])
+    result_bd["key2"] = result_bd["Nombre"] + result_bd["Fondo"] + result_bd["Afp"] + result_bd["Fecha"].dt.strftime(
+        '%Y-%m-%d')
+    result_bd = result_bd.drop(['SBS', 'ISIN', 'Precio', 'Q'], axis=1)
+    result_bd = result_bd.drop_duplicates(subset='key2')
+    result_bd = result_bd.drop(['key2'], axis=1)
+    result_bd = result_bd.rename(columns={'Peso': 'Weight'})
+
+    df = result_bd.copy(deep=True)
+    df = df.drop(df.loc[df['RATING'].isin([None, "No cov", "AAA", "AA", "A"])].index)
+    df.drop(df[df['Weight'] < 0.002].index, inplace=True)
+    df["id"] = df["Afp"] + df["Fondo"]
+    df["SC"] = df['assetclass'].apply(lambda x: x[0:2])
+    df["id2"] = df["SC"] + df["Afp"]
+
+    N = 4
+    dfe = df.sort_values(by=['id', 'E'], ascending=[True, True]).groupby('id', as_index=False).nth[:N]
+    dfe.insert(5, 'Factor', 'E')
+    dfs = df.sort_values(by=['id', 'S'], ascending=[True, True]).groupby('id', as_index=False).nth[:N]
+    dfs["E"] = dfs["S"]
+    dfs.insert(5, 'Factor', 'S')
+    dfg = df.sort_values(by=['id', 'G'], ascending=[True, True]).groupby('id', as_index=False).nth[:N]
+    dfg["E"] = dfg["G"]
+    dfg.insert(5, 'Factor', 'X')
+    df_T = pd.concat([dfe, dfs, dfg])
+    df_T["id6"] = df_T["id"] + df_T["Factor"]
+    df_T = df_T.sort_values('id6', ascending=True)
+    #RV RF
+    N = 3
+    df2 = df.copy(deep=True)
+    df2 = df2.drop(df.loc[df['Fondo'].isin(["F1", "F2", "F3"])].index)
+    dfe1 = df2.sort_values(by=['id2', 'E'], ascending=[True, True]).groupby('id2', as_index=False).nth[:N]
+    dfe1.insert(5, 'Factor', 'E')
+    dfs1 = df2.sort_values(by=['id2', 'S'], ascending=[True, True]).groupby('id2', as_index=False).nth[:N]
+    dfs1["E"] = dfs1["S"]
+    dfs1.insert(5, 'Factor', 'S')
+    dfg1 = df2.sort_values(by=['id2', 'G'], ascending=[True, True]).groupby('id2', as_index=False).nth[:N]
+    dfg1["E"] = dfg1["G"]
+    dfg1.insert(5, 'Factor', 'X')
+    df_T1 = pd.concat([dfe1, dfs1, dfg1])
+    df_T1["Fondo"] = df_T1["SC"]
+
+    df_T1["id7"] = df_T1["id2"] + df_T1["Factor"]
+    df_T1 = df_T1.sort_values('id7', ascending=True)
+    df_PT = pd.concat([df_T, df_T1])
+    df_PT.rename(columns={'E': 'Score', 'RATING': 'Rating', 'INDUSTRY_ADJUSTED_SCORE': 'ESG'}, inplace=True)
+    df_PT = df_PT.drop(['S', 'G', 'id', 'id2', 'SC', 'id6', 'id7'], axis=1)
+    df_PT['Factor'] = df_PT['Factor'].replace(['X'], ['G'])
+
+    dfin = df_PT.drop(df_PT.loc[df['Afp'].isin(["Habitat", "Profuturo", "Prima"])].index)
+    dfha = df_PT.drop(df_PT.loc[df['Afp'].isin(["Profuturo", "Integra", "Prima"])].index)
+    dfri = df_PT.drop(df_PT.loc[df['Afp'].isin(["Habitat", "Profuturo", "Integra"])].index)
+    dfpf = df_PT.drop(df_PT.loc[df['Afp'].isin(["Habitat", "Prima", "Integra"])].index)
+    df_PT2 = pd.concat([dfin, dfri, dfpf, dfha])
+
+    df_PT2 = df_PT2.loc[
+        :, ['Fecha', 'Afp', 'Strategy', 'Fondo', 'assetclass', "Factor", 'Nombre', 'Rating', 'Weight', 'Score', 'ESG',
+            'CONTROVERSIES', 'CO2/Sales', 'Cod. OriginadorBU']]
+    df_PT2.to_excel(
+        'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Output\\Base Comité Mensual\\' + anio + mes + ' Peores Contribuyentes BD.xlsx',
+        index=False)
+    return df_PT2
+
+
+df_Contry = Contribuyentes(result_bd)
