@@ -1,0 +1,46 @@
+Diagnóstico exacto: es un efecto secundario de la expansión (`um_det`). En minería, **una misma mina tiene varias filas (una por mineral)**, todas con el mismo `unidad_minera`. Mi `um_det` suma `+1` por fila para lo no-retail → una mina con 4 minerales cuenta 4. Minsur tiene 3 minas pero ~11 filas de mineral → sale 11.
+
+Y sí, **está propagado a toda la columna** (mapa, Excel y FEN) porque `um_det` alimenta la lista `activos` expandida que usan todas las salidas. Afecta solo a minería (y cualquier emisor con varias filas por unidad); retail, malls y bancos están bien.
+
+## El fix (un solo bloque, corrige todos los outputs)
+
+Es en el bloque `um_det` que agregaste dentro de `build_model` (EDIT 1 de la etapa de expansión). Busca:
+```python
+    um_det = {}
+    for (e, u), g in dfm.groupby(["empresa", "ubigeo"]):
+        d_ = {}
+        for _, rr in g.iterrows():
+            nm = rr["unidad_minera"]
+            if pd.isna(nm):
+                continue
+            nm = str(nm)
+            nf = int(round(rr["acum"])) if str(rr["unidad_norm"]) == "activos" else 1
+            d_[nm] = d_.get(nm, 0) + nf
+        um_det[(e, u)] = d_
+```
+Reemplázalo por:
+```python
+    um_det = {}
+    for (e, u), g in dfm.groupby(["empresa", "ubigeo"]):
+        d_ = {}
+        for _, rr in g.iterrows():
+            nm = rr["unidad_minera"]
+            if pd.isna(nm):
+                continue
+            nm = str(nm)
+            if str(rr["unidad_norm"]) == "activos":
+                d_[nm] = d_.get(nm, 0) + int(round(rr["acum"]))  # retail: suma tiendas
+            else:
+                d_[nm] = 1   # minería/banca/malls: 1 activo por unidad, aunque tenga varias filas (minerales)
+        um_det[(e, u)] = d_
+```
+
+## Qué cambia
+
+La diferencia es solo la rama no-retail: antes **sumaba** una fila por mineral; ahora **fija 1 por unidad física** (la mina se cuenta una vez, tenga los minerales que tenga). Minsur pasa a 3, y toda la columna "Activos Físicos" queda consistente en mapa, Excel y FEN a la vez.
+
+- **Retail (Consumer/Peru Corp):** intacto — sigue sumando `acum` (tiendas), que era lo correcto.
+- **Malls/bancos:** intacto — ya contaban 1 por unidad.
+- **Intercorp:** su porción Interbank cuenta 1 por agencia (bien) y su porción Peru Corp sigue sumando tiendas (bien); solo se corrige si alguna sub-unidad minera tuviera filas múltiples, que no es el caso. No cambia su lógica.
+
+Corre y verifica Minsur = 3 (y de paso mira otra minera con varios minerales, ej. Nexa/Buenaventura, que también deberían bajar a su nº real de unidades).
