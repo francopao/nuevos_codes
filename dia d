@@ -1,0 +1,202 @@
+#%% md
+# 5. Reemplazo de ISIN por Proxies vía código SBS (Portafolio / BD1)
+#
+# Busca, para cada instrumento (por su código SBS), si tiene un proxy/benchmark
+# asignado manualmente en la hoja 'Reporte ASG Mensual' del archivo de proxies
+# (columna A = SBS, columna B = ISIN original, columna H = ISIN del proxy).
+# Si hay match, coloca el ISIN del proxy en la columna 'Proxie'; si no hay match,
+# conserva el ISIN original del instrumento. Además agrega una columna con una
+# fórmula nativa de Excel para verificar visualmente si hubo benchmarking exitoso,
+# imprime un resumen en consola, y genera un archivo adicional consolidado con
+# SBS, ISIN, Fondo y Afp de los 4 archivos procesados.
+#%%
+import pandas as pd
+import numpy as np
+import xlwings as xw
+from datetime import datetime
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font
+from openpyxl.utils import get_column_letter
+#%%
+# ------------------------------------------------------------------
+# Configuración
+# ------------------------------------------------------------------
+ruta_intermedio = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Output\\Intermedio'
+ruta_proxies = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\2. Reportes\Reporte Mensual ASG\Lista Proxies - Huella y Comite mensual ASG.xlsx"
+
+ARCHIVOS_BASE = ['Portafolio', 'BD1']
+SUFIJOS = ['', '_S']
+
+# Formato visual de la columna 'Proxie'
+COLOR_RELLENO_PROXY = 'FFF9E9A0'        # amarillo bajito (celdas no nulas de la columna)
+COLOR_RELLENO_SUSTITUIDO = 'FFF7DE6B'   # amarillo un poco más marcado (celdas donde sí se sustituyó el ISIN)
+COLOR_FUENTE_PROXY = 'FF002060'         # azul marino (toda la columna)
+#%%
+def calcular_periodo_archivos(fecha_ejecucion=None):
+    """
+    Determina anio/mes (formato 'YYYY'/'MM') de los archivos Portafolio/BD1 a procesar:
+    - anio: siempre el año actual.
+    - mes: si el día de ejecución es > 15, el mes actual; si es <= 15, el mes anterior.
+    """
+    fecha_ejecucion = fecha_ejecucion or datetime.now()
+    anio = str(fecha_ejecucion.year)
+
+    if fecha_ejecucion.day > 15:
+        mes_num = fecha_ejecucion.month
+    else:
+        mes_num = fecha_ejecucion.month - 1 if fecha_ejecucion.month > 1 else 12
+
+    mes = f"{mes_num:02d}"
+    return anio, mes
+#%%
+def normalizar_encabezado(nombre):
+    return str(nombre).strip().upper().replace(' ', '')
+
+
+def encontrar_columna(columnas, nombres_posibles):
+    """
+    Busca, de forma flexible (sin importar mayúsculas/minúsculas o espacios en el
+    header), cuál columna corresponde a alguno de los nombres candidatos.
+    """
+    mapa = {normalizar_encabezado(c): c for c in columnas}
+    for nombre in nombres_posibles:
+        clave = normalizar_encabezado(nombre)
+        if clave in mapa:
+            return mapa[clave]
+    return None
+#%%
+def cargar_mapa_proxies(ruta_proxies):
+    """
+    Lee la hoja 'Reporte ASG Mensual' del archivo de proxies y arma el diccionario
+    SBS (columna A) -> ISIN del proxy (columna H).
+    """
+    wb = xw.Book(ruta_proxies, read_only=True, update_links=False)
+    sheet = wb.sheets['Reporte ASG Mensual']
+    datos = sheet.used_range.value
+    wb.close()
+
+    df_map = pd.DataFrame(datos)
+    df_map.columns = df_map.iloc[0, ::]
+    df_map = df_map.drop([0], axis=0)
+
+    df_map = df_map.iloc[:, [0, 7]].copy()  # Columna A (SBS) y H (Proxy ISIN), por posición
+    df_map.columns = ['SBS', 'ISIN_proxy']
+    df_map = df_map.dropna(subset=['SBS', 'ISIN_proxy'])
+    df_map['SBS'] = df_map['SBS'].astype(str).str.strip().str.upper()
+    df_map['ISIN_proxy'] = df_map['ISIN_proxy'].astype(str).str.strip().str.upper()
+    df_map = df_map.drop_duplicates(subset=['SBS'])
+
+    return df_map.set_index('SBS')['ISIN_proxy'].to_dict()
+#%%
+def aplicar_formato_y_formula(ruta_salida, col_isin, col_proxie, filas_sustituidas):
+    """
+    - Aplica relleno amarillo bajito + fuente azul marino a toda celda no nula de
+      la columna 'Proxie'; relleno un poco más marcado + negrita en las celdas
+      donde sí hubo sustitución del ISIN por el proxy.
+    - Agrega una columna final con una fórmula nativa de Excel que compara el
+      ISIN original contra el valor de 'Proxie': si son iguales (no hubo
+      sustitución) marca "Cobertura"; si son distintos (se usó el proxy) marca
+      "Proxie". (Se usa el ISIN, no el SBS, para que la comparación sea
+      consistente: ambos son códigos ISIN).
+    """
+    wb = load_workbook(ruta_salida)
+    ws = wb.active
+
+    encabezados = [c.value for c in ws[1]]
+    col_isin_idx = encabezados.index(col_isin) + 1
+    col_proxie_idx = encabezados.index(col_proxie) + 1
+    col_check_idx = ws.max_column + 1
+
+    ws.cell(row=1, column=col_check_idx, value='Check Benchmarking')
+
+    letra_isin = get_column_letter(col_isin_idx)
+    letra_proxie = get_column_letter(col_proxie_idx)
+
+    relleno_proxy = PatternFill(start_color=COLOR_RELLENO_PROXY, end_color=COLOR_RELLENO_PROXY, fill_type='solid')
+    relleno_sustituido = PatternFill(start_color=COLOR_RELLENO_SUSTITUIDO, end_color=COLOR_RELLENO_SUSTITUIDO, fill_type='solid')
+    fuente_proxy = Font(color=COLOR_FUENTE_PROXY)
+    fuente_proxy_sustituido = Font(color=COLOR_FUENTE_PROXY, bold=True)
+
+    filas_sustituidas_excel = set(pos + 2 for pos in filas_sustituidas)
+
+    for fila in range(2, ws.max_row + 1):
+        celda_proxie = ws.cell(row=fila, column=col_proxie_idx)
+        if celda_proxie.value is not None and str(celda_proxie.value).strip() != '':
+            if fila in filas_sustituidas_excel:
+                celda_proxie.fill = relleno_sustituido
+                celda_proxie.font = fuente_proxy_sustituido
+            else:
+                celda_proxie.fill = relleno_proxy
+                celda_proxie.font = fuente_proxy
+
+        ws.cell(row=fila, column=col_check_idx,
+                 value=f'=IF({letra_isin}{fila}={letra_proxie}{fila},"Cobertura","Proxie")')
+
+    wb.save(ruta_salida)
+#%%
+def procesar_archivo(nombre_base, sufijo, anio, mes, mapa_proxy):
+    nombre_archivo = f'{anio}{mes} {nombre_base}{sufijo}.xlsx'
+    ruta_entrada = ruta_intermedio + '\\' + nombre_archivo
+
+    wb = xw.Book(ruta_entrada, read_only=True, update_links=False)
+    sheet = wb.sheets[0]
+    datos = sheet.used_range.value
+    wb.close()
+
+    df = pd.DataFrame(datos)
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0).reset_index(drop=True)
+
+    col_sbs = encontrar_columna(df.columns, ['SBS'])
+    col_isin = encontrar_columna(df.columns, ['ISIN'])
+    col_fondo = encontrar_columna(df.columns, ['Fondo'])
+    col_afp = encontrar_columna(df.columns, ['Afp'])
+
+    sbs_norm = df[col_sbs].astype(str).str.strip().str.upper()
+    isin_original = df[col_isin].astype(str)
+
+    proxie_valores = sbs_norm.map(mapa_proxy)
+
+    exitosos = int(proxie_valores.notna().sum())
+    fallidos = int(proxie_valores.isna().sum())
+    print(f"[{nombre_archivo}] Benchmarking exitoso: {exitosos} instrumentos | "
+          f"Sin proxy encontrado: {fallidos} instrumentos")
+
+    # Si hay match por SBS, se usa el ISIN del proxy; si no, se conserva el ISIN original.
+    df['Proxie'] = proxie_valores.where(proxie_valores.notna(), isin_original)
+
+    filas_sustituidas = df.index[proxie_valores.notna()].tolist()
+
+    nombre_salida = f'{anio}{mes} {nombre_base}{sufijo} con Proxies.xlsx'
+    ruta_salida = ruta_intermedio + '\\' + nombre_salida
+
+    df.to_excel(ruta_salida, index=False)
+    aplicar_formato_y_formula(ruta_salida, col_isin, 'Proxie', filas_sustituidas)
+
+    print(f"Archivo generado: {nombre_salida}")
+
+    resumen = df[[col_sbs, col_isin, col_fondo, col_afp]].copy()
+    resumen.columns = ['SBS', 'ISIN', 'Fondo', 'Afp']
+    return resumen
+#%%
+# ------------------------------------------------------------------
+# Ejecución
+# ------------------------------------------------------------------
+anio, mes = calcular_periodo_archivos()
+mapa_proxy = cargar_mapa_proxies(ruta_proxies)
+
+resumenes = []
+for nombre_base in ARCHIVOS_BASE:
+    for sufijo in SUFIJOS:
+        resumen = procesar_archivo(nombre_base, sufijo, anio, mes, mapa_proxy)
+        resumenes.append(resumen)
+
+resumen_total = pd.concat(resumenes, ignore_index=True)
+
+nombre_resumen = f'{anio}{mes} Resumen Benchmarking Proxies.xlsx'
+ruta_resumen = ruta_intermedio + '\\' + nombre_resumen
+
+with pd.ExcelWriter(ruta_resumen, engine='openpyxl') as writer:
+    resumen_total.to_excel(writer, sheet_name=f'{anio}{mes}', index=False)
+
+print(f"Archivo generado: {nombre_resumen}")
