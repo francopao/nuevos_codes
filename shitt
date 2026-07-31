@@ -1,0 +1,41 @@
+Necesito ver cómo está armado hoy ese segundo chart tabla para darte el ajuste exacto sin tocar nada más: de dónde saca el "AUM (%)" por fila y de dónde sale el AUM total del emisor.Ya veo: hoy `AUM (%)` usa como denominador el **total de la tabla** (suma de todos los emisores de esas regiones → Total da 100%). Tú quieres que el denominador sea el **AUM total del propio emisor** (`EXP_CLASE[emisor].TOTAL`). Reviso `buildRegionGroups` para confirmar si el AUM está filtrado por clase (RV/RF), y así usar el denominador correcto.El AUM por emisor está filtrado por clase (`a.m * classFrac(a.e)`), así que el denominador debe ser el total del emisor **en esa misma clase** para que el ratio sea coherente. Veo `classFrac` para usar el accessor exacto.Perfecto, es un cambio de una sola función. Hoy la columna `AUM (%)` divide entre el **total de la tabla** (por eso el Total da 100%). Lo cambio para que divida entre el **AUM total del propio emisor** (misma clase RV/RF/TODOS que el selector), que es justo tu interpretación: "qué porción del AUM total del emisor está comprometido en las regiones elegidas".
+
+## El ajuste (solo el 2º chart tabla)
+
+Busca la función `tablaEmpresasHTML` completa (línea ~4991) y reemplázala por esta:
+
+```javascript
+// ---- HTML de una tabla de empresas (con fila Total). titulo opcional (sector) ----
+function tablaEmpresasHTML(empresas, titulo){
+  const rows = Object.entries(empresas).sort((a,b)=> b[1].aum - a[1].aum);
+  // AUM (%) = AUM comprometido del emisor en las regiones elegidas / AUM TOTAL
+  // del emisor (misma clase que el selector). El Total NO da 100% necesariamente.
+  const emTotOf = e => {
+    const x = EXP_CLASE[e]; if(!x) return 0;
+    const ck = classKey();
+    return ck==='TODOS' ? (x.TOTAL||0) : (x[ck]||0);
+  };
+  let totN=0, totA=0, totTot=0;
+  let h = (titulo ? '<div class="reg-tbl-title">'+titulo+'</div>' : '') +
+    '<table class="regtbl"><thead><tr><th>Empresa</th><th>Activos Físicos</th>'+
+    '<th>AUM</th><th>AUM (%)</th></tr></thead><tbody>';
+  rows.forEach(([e,info])=>{
+    const emTot = emTotOf(e);
+    totN += info.n; totA += info.aum; totTot += emTot;
+    const pct = emTot>0 ? info.aum/emTot*100 : 0;
+    h += '<tr><td class="idx">'+e+'</td><td>'+info.n+'</td>'+
+         '<td>'+fmtS(info.aum)+'</td><td>'+fmtP(pct)+'</td></tr>';
+  });
+  h += '<tr class="reg-total"><td class="idx">Total</td><td>'+totN+'</td>'+
+       '<td>'+fmtS(totA)+'</td><td>'+fmtP(totTot>0?totA/totTot*100:0)+'</td></tr></tbody></table>';
+  return h;
+}
+```
+
+## Qué cambia exactamente
+
+- Cada fila: `AUM (%) = AUM del emisor en las regiones elegidas ÷ AUM total del emisor` (en la clase activa del selector RV/RF/TODOS). Ejemplo: si Peru Corp tiene 472M totales y en "Norte + Sur" tiene comprometidos 161M → muestra **34.1%**.
+- Fila **Total**: ahora es `AUM comprometido sumado ÷ suma de los AUM totales de esos emisores`, así que **no da 100%** (salvo coincidencia) — como pediste.
+- Coherencia por clase: como el AUM de cada fila ya viene filtrado por `classFrac`, el denominador usa el total de esa misma clase, así el ratio nunca pasa de 100% por fila.
+
+No toco nada más: la tabla izquierda (Peso %), los conteos de activos, Intercorp, Shopping Malls y el resto quedan igual. La columna `AUM (%)` es la única afectada.
