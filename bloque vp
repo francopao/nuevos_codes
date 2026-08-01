@@ -1,0 +1,99 @@
+#%% md
+# VP_Soberanos
+#%%
+def vp_soberanos(mes, anio):
+    """
+    Lee 'Z:\\Benchmarking\\VP.xlsm', hoja 'CalcP', extrae ISIN y SBS,
+    remueve encabezados repetidos, filas vacías/de sección y duplicados
+    (un activo se considera duplicado si coincide su SBS o su ISIN,
+    no es necesario que coincidan ambos a la vez). Guarda el resultado
+    como 'YYYYMM Soberanos.txt' en la ruta VP.
+    """
+    ruta_vp = r'Z:\Benchmarking\VP.xlsm'
+    ruta_salida = r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\VP'
+
+    # --- Lectura del archivo fuente ---
+    try:
+        df_raw = leer_hoja(ruta_vp, 'CalcP')
+    except FileNotFoundError:
+        raise FileNotFoundError(f"No se encontró el archivo VP.xlsm en la ruta: {ruta_vp}")
+    except KeyError:
+        raise KeyError("No se encontró la hoja 'CalcP' dentro de VP.xlsm. Verificar el nombre de la hoja.")
+    except Exception as e:
+        raise RuntimeError(f"Error inesperado al leer VP.xlsm / hoja 'CalcP': {e}")
+
+    if df_raw.empty:
+        raise ValueError("La hoja 'CalcP' fue leída pero está vacía. Verificar el archivo fuente.")
+
+    # --- Localizar dinámicamente las columnas ISIN y SBS ---
+    # (evita depender de una letra de columna fija, ya que 'CalcP' repite
+    # el encabezado por cada sección: Renta Fija Local, Internacional, Fondos Mutuos, etc.)
+    col_isin_idx = None
+    col_sbs_idx = None
+    for _, row in df_raw.iterrows():
+        valores = [str(v).strip() if v is not None else '' for v in row]
+        if 'ISIN' in valores and 'SBS' in valores:
+            col_isin_idx = valores.index('ISIN')
+            col_sbs_idx = valores.index('SBS')
+            break
+
+    if col_isin_idx is None or col_sbs_idx is None:
+        raise ValueError("No se pudo ubicar el encabezado 'ISIN'/'SBS' en la hoja 'CalcP'. "
+                          "Verificar que la estructura de la hoja no haya cambiado.")
+
+    # --- Identificar todas las filas de encabezado repetido (una por cada sección) ---
+    filas_encabezado = df_raw.index[
+        (df_raw[col_isin_idx].astype(str).str.strip() == 'ISIN') &
+        (df_raw[col_sbs_idx].astype(str).str.strip() == 'SBS')
+    ]
+    df_datos = df_raw.drop(index=filas_encabezado)
+
+    # --- Extraer únicamente ISIN y SBS ---
+    df_sob = df_datos[[col_isin_idx, col_sbs_idx]].copy()
+    df_sob.columns = ['ISIN', 'SBS']
+
+    # --- Limpiar filas vacías, títulos de sección (asset class) o basura ---
+    df_sob['ISIN'] = df_sob['ISIN'].apply(lambda x: str(x).strip() if x is not None else '')
+    df_sob['SBS'] = df_sob['SBS'].apply(lambda x: str(x).strip() if x is not None else '')
+    df_sob = df_sob.replace({'None': '', 'nan': ''})
+
+    # Filas donde ambos campos están vacíos -> descartar (filas en blanco o títulos de sección)
+    df_sob = df_sob[~((df_sob['ISIN'] == '') & (df_sob['SBS'] == ''))]
+
+    if df_sob.empty:
+        raise ValueError("No se encontraron registros válidos de ISIN/SBS tras la limpieza. "
+                          "Revisar la hoja 'CalcP'.")
+
+    # --- Remover duplicados: se considera duplicado si coincide el SBS o el ISIN
+    #     con un registro previo (no es obligatorio que ambos coincidan a la vez) ---
+    df_sob = df_sob.reset_index(drop=True)
+    isin_visto, sbs_visto, filas_mantener = set(), set(), []
+    for i, r in df_sob.iterrows():
+        isin_v, sbs_v = r['ISIN'], r['SBS']
+        es_dup = (isin_v != '' and isin_v in isin_visto) or (sbs_v != '' and sbs_v in sbs_visto)
+        if not es_dup:
+            filas_mantener.append(i)
+            if isin_v != '':
+                isin_visto.add(isin_v)
+            if sbs_v != '':
+                sbs_visto.add(sbs_v)
+    df_sob_final = df_sob.loc[filas_mantener].reset_index(drop=True)
+
+    # --- Guardar archivo de salida ---
+    nombre_archivo = f"{anio}{mes} Soberanos.txt"
+    ruta_completa = Path(ruta_salida) / nombre_archivo
+
+    try:
+        df_sob_final.to_csv(ruta_completa, sep=',', index=False)
+    except PermissionError:
+        raise PermissionError(f"No se pudo guardar el archivo en '{ruta_completa}'. "
+                               f"Verificar que no esté abierto o que se tengan permisos de escritura.")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"La ruta de destino no existe: {ruta_salida}. Verificar la carpeta 'VP'.")
+    except Exception as e:
+        raise RuntimeError(f"Error inesperado al guardar '{nombre_archivo}': {e}")
+
+    print(f"Archivo generado: {ruta_completa} | Total de activos únicos: {len(df_sob_final)}")
+    return df_sob_final
+
+df_soberanos = vp_soberanos(mes, anio)
