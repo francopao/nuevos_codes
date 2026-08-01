@@ -1,0 +1,111 @@
+#%% md
+# VP_Soberanos
+#%%
+def vp_soberanos(mes, anio):
+    """
+    Lee 'Z:\\Benchmarking\\VP.xlsm', hoja 'CalcP', extrae ISIN y SBS,
+    remueve encabezados repetidos (en todas sus variantes: 'ISIN' o 'Name'),
+    filas vacías/de sección/fecha previas al primer encabezado, y
+    commodities/derivados (futuros, PUT/CALL, etc.). Guarda el resultado
+    como 'YYYYMM Soberanos.txt' en la ruta VP.
+    """
+    ruta_vp = r'Z:\Benchmarking\VP.xlsm'
+    ruta_salida = r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Dataset\VP'
+
+    # --- Lectura del archivo fuente ---
+    try:
+        df_raw = leer_hoja(ruta_vp, 'CalcP')
+    except FileNotFoundError:
+        raise FileNotFoundError(f"No se encontró el archivo VP.xlsm en la ruta: {ruta_vp}")
+    except KeyError:
+        raise KeyError("No se encontró la hoja 'CalcP' dentro de VP.xlsm. Verificar el nombre de la hoja.")
+    except Exception as e:
+        raise RuntimeError(f"Error inesperado al leer VP.xlsm / hoja 'CalcP': {e}")
+
+    if df_raw.empty:
+        raise ValueError("La hoja 'CalcP' fue leída pero está vacía. Verificar el archivo fuente.")
+
+    # --- Localizar dinámicamente las columnas ISIN y SBS ---
+    # (evita depender de una letra de columna fija; 'CalcP' repite el encabezado
+    # por cada sección: Renta Fija Local, Internacional, Fondos Mutuos, Futuros, Opciones...)
+    col_isin_idx = None
+    col_sbs_idx = None
+    for _, row in df_raw.iterrows():
+        valores = [str(v).strip() if v is not None else '' for v in row]
+        if 'ISIN' in valores and 'SBS' in valores:
+            col_isin_idx = valores.index('ISIN')
+            col_sbs_idx = valores.index('SBS')
+            break
+
+    if col_isin_idx is None or col_sbs_idx is None:
+        raise ValueError("No se pudo ubicar el encabezado 'ISIN'/'SBS' en la hoja 'CalcP'. "
+                          "Verificar que la estructura de la hoja no haya cambiado.")
+
+    # --- Identificar TODAS las filas de encabezado repetido ---
+    # se detecta por el valor literal 'SBS' en su columna (cubre secciones donde la
+    # otra columna dice 'ISIN' o 'Name', como en Futuros/Opciones)
+    filas_encabezado = df_raw.index[df_raw[col_sbs_idx].astype(str).str.strip() == 'SBS']
+
+    if len(filas_encabezado) == 0:
+        raise ValueError("No se detectaron filas de encabezado ('SBS') en 'CalcP'. "
+                          "Verificar la estructura de la hoja.")
+
+    # --- Descartar todo lo anterior al primer encabezado (fecha, títulos, filas vacías) ---
+    primer_header = filas_encabezado.min()
+    df_datos = df_raw.loc[primer_header:].drop(index=filas_encabezado)
+
+    # --- Extraer únicamente ISIN y SBS ---
+    df_sob = df_datos[[col_isin_idx, col_sbs_idx]].copy()
+    df_sob.columns = ['ISIN', 'SBS']
+
+    # --- Limpiar valores: quitar espacios (internos y externos) y textos nulos ---
+    def limpiar(x):
+        return '' if x is None else str(x).strip().replace(' ', '')
+
+    df_sob['ISIN'] = df_sob['ISIN'].apply(limpiar)
+    df_sob['SBS'] = df_sob['SBS'].apply(limpiar)
+    df_sob = df_sob.replace({'None': '', 'nan': ''})
+
+    # Filas donde ambos campos están vacíos -> descartar (filas en blanco o títulos de sección)
+    df_sob = df_sob[~((df_sob['ISIN'] == '') & (df_sob['SBS'] == ''))]
+
+    if df_sob.empty:
+        raise ValueError("No se encontraron registros válidos de ISIN/SBS tras la limpieza. "
+                          "Revisar la hoja 'CalcP'.")
+
+    # --- Excluir commodities/derivados (futuros, PUT/CALL, índices) y similares ---
+    patrones_excluir = ['FTCMEF0', 'PTCMEF0', 'COMDTY', '-CALL', '-PUT', 'INDEX']
+
+    def es_derivado(isin, sbs):
+        texto = f"{isin} {sbs}".upper()
+        return any(p in texto for p in patrones_excluir)
+
+    df_sob = df_sob[~df_sob.apply(lambda r: es_derivado(r['ISIN'], r['SBS']), axis=1)]
+
+    if df_sob.empty:
+        raise ValueError("Tras excluir commodities/derivados no quedaron registros válidos. "
+                          "Revisar los patrones de exclusión o la hoja 'CalcP'.")
+
+    df_sob_final = df_sob.reset_index(drop=True)
+
+    # --- Guardar archivo de salida ---
+    nombre_archivo = f"{anio}{mes} Soberanos.txt"
+    ruta_completa = Path(ruta_salida) / nombre_archivo
+
+    try:
+        with open(ruta_completa, 'w', newline='', encoding='utf-8') as f:
+            f.write('ISIN,SBS\r\n')
+            for _, r in df_sob_final.iterrows():
+                f.write(f"{r['ISIN']},{r['SBS']}\r\n")
+    except PermissionError:
+        raise PermissionError(f"No se pudo guardar el archivo en '{ruta_completa}'. "
+                               f"Verificar que no esté abierto o que se tengan permisos de escritura.")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"La ruta de destino no existe: {ruta_salida}. Verificar la carpeta 'VP'.")
+    except Exception as e:
+        raise RuntimeError(f"Error inesperado al guardar '{nombre_archivo}': {e}")
+
+    print(f"Archivo generado: {ruta_completa} | Total de registros: {len(df_sob_final)}")
+    return df_sob_final
+
+df_soberanos = vp_soberanos(mes, anio)
