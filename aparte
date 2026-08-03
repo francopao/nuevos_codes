@@ -1,0 +1,47 @@
+**Bloque 8 — imports, al inicio del archivo (línea ~14, junto a `import re`)**
+
+```python
+import re
+import time
+from datetime import datetime
+from openpyxl.styles import PatternFill
+```
+
+**Bloque 9 — Dentro de `Contribuyentes`, justo antes de la selección final de columnas (línea ~489, antes del `df_PT2 = df_PT2.loc[...]` que ya tenía el Bloque 7)**
+
+```python
+    # Le agrego el asterisco al nombre de los instrumentos que sí llevaron proxy,
+    # para diferenciarlos a simple vista en el reporte.
+    df_PT2['Nombre'] = df_PT2.apply(
+        lambda fila: f"{fila['Nombre']}*" if isinstance(fila.get('Proxie'), str) and fila['Proxie'] != '' else fila['Nombre'],
+        axis=1
+    )
+
+    df_PT2 = df_PT2.loc[
+        :, ['Fecha', 'Afp', 'Strategy', 'Fondo', 'assetclass', "Factor", 'Nombre', 'Rating', 'Weight', 'Score', 'ESG',
+            'CONTROVERSIES', 'CO2/Sales', 'Cod. OriginadorBU', 'Proxie']]
+```
+
+**Bloque 10 — Reemplazo del `df_PT2.to_excel(...)` (línea ~492-494)**
+
+```python
+    ruta_salida = ('Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\'
+                   'Crédito - BU\\3. ESG\\9. ESG Manager - MSCI\\1.Data Histórica\\Output\\Base Comité Mensual\\'
+                   + anio + mes + ' Peores Contribuyentes BD.xlsx')
+
+    with pd.ExcelWriter(ruta_salida, engine='openpyxl') as writer:
+        df_PT2.to_excel(writer, index=False, sheet_name='Sheet1')
+        hoja = writer.sheets['Sheet1']
+
+        # Uso un amarillo bien suave (más claro que #E3E829) para no saturar la vista.
+        relleno_proxy = PatternFill(start_color='FFF9C4', end_color='FFF9C4', fill_type='solid')
+
+        for fila_idx, valor_proxie in enumerate(df_PT2['Proxie'], start=2):  # la fila 1 es el encabezado
+            if isinstance(valor_proxie, str) and valor_proxie != '':
+                for col_idx in range(1, len(df_PT2.columns) + 1):
+                    hoja.cell(row=fila_idx, column=col_idx).fill = relleno_proxy
+
+    return df_PT2
+```
+
+(esto reemplaza por completo el bloque anterior que terminaba en `index=False)` y el `return df_PT2` que venía después)
