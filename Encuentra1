@@ -1,0 +1,174 @@
+**Bloque 1 — `cargar_mapa_proxies` (línea ~264)**
+
+Reemplazo la función completa:
+
+```python
+def cargar_mapa_proxies(ruta_proxies):
+    """
+    Leo la hoja 'Reporte ASG Mensual' del archivo de proxies y armo el diccionario
+    SBS del instrumento original (columna A) -> ISIN del proxy (columna H).
+    """
+    wb = xw.Book(ruta_proxies, read_only=True, update_links=False)
+    sheet = wb.sheets['Reporte ASG Mensual']
+    datos = sheet.used_range.value
+    wb.close()
+
+    df_map = pd.DataFrame(datos)
+    df_map.columns = df_map.iloc[0, ::]
+    df_map = df_map.drop([0], axis=0)
+
+    df_map = df_map.iloc[:, [0, 7]].copy()  # Uso la columna A (SBS) y la H (Proxy ISIN), por posición
+    df_map.columns = ['SBS', 'ISIN_proxy']
+    df_map = df_map.dropna()
+    df_map['SBS'] = df_map['SBS'].astype(str).str.strip().str.upper()
+    df_map['ISIN_proxy'] = df_map['ISIN_proxy'].astype(str).str.strip().str.upper()
+    df_map = df_map.drop_duplicates(subset=['SBS'])
+
+    if df_map.empty:
+        print("[ALERTA] Encontré vacío el mapeo de proxies (hoja 'Reporte ASG Mensual'). "
+              "Reviso que las columnas A (SBS) y H (Proxy) tengan datos.")
+
+    return df_map.set_index('SBS')['ISIN_proxy'].to_dict()
+```
+
+**Bloque 2 — `cargar_esg_proxy`, dentro del `.rename(columns={...})` (línea ~312)**
+
+```python
+    df_esg = df_esg.rename(columns={
+        "FUND_NAME": "Nombre",
+        "FUND_DOMICILE": "ISSUER_CNTRY_DOMICILE",
+        "ESG_ENVIRONMENTAL_SCORE": "E",
+        "ESG_SOCIAL_SCORE": "S",
+        "ESG_GOVERNANCE_SCORE": "G",
+        "FUND_ENVIRONMENTAL_WEIGHT": "EW",
+        "FUND_SOCIAL_WEIGHT": "SW",
+        "FUND_GOVERNANCE_WEIGHT": "GW",
+        "FUND_WEIGHTED_AVG_CARBON_INTEN": "CO2/Sales",
+        "FUND_ESG_RATING": "RATING",
+        "FUND_VERY_SEVERE_CONTROVERSY_PCT": "CONTROVERSIES",
+        "FUND_ASSET_CLASS": "Sector",
+        "FUND_GEO_FOCUS": "País",
+    })
+    # Uso las mismas columnas que Detallado_TD(df_TD), porque los proxies son
+    # fondos y comparten esa estructura tipo TD.
+```
+
+**Bloque 3 — `MAPEO_PROXY_COLUMNAS` (línea ~36-37)**
+
+```python
+MAPEO_PROXY_COLUMNAS = [
+    # Saco 'Nombre_MSCI' de este mapeo a propósito: no quiero que el proxy
+    # reemplace el nombre del instrumento original. El nombre del proxy lo
+    # manejo aparte, en la columna 'Proxie' que agrego en aplicar_proxies_esg.
+    ('ISSUER_CNTRY_DOMICILE', 'ISSUER_CNTRY_DOMICILE'),
+```
+(dejo el resto de la lista igual, desde `('RATING', 'RATING'),` hacia abajo)
+
+**Bloque 4 — `aplicar_proxies_esg` (línea ~333)**
+
+Reemplazo la función completa:
+
+```python
+def aplicar_proxies_esg(result_bd, ruta_proxies, periodo_manual=None):
+    """
+    Para los registros sin cobertura MSCI directa (RATING nulo, i.e. 'NoCov'),
+    busco su proxy por código SBS (no por ISIN) en 'Reporte ASG Mensual', y
+    completo los campos ESG con la información del proxy desde la hoja mensual
+    'YYYYMM' correspondiente. No modifico los atributos propios del instrumento
+    (ISIN, SBS, Cod. Originador, Fondo, Afp, Weight, Fecha, Nombre, etc.).
+    Dejo registrado en la columna 'Proxie' el nombre del proxy usado, para que
+    en el output se vea claramente cuándo se usó un proxy.
+    """
+    if 'SBS' not in result_bd.columns:
+        raise KeyError("[ALERTA] La base consolidada no tiene columna 'SBS'; "
+                       "no puedo hacer el benchmarking de proxies por SBS.")
+
+    periodo = calcular_periodo_proxy(periodo_manual)
+    mapa_proxy = cargar_mapa_proxies(ruta_proxies)
+    esg_proxy_dict = cargar_esg_proxy(ruta_proxies, periodo)
+
+    result_bd = result_bd.copy()
+    sbs_norm = result_bd['SBS'].astype(str).str.strip().str.upper()
+
+    sin_cobertura = result_bd['RATING'].isna()
+
+    proxy_isin = pd.Series(np.nan, index=result_bd.index, dtype=object)
+    proxy_isin.loc[sin_cobertura] = sbs_norm.loc[sin_cobertura].map(mapa_proxy)
+
+    # --- Reviso qué tan bien matcheó el proxy (lo más sensible del proceso) ---
+    sbs_con_proxy = int((sin_cobertura & proxy_isin.notna()).sum())
+    sbs_sin_proxy = sorted(
+        result_bd.loc[sin_cobertura & proxy_isin.isna(), 'SBS'].dropna().astype(str).unique().tolist()
+    )
+    print(f"\n[INFO] Periodo de proxies que uso: {periodo}")
+    print(f"[INFO] Instrumentos sin cobertura directa que benchmarkeo vía proxy (match por SBS): {sbs_con_proxy}")
+    if sbs_sin_proxy:
+        print(f"[ALERTA] {len(sbs_sin_proxy)} instrumento(s) sin cobertura ESG NO tienen proxy definido "
+              f"en 'Reporte ASG Mensual'. Códigos SBS que me faltan revisar/completar:\n{sbs_sin_proxy}")
+
+    # Nombre del proxy usado (no su ISIN), solo en las filas donde sí hubo match.
+    dic_nombre_proxy = esg_proxy_dict.get('Nombre', {})
+    result_bd['Proxie'] = proxy_isin.map(dic_nombre_proxy)
+    result_bd['Proxie'] = result_bd['Proxie'].where(proxy_isin.notna(), '')
+
+    for columna, clave in MAPEO_PROXY_COLUMNAS:
+        if columna not in result_bd.columns:
+            continue
+        diccionario_campo = esg_proxy_dict.get(clave, {})
+        valores_proxy = proxy_isin.map(diccionario_campo)
+        mascara = sin_cobertura & result_bd[columna].isna() & proxy_isin.notna()
+        result_bd.loc[mascara, columna] = valores_proxy.loc[mascara]
+
+    return result_bd
+```
+
+**Bloque 5 — Añadir función nueva justo después de `aplicar_proxies_esg` y antes de `def Opr(result):` (línea ~362)**
+
+```python
+def imprimir_resumen_benchmarking(result_bd):
+    """
+    Imprimo en consola cuántos instrumentos quedaron con cobertura ESG (directa
+    o vía proxy) vs sin cobertura, y el % de cobertura ponderado por Weight,
+    agrupado por Fondo y Afp, más el total general.
+    """
+    total = len(result_bd)
+    benchmarkeados = int((result_bd['Cobertura'] == 'Cov').sum())
+    no_benchmarkeados = int((result_bd['Cobertura'] == 'NoCov').sum())
+
+    print("\n=== Resumen de Benchmarking ===")
+    print(f"Instrumentos con cobertura ESG (directa o vía proxy): {benchmarkeados} de {total}")
+    print(f"Instrumentos SIN cobertura ESG: {no_benchmarkeados} de {total}")
+
+    print("\n=== % de Cobertura ponderado por Weight (Fondo x Afp) ===")
+    resumen_pct = (
+        result_bd.groupby(['Fondo', 'Afp'])
+        .apply(lambda g: (g.loc[g['Cobertura'] == 'Cov', 'Weight'].sum() / g['Weight'].sum() * 100)
+        if g['Weight'].sum() else np.nan)
+        .reset_index(name='Cobertura_%')
+    )
+    for _, fila in resumen_pct.iterrows():
+        valor = fila['Cobertura_%']
+        valor_txt = f"{valor:.2f}%" if pd.notna(valor) else "N/A"
+        print(f"Fondo: {fila['Fondo']} | Afp: {fila['Afp']} -> Cobertura ponderada: {valor_txt}")
+
+    peso_total = result_bd['Weight'].sum()
+    cobertura_total = (result_bd.loc[result_bd['Cobertura'] == 'Cov', 'Weight'].sum() / peso_total * 100) if peso_total else np.nan
+    cobertura_total_txt = f"{cobertura_total:.2f}%" if pd.notna(cobertura_total) else "N/A"
+    print(f"\nCobertura ponderada TOTAL (todos los Fondos/Afp): {cobertura_total_txt}")
+```
+
+**Bloque 6 — En el script principal, entre `result_bd1 = Opr(result_bd)` y el `.to_excel(...)` (línea ~418)**
+
+```python
+result_bd1 = Opr(result_bd)
+imprimir_resumen_benchmarking(result_bd1)
+result_bd1.to_excel(
+```
+
+**Bloque 7 — Dentro de `Contribuyentes`, en la selección final de columnas (línea ~489)**
+
+```python
+    df_PT2 = df_PT2.loc[
+        :, ['Fecha', 'Afp', 'Strategy', 'Fondo', 'assetclass', "Factor", 'Nombre', 'Rating', 'Weight', 'Score', 'ESG',
+            'CONTROVERSIES', 'CO2/Sales', 'Cod. OriginadorBU', 'Proxie']]
+```
