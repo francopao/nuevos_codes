@@ -1,0 +1,250 @@
+Voy a ubicar la función exacta en tu `latest.txt` y leerla completa para darte el reemplazo preciso, porque estas columnas formuladas necesitan calzar con cómo ya arma la hoja hoy.Tengo la función y su estructura de datos. Voy a escribir la versión nueva (con los 3 bloques) y **probarla con datos simulados + recálculo en LibreOffice** antes de dártela, para garantizar que las fórmulas (cuota, piso, resto, ranking, extra, verificación) calculan bien.La lógica calcula bien; los "revisar" salieron solo porque en la prueba puse **5 de los 40 distritos** del grupo (por eso "Sobrantes" salió inflado a 86 en vez de ~5). Confirmo con un grupo **completo** para ver que todo da ✓:Verificado con grupo completo: **todo da ✓** y la auditoría cuadra (Σ asignadas = N). Las fórmulas (`INT`, `RANK`, `SUMIFS`, `IF`) calculan bien en Excel/LibreOffice. Confirmo que solo hay 2 lugares que llaman a la función de reparto antes de darte los cambios.Solo 2 llamadores (líneas 2296 y 2402). Todo probado. Aquí van los **4 cambios exactos** en `latest.txt`.
+
+---
+
+## EDIT 1 — recolectar cobertura en `_construir_reparto_departamental`
+
+Busca este bloque (línea ~2266):
+```python
+    a_borrar = []
+    for (dep_a, blp), claves in grupos_pob.items():
+        N = int(round(meta[claves[0]]["n_depto"]))
+        suma_c = sum(conteo[k] for k in claves) or 1.0
+        enteros = _reparto_mayor_resto(N, [conteo[k] / suma_c for k in claves])
+        for k, e in zip(claves, enteros):
+            meta[k]["cuota_exacta"] = conteo[k]      # cuota fraccional (auditoría)
+            conteo[k] = e
+            if e > 0:
+                # L homogéneo: cada activo del BL vale lo mismo en AUM, sin importar el
+                # distrito. peso_pond = peso del BL ; total_pond = N nacional del BL.
+                share[k] = e * meta[k]["peso_pond"] / meta[k]["total_pond"]
+            else:
+                a_borrar.append(k)
+    for k in a_borrar:
+        share.pop(k, None); conteo.pop(k, None); meta.pop(k, None)
+```
+Reemplázalo por:
+```python
+    a_borrar = []
+    stats = {}   # (depto, bl_pond) -> cobertura para la hoja de metodología
+    for (dep_a, blp), claves in grupos_pob.items():
+        N = int(round(meta[claves[0]]["n_depto"]))
+        suma_c = sum(conteo[k] for k in claves) or 1.0
+        enteros = _reparto_mayor_resto(N, [conteo[k] / suma_c for k in claves])
+        n_eval = len(claves); n_cero = 0; pob_cero = 0.0
+        pob_dep = meta[claves[0]]["pob_depto"]
+        for k, e in zip(claves, enteros):
+            meta[k]["cuota_exacta"] = conteo[k]      # cuota fraccional (auditoría)
+            conteo[k] = e
+            if e > 0:
+                # L homogéneo: cada activo del BL vale lo mismo en AUM, sin importar el
+                # distrito. peso_pond = peso del BL ; total_pond = N nacional del BL.
+                share[k] = e * meta[k]["peso_pond"] / meta[k]["total_pond"]
+            else:
+                a_borrar.append(k); n_cero += 1; pob_cero += meta[k]["pob_dist"]
+        stats[(dep_a, blp)] = {"n_depto": N, "evaluados": n_eval, "con": n_eval - n_cero,
+                               "cero": n_cero, "pob_cero": pob_cero, "pob_dep": pob_dep}
+    for k in a_borrar:
+        share.pop(k, None); conteo.pop(k, None); meta.pop(k, None)
+```
+
+## EDIT 2 — devolver `stats` (misma función, al final)
+
+Busca (línea ~2290, dentro de esa misma función):
+```python
+        filas.append({"depto": dep, "prov": prov, "dist": dist, "business_line": bl,
+                      "conteo": conteo[k], "share": sh, **m})
+    return filas
+```
+Reemplaza **solo** la última línea:
+```python
+        filas.append({"depto": dep, "prov": prov, "dist": dist, "business_line": bl,
+                      "conteo": conteo[k], "share": sh, **m})
+    return filas, stats
+```
+
+## EDIT 3 — desempacar en `load_empresa_departamental`
+
+Busca (línea ~2296):
+```python
+    filas = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        return _df_actividad([])
+```
+Reemplázalo por:
+```python
+    filas, _ = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        return _df_actividad([])
+```
+
+## EDIT 4 — reemplazar TODA la función `_agregar_hoja_metodologia_dep`
+
+Borra la función completa (desde `def _agregar_hoja_metodologia_dep(wb, risk_path, pob_path, emisor):` en la línea ~2396 hasta su `return nombre`, justo antes de `def _fen_dep_datos`) y pega esta:
+
+```python
+def _agregar_hoja_metodologia_dep(wb, risk_path, pob_path, emisor):
+    """Hoja auditable del proxy poblacional, re-derivable con fórmulas visibles:
+       población -> cuota -> piso -> resto -> sobrantes -> tienda extra -> K.
+       Incluye bloque de cobertura por departamento (evaluados = con>=1 + en 0)."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from collections import OrderedDict
+    filas, stats = _construir_reparto_departamental(risk_path, pob_path, emisor)
+    if not filas:
+        log(f"   [{emisor}] sin datos para la hoja de metodología.", "WARN")
+        return
+    AZUL = "1E2E6E"
+    HDR = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    TIT = Font(name="Calibri", size=13, bold=True, color=AZUL)
+    SUB = Font(name="Calibri", size=9, italic=True, color="595959")
+    BOLD = Font(name="Calibri", size=10, bold=True)
+    BODY = Font(name="Calibri", size=10)
+    fH = PatternFill("solid", fgColor=AZUL); fIn = PatternFill("solid", fgColor="FFF3B0")
+    fCalc = PatternFill("solid", fgColor="EAF3E8")
+    thin = Side(style="thin", color="D9D9D9"); box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    AC = Alignment(horizontal="center")
+
+    nombre = f"Metodología {emisor}"[:31]
+    if nombre in wb.sheetnames:
+        del wb[nombre]
+    ws = wb.create_sheet(nombre); ws.sheet_view.showGridLines = False
+
+    ws["A1"] = f"Metodología de distribución distrital — {emisor}"; ws["A1"].font = TIT
+    ws["A2"] = ("Cada distrito recibe tiendas en proporción a su población dentro del departamento. Como no existen "
+                "fracciones de tienda, primero se da a cada uno su parte entera (Piso); las tiendas que sobran se "
+                "entregan una por una a los distritos con mayor Resto (los más cerca de la siguiente tienda completa).")
+    ws["A2"].font = SUB
+    ws["A3"] = ("Los distritos con muy poca población quedan en 0 tiendas y no se listan aquí, pero SÍ se evaluaron "
+                "(ver bloque 'Cobertura por departamento'). Makro/Plaza Vea/Vivanda/Shopping Malls se anclan a su "
+                "ubicación real. Amarillo = dato de entrada; verde = celda formulada (recalculable). Callao se agrupa en 'Lima'.")
+    ws["A3"].font = SUB
+
+    # ---------- Parámetros por línea ----------
+    par = OrderedDict()
+    for f in filas:
+        par.setdefault(f["bl_pond"], (f["metodo"], f["peso_pond"], f["total_pond"]))
+    ws["A5"] = "Parámetros por línea de negocio (ponderación)"; ws["A5"].font = BOLD
+    for c, h in enumerate(["Línea (ponderación)", "Método", "Peso (revenue)", "Total activos (nacional)"], 1):
+        cc = ws.cell(6, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    pr0 = 7
+    for i, (blp, (met, peso, tot)) in enumerate(par.items()):
+        r = pr0 + i
+        ws.cell(r, 1, blp).font = BODY; ws.cell(r, 2, met).font = BODY
+        cc = ws.cell(r, 3, peso); cc.number_format = "0.000000"; cc.fill = fIn
+        cc = ws.cell(r, 4, int(round(tot))); cc.number_format = "#,##0"; cc.fill = fIn
+        for c in range(1, 5):
+            ws.cell(r, c).border = box
+
+    # ---------- Orden del detalle (grupos contiguos por BL x depto) ----------
+    orden = {"Makro": 0, "Plaza Vea": 1, "Vivanda": 2, "Mass": 3, "Pharmacies": 4, "Shopping Malls": 5}
+    fo = sorted(filas, key=lambda f: (orden.get(f["business_line"], 9), f["business_line"],
+                                      f["depto_asig"] or "", -f["share"]))
+    # Posiciones (para que la auditoría referencie el detalle con fórmulas)
+    audit_title = pr0 + len(par) + 2
+    audit_hdr = audit_title + 1
+    audit_first = audit_hdr + 1
+    audit_last = audit_hdr + len(stats)
+    hrow = audit_last + 3
+    det_first = hrow + 1
+    det_last = hrow + len(fo)
+
+    spans = {}
+    i = 0
+    while i < len(fo):
+        if fo[i]["metodo"] == "poblacion":
+            key = (fo[i]["business_line"], fo[i]["depto_asig"])
+            j = i
+            while j < len(fo) and fo[j]["metodo"] == "poblacion" and \
+                  (fo[j]["business_line"], fo[j]["depto_asig"]) == key:
+                j += 1
+            ef, el = det_first + i, det_first + (j - 1)
+            for t in range(i, j):
+                spans[t] = (ef, el)
+            i = j
+        else:
+            i += 1
+
+    # ---------- Bloque de cobertura por departamento ----------
+    ws.cell(audit_title, 1, "Cobertura por departamento (prueba de que se evaluó TODO el universo INEI)").font = BOLD
+    ah = ["Departamento", "Línea", "Tiendas a repartir (N)", "Distritos evaluados",
+          "Con ≥1 tienda", "En 0 (omitidos)", "% pob. omitida", "Σ tiendas asignadas", "Verif. (=N)"]
+    for c, h in enumerate(ah, 1):
+        cc = ws.cell(audit_hdr, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+    ar = audit_first
+    for (dep_a, blp), s in sorted(stats.items(), key=lambda kv: (orden.get(kv[0][1], 9), kv[0][0])):
+        ws.cell(ar, 1, dep_a).font = BODY; ws.cell(ar, 2, blp).font = BODY
+        cc = ws.cell(ar, 3, int(s["n_depto"])); cc.number_format = "#,##0"; cc.fill = fIn
+        cc = ws.cell(ar, 4, int(s["evaluados"])); cc.number_format = "#,##0"; cc.fill = fIn
+        cc = ws.cell(ar, 5, int(s["con"])); cc.number_format = "#,##0"; cc.fill = fIn
+        cc = ws.cell(ar, 6, int(s["cero"])); cc.number_format = "#,##0"; cc.fill = fIn
+        pob_pct = (s["pob_cero"] / s["pob_dep"]) if s["pob_dep"] else 0.0
+        cc = ws.cell(ar, 7, pob_pct); cc.number_format = "0.00%"; cc.fill = fIn
+        f = (f'=SUMIFS($Q${det_first}:$Q${det_last},$D${det_first}:$D${det_last},$A{ar},'
+             f'$A${det_first}:$A${det_last},$B{ar})')
+        cc = ws.cell(ar, 8, f); cc.number_format = "#,##0"; cc.fill = fCalc
+        cc = ws.cell(ar, 9, f'=IF(H{ar}=C{ar},"✓","≠")'); cc.fill = fCalc
+        for c in range(1, 10):
+            ws.cell(ar, c).border = box
+        ar += 1
+
+    # ---------- Detalle por distrito ----------
+    ws.cell(hrow - 1, 1, "Detalle por distrito × business line").font = BOLD
+    dh = ["Business Line", "Línea (ponderación)", "Método", "Departamento", "Provincia", "Distrito",
+          "N activos depto", "Pob. distrito", "Pob. departamento", "% pob. distrito",
+          "Cuota exacta", "Piso (parte entera)", "Resto", "Ranking del resto",
+          "Sobrantes del depto", "¿Recibió tienda extra?", "Tiendas asignadas (K)",
+          "Verificación", "% Distribución (exposición)"]
+    for c, h in enumerate(dh, 1):
+        cc = ws.cell(hrow, c, h); cc.font = HDR; cc.fill = fH; cc.border = box; cc.alignment = AC
+
+    r = det_first
+    for idx, f in enumerate(fo):
+        pob = (f["metodo"] == "poblacion")
+        ws.cell(r, 1, f["business_line"]).font = BODY
+        ws.cell(r, 2, f["bl_pond"]).font = BODY
+        ws.cell(r, 3, f["metodo"]).font = BODY
+        ws.cell(r, 4, f["depto_asig"]).font = BODY
+        ws.cell(r, 5, f["prov"]).font = BODY
+        ws.cell(r, 6, f["dist"]).font = BODY
+        if pob:
+            ef, el = spans[idx]
+            cc = ws.cell(r, 7, int(round(f["n_depto"]))); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 8, round(f["pob_dist"])); cc.number_format = "#,##0"; cc.fill = fIn
+            cc = ws.cell(r, 9, round(f["pob_depto"])); cc.number_format = "#,##0"; cc.fill = fIn
+            ws.cell(r, 10, f"=IF(I{r}=0,0,H{r}/I{r})").number_format = "0.0000%"
+            ws.cell(r, 11, f"=G{r}*J{r}").number_format = "#,##0.0000"
+            ws.cell(r, 12, f"=INT(K{r})").number_format = "#,##0"
+            ws.cell(r, 13, f"=K{r}-L{r}").number_format = "0.0000"
+            ws.cell(r, 14, f"=RANK(M{r},$M${ef}:$M${el},0)").number_format = "0"
+            ws.cell(r, 15, f"=G{r}-SUM($L${ef}:$L${el})").number_format = "0"
+            ws.cell(r, 16, f'=IF(N{r}<=O{r},"Sí","No")')
+            ws.cell(r, 18, f'=IF(Q{r}=L{r}+IF(N{r}<=O{r},1,0),"✓","revisar")')
+            for c in (10, 11, 13, 14, 15, 16, 18):
+                ws.cell(r, c).fill = fCalc
+        else:
+            for c in (7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18):
+                ws.cell(r, c, "—").alignment = AC
+        cc = ws.cell(r, 17, int(round(f["conteo"]))); cc.number_format = "#,##0"
+        cc = ws.cell(r, 19, f["share"]); cc.number_format = "0.0000%"
+        for c in range(1, 20):
+            ws.cell(r, c).font = BODY if c != 17 else BOLD
+            ws.cell(r, c).border = box
+        r += 1
+
+    ws.cell(r, 1, "TOTAL").font = BOLD
+    cc = ws.cell(r, 17, f"=SUM(Q{det_first}:Q{det_last})"); cc.font = BOLD; cc.number_format = "#,##0"
+    cc = ws.cell(r, 19, f"=SUM(S{det_first}:S{det_last})"); cc.font = BOLD; cc.number_format = "0.0000%"
+    for c in range(1, 20):
+        ws.cell(r, c).border = box
+
+    ws.freeze_panes = f"A{det_first}"
+    for c, w in zip("ABCDEFGHIJKLMNOPQRS",
+                    [15, 16, 10, 14, 16, 20, 12, 12, 14, 11, 12, 12, 9, 11, 12, 15, 14, 11, 14]):
+        ws.column_dimensions[c].width = w
+    log(f"   [{emisor}] hoja de metodología agregada ({last if False else (det_last - det_first + 1)} filas, con derivación y cobertura).")
+    return nombre
+```
+
+---
+
+**Cómo verificar (al correr):** en "Metodología InRetail Consumer", el bloque **Cobertura por departamento** debe dar `Distritos evaluados = Con≥1 + En 0` y `Σ tiendas asignadas = N` con ✓. En el detalle, la columna **Verificación** debe decir ✓ en casi todas (las raras "revisar" son empates exactos de resto, que puedes revisar a mano). Cambia cualquier población amarilla y verás recalcularse cuota→piso→resto→ranking→extra→K. No toqué Peru Corp: al ser la misma lógica, con documentar Consumer basta (igual esa hoja hereda la misma función, así que también se actualizará sola).
