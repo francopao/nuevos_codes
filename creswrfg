@@ -1,0 +1,63 @@
+Necesito ver cómo se pinta hoy el mapa por emisor y dónde va el contenedor del chart de Perú para inyectar la leyenda. Reviso el dashboard.Ya existe un contenedor `<div class="leg" id="leg_'+hz.key+'">` justo debajo del mapa. Veo si tiene contenido hoy y su CSS, para inyectar la leyenda de 5 círculos sin romper nada.Line 7238 ya rellena `leg_`. Leo qué pone hoy para agregar la leyenda de emisor sin romper la existente.El `renderLeyenda` actual muestra un swatch por emisor. Necesito ver con qué color exacto se pintan los círculos de activos (¿`actColor` por categoría o `emisColorMap` por emisor?) para que la leyenda de 5 círculos use el color idéntico.Todo claro. Los círculos usan `shadeByNivel(colorEmisor, categoría)` → con un solo emisor, las 5 categorías son 5 intensidades de su color. Confirmo la firma de `shadeByNivel` para que la leyenda use el color idéntico.`shadeByNivel(base, sc)` con sc=1..5 devuelve el color exacto de los círculos. Todo confirmado. Aquí está el cambio, **una sola función**.
+
+## Dónde y qué cambiar (en `latest.txt`)
+
+Busca la función `renderLeyenda()` (línea ~7237), que hoy es:
+
+```javascript
+  renderLeyenda(){
+    const el=document.getElementById('leg_'+this.hz.key); if(!el) return;
+    const order=this.emisOrder||[];
+    if(!order.length){
+      el.innerHTML='<span style="color:var(--plomo)">Sin activos para el filtro actual.</span>';
+      return;
+    }
+    let h=order.map(e=>'<span class="sw"><i style="background:'+
+      (this.emisColorMap[e]||'#888')+';border-radius:50%"></i>'+e+'</span>').join('');
+    h+='<span style="margin-left:10px;color:var(--plomo)">'+
+       'Intensidad = nivel CENEPRED · tamaño ∝ % del AUM del emisor</span>';
+    el.innerHTML=h;
+  }
+```
+
+Reemplázala COMPLETA por:
+
+```javascript
+  renderLeyenda(){
+    const el=document.getElementById('leg_'+this.hz.key); if(!el) return;
+    const order=this.emisOrder||[];
+    if(!order.length){
+      el.innerHTML='<span style="color:var(--plomo)">Sin activos para el filtro actual.</span>';
+      return;
+    }
+    // Con UN SOLO emisor seleccionado, la leyenda pasa a ser la escala de las 5
+    // categorías de riesgo CENEPRED (1..5), en las mismas 5 intensidades del color
+    // de ese emisor que usan los círculos del mapa (shadeByNivel).
+    if(this.filtroEmisor && order.length===1){
+      const base=this.emisColorMap[this.filtroEmisor]||(EMIS_PALETTE[0]||'#E88431');
+      let h='<span style="color:var(--plomo);margin-right:6px">Categoría de riesgo '+
+            this.hz.label+':</span>';
+      for(let k=1;k<=5;k++){
+        h+='<span class="sw"><i style="background:'+shadeByNivel(base,k)+
+           ';border-radius:50%"></i>'+k+'</span>';
+      }
+      h+='<span style="margin-left:8px;color:var(--plomo)">'+
+         '(1 = menor · 5 = mayor) — '+this.filtroEmisor+
+         ' · tamaño ∝ % del AUM del emisor</span>';
+      el.innerHTML=h;
+      return;
+    }
+    let h=order.map(e=>'<span class="sw"><i style="background:'+
+      (this.emisColorMap[e]||'#888')+';border-radius:50%"></i>'+e+'</span>').join('');
+    h+='<span style="margin-left:10px;color:var(--plomo)">'+
+       'Intensidad = nivel CENEPRED · tamaño ∝ % del AUM del emisor</span>';
+    el.innerHTML=h;
+  }
+```
+
+## Notas de por qué encaja (sin cambios extra)
+
+- El contenedor `<div class="leg" id="leg_'+hz.key+'">` ya existe **debajo del mapa** (línea ~7271) y `render()` ya llama a `renderLeyenda()` en cada redibujo (línea ~7112), así que la leyenda se actualiza sola al elegir/cambiar emisor.
+- El CSS `.leg .sw` y `.leg i` (líneas ~6540-6543) ya dan el estilo; el `border-radius:50%` inline convierte cada cuadrito en círculo, igual que la imagen.
+- Usa `shadeByNivel(base, k)` con el **mismo `base` (color del emisor)** que los círculos, así los 5 tonos de la leyenda son idénticos a los del mapa. Cuando hay un solo emisor, `base = EMIS_PALETTE[0]`.
+- Solo dispara con `this.filtroEmisor` activo; con "(todos los emisores)" se mantiene la leyenda por emisor de siempre. Aplica a los 5 mapas (uno por peligro `hz`) automáticamente.
