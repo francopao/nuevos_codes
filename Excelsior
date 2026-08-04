@@ -1,0 +1,44 @@
+¡De acá pata! Ya le metí diente al código completo (las 962 líneas). Te lo explico como si estuviéramos tomando un café, no como un manual.
+
+## Primero, cómo aparece el ISIN
+
+Ojo que el ISIN no nace solo — el archivo madre (G&P/Detallado) solo trae el código **SBS** (el código interno que usa la SBS para identificar cada instrumento). El ISIN se lo "pegas" tú mismo con un mapeo:
+
+En `construir_base()`, lees la hoja `CalcP` del archivo VP.xlsm, armas un diccionario `SBS -> ISIN`, y con un simple `.map()` le insertas la columna ISIN al dataframe de G&P (línea 370: `dfg.insert(0, 'ISIN', dfg["SBS"].map(dic_vp['ISIN']))`). O sea: el SBS es la llave, el VP.xlsm es el "diccionario de traducción", y desde ahí en adelante todo el pipeline arrastra ese ISIN pegado a cada fila. Si un SBS no está en VP, el ISIN te sale `NaN` — por eso más adelante hay tantos `.dropna()` y validaciones.
+
+## Ahora la posta: cómo se arma el Weight, de punta a punta
+
+Piensa en el Weight no como "una columna que se calcula una vez", sino como algo que se va **transformando en 4 etapas**, cada una resolviendo un problema distinto:
+
+**Etapa 1 — Nace como peso crudo por fondo (F1/F2/F3), directo del G&P**
+
+En `operaciones()`, cada fondo (F1, F2, F3) tiene su peso menos su "GAP" (ej: `HAF1 = INF1 - HAF1GAP`). Ese resultado (INF1, HAF1, RIF1, etc.) es literalmente el % que ese instrumento pesa dentro de ese fondo específico de esa AFP, tal cual lo calculó el Excel de G&P.
+
+El truco está en `df_result()`: toma UNA columna de fondo (ej. "INF1"), la filtra a valores >0, y la **renombra a "Weight"**. Es decir, cada fondo (F1, F2, F3) se convierte en una fila separada con su propio Weight — estás "despivoteando" 3 columnas de peso en filas apiladas. `X_AFP()` hace esto para los 3 fondos de una AFP y los junta.
+
+**Etapa 2 — Se consolida por AFP, sin tocar el número todavía**
+
+`BU_TD_AFP()` junta BU (bottom-up) + TD (top-down, y SOB si es la rama soberanos) para una misma AFP. Acá el Weight sigue siendo el mismo de la etapa 1 — lo único que se agrega es el AUM (calculado con banderas USD1/USD2/USD3 según a qué fondo pertenece la fila).
+
+**Etapa 3 — Para "Multifondos" el Weight se RECALCULA de cero (no se copia)**
+
+Esta es la parte más importante: `X_AFP_()` no simplemente promedia los 3 fondos. Lo que hace es:
+1. Convierte el Weight de cada fondo a dólares (`AUM_del_fondo * Weight`)
+2. Suma esos dólares entre F1+F2+F3 agrupando por instrumento (ISIN, Strategy, Afp...)
+3. Divide esa suma entre el AUM total de los 3 fondos juntos
+
+O sea: `Weight_Multifondos = (USD que tiene el instrumento en F1+F2+F3) / (AUM total F1+F2+F3)`. Es un promedio ponderado por plata, no un promedio simple — tiene sentido porque un instrumento puede pesar distinto en cada fondo.
+
+**Etapa 4 — El "look-through" de EPU/ETF: el Weight final es una SUMA de dos orígenes**
+
+Acá está el paso más sutil de todo el script (línea ~805 en adelante). Resulta que EPU y ETF son vehículos (como un ETF de renta variable) que a su vez contienen otros instrumentos adentro. Entonces:
+
+- `epu['peso'] = Market Value (%) * Weight` → toma el peso que ese ETF/EPU tiene dentro del portafolio (su Weight ya calculado en BD1) y lo multiplica por el % que CADA instrumento subyacente representa dentro de ese ETF. Así "abres la caja" del ETF y sacas el peso real de cada componente interno.
+- Luego en `unir_port_epu()`: el Weight final por instrumento = **Weight directo que ya tenía en el portafolio + Weight que le llega indirectamente por estar dentro de un ETF/EPU** (`Weight_T = Weight + Weight2`).
+
+¿Por qué se suman? Porque un mismo instrumento (mismo ISIN) puede estar tanto directamente comprado en el portafolio COMO escondido dentro de un ETF que también tienes — entonces tu exposición real a ese papel es la suma de ambas rutas. Eso es exactamente lo que busca la clave `key1 = ISIN + Fondo + Afp + assetclass + Strategy`: es el identificador único que te permite "cruzar" ambas fuentes y sumarlas correctamente sin mezclar fondos o AFPs distintas.
+
+## Resumiendo la película completa
+SBS → (mapeo con VP) → ISIN → G&P te da pesos crudos por fondo → se despivotea a filas con Weight → se agrega AUM por AFP → Multifondos recalcula el Weight como promedio ponderado en dólares → finalmente se suma el Weight directo del portafolio con el Weight "heredado" de los ETF/EPU que lo contienen → ese es el Weight que termina en BD1 y Portafolio.
+
+¿Quieres que te arme un diagrama visual de este flujo para que lo tengas de referencia rápida?
