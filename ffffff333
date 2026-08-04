@@ -1,0 +1,44 @@
+Para llegar al fondo necesito ver primero cómo el código detecta las agencias de cada banco hoy, y luego cotejarlo con lo que traen tus dos inputs. Empiezo revisando el archivo de agencias que subiste y cómo se llaman los bancos ahí.El archivo de agencias SÍ trae MiBanco (213 distritos), Santander Peru (1), Banco GNB (10), Banco BCI (1), etc. Entonces las agencias existen; el código no las está enganchando. Reviso el mapeo de bancos y `load_geografia_bancos` en tu script.Los mapeos del código **sí incluyen** MiBanco, Santander Peru, Banco GNB, Banco BCI (tanto en `EQUIV_BANCOS_GEO` como en `EQUIV_EXPOSICION_FINANCIERO`). El enganche emisor→agencias ocurre vía la hoja **Holdings**. Reviso Holdings y Valorización del input para ver dónde se corta la cadena.Los mapeos y las filas de Holdings **existen** para MiBanco (row 7), Banco GNB (26), Banco BCI (25), Santander Perú (11). Así que la cadena geográfica está. El corte debe estar en la **exposición (AUM)**: si el emisor no matchea Valorización, `aum=0` y las agencias se saltan. Reviso cómo se calcula `aum` por holding y de dónde sale.Datos clave del log: MiBanco (S/19.5M, mapeado al 0.16), Banco GNB (S/53.5M), Banco BCI (S/51.2M), Santander Perú (S/51.9M) **SÍ tienen AUM** y NO están en la lista de "sin AUM". Solo se saltan Scotiabank y el fantasma "Banco Santander" (row 27, sin AUM). Entonces el corte está en la **geografía**: `geo_bancos` no debe estar trayendo estas agencias. Reviso `load_geografia_bancos` y qué archivo lee.Mapeo OK, AUM OK, geografía OK en teoría. Reviso el log para ver **cuántos bancos realmente cargó** `geo_bancos` y si hubo "NO mapeados" — ahí debe estar la pista de qué archivo/versión se leyó.Dato clave: línea 72 → "Geografía de bancos: 847 filas de **11 banco(s)**" (de 19 en el archivo). Hay 8 no mapeados. Leo la lista exacta de no mapeados y el contexto, porque MiBanco/GNB/BCI/Santander deberían estar entre los 11.El log revela: MiBanco (0.16), BCP (0.84) se mapean; Scotiabank y "Banco Santander" (fantasma) se saltan por sin-AUM. Pero **no veo procesamiento de Banco GNB, Banco BCI, Santander Perú ni Santander Consumer** — ni éxito ni skip. Y hay algo más profundo: las agencias bancarias tienen `unidad_minera = None` (línea 1252), y tu conteo `um_det` **salta los None**. Déjame confirmar en el output real qué bancos muestran conteo y cuáles 0.BBVA sí aparece (con "(activo s/d)" porque `unidad_minera=None`, pero cuenta 1 por distrito). Entonces los bancos SÍ se cuentan vía ese placeholder. Veo cuántas filas tiene cada banco para identificar exactamente cuáles salen en 0.Llegué al fondo, y hay una sorpresa útil. **En el output que tengo (tu `Riesgos_Climáticos` + el log `sit45`), estos bancos SÍ se cuentan** — con cifras que calzan exacto con el input B-2358:
+
+| Emisor | Activos en el output | En B-2358 |
+|---|---:|---:|
+| MiBanco | **213** | 213 ✓ |
+| Santander Consumer Bank | 76 | 76 ✓ |
+| Banco GNB | 10 | 10 ✓ |
+| Banco BCI Peru | 1 | 1 ✓ |
+| Santander Perú | 1 | 1 ✓ |
+
+O sea, la cadena Holdings → Valorización → geografía **funciona** para ellos. Pero encontré la **causa real** de por qué en algunas vistas aparecen como "0" o como "(activo s/d)":
+
+**Las agencias bancarias tienen `unidad_minera = None`** (en `load_geografia_bancos`, línea ~1252). Y tu conteo `um_det` **salta los `None`** (`if pd.isna(nm): continue`). Entonces las agencias no entran por la vía normal de conteo: sobreviven solo por un placeholder frágil ("(activo s/d)" + el `||1`). En outputs que cuentan estricto por `activos`/`um_det`, quedan en **0**. Es exactamente el mismo patrón que Alicorp/Aenza, pero para bancos.
+
+## El fix (robusto, mismo patrón)
+
+Dar a cada agencia un `unidad_minera` real y único, para que se cuente como activo físico en TODAS las vistas y muestre un nombre en vez de "(activo s/d)". En `load_geografia_bancos`, busca:
+```python
+    df["mineral"] = "Créditos"; df["unidad"] = "Miles S/"
+    df["unidad_minera"] = None; df["unidad_norm"] = "credmiles"
+```
+Reemplázalo por:
+```python
+    df["mineral"] = "Créditos"; df["unidad"] = "Miles S/"
+    # nombre real y único por presencia distrital -> cuenta como activo físico en
+    # todas las salidas (antes 'None' se saltaba en um_det y salía "(activo s/d)"/0).
+    df["unidad_minera"] = ("Agencia " + df["banco"].astype(str) + " · "
+                           + df["prov"].astype(str) + " · " + df["dist"].astype(str))
+    df["unidad_norm"] = "credmiles"
+```
+
+Con esto cada (banco × distrito) del resumen se cuenta como 1 presencia física, con nombre legible, consistente en mapa, FEN y Excel. Los conteos que ya salían bien (MiBanco 213, etc.) **no cambian** — solo dejan de depender del placeholder y se vuelven robustos.
+
+## Los que SÍ están genuinamente en 0 (y por qué)
+
+Para tu "certeza de que en todos se detecta correctamente", estos son los reales huecos según el log:
+
+1. **Scotiabank Perú** (log línea 77): tiene 76 agencias en B-2358, pero **0 AUM en Valorización** → se omite (sin exposición = sin riesgo que mapear). Si quieres verlo, necesita exposición en Valorización.
+2. **"Banco Santander"** (Holdings fila 27, Banco=`BANCO SANTANDER`): es un **fantasma** — ese nombre no existe en B-2358 (los reales son `SANTANDER PERU` y `SANTANDER CONSUMER BANK`) y no tiene AUM. Recomiendo **borrar esa fila 27** de Holdings (duplica/ensucia).
+3. **8 bancos con agencias pero sin mapeo/AUM** (log líneas 64-71): ALFIN, FALABELLA, PICHINCHA, RIPLEY, BANCOM2, BANK OF CHINA, CITIBANK, ICBC. Para incluir alguno: agrégalo a `EQUIV_BANCOS_GEO`, crea su fila `Banca` en Holdings, y confirma que tenga AUM en Valorización.
+
+## Una confirmación que necesito
+
+Como en mi evidencia esos 5 bancos **sí** cuentan, dime **en qué output exacto** los ves en 0 (¿el dashboard del FEN, el mapa, o el Excel?) y si corriste con la última versión. Así confirmo que el fix de arriba cierra el caso en esa vista puntual y no queda nada suelto. Si quieres, pásame el nuevo `sit45` tras aplicar el fix y te verifico banco por banco.
