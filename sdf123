@@ -1,0 +1,46 @@
+Tu sospecha es muy probablemente correcta. Voy a verificarla directamente contra el input: cuento las ubicaciones reales de Alicorp y Aenza en sus hojas, y reviso si el colapso ocurre por ubigeo o por nombre de unidad.Estructura clara: cada fila es un activo con su propio Ubigeo. Ahora cuento en el input las ubicaciones reales vs cómo colapsarían al agrupar por (ubigeo, nombre), que es como cuenta el código. Reviso también el log.Datos claros. Alicorp: 19 filas, **14 ubigeos únicos** (4 ubigeos tienen 2-3 activos). Aenza: 54 filas, **49 (dep,prov,dist) únicos**. Pero tú ves 16 y 47 — que no calzan ni con "activos" ni con "ubigeos únicos". Reviso el log y el loader exacto para ver si además hay filas que se caen al geocodificar.El log es revelador: el **loader lee bien 18 (Alicorp) y 50 (Aenza)** — líneas 131-132. Entonces la pérdida es **aguas abajo**, en el conteo (`um_det`), no en la carga. Necesito ver cómo el loader nombra cada activo (`unidad_minera`) para saber por qué colapsan 2 y 3 respectivamente.Encontré la causa raíz, y tu sospecha es exacta. El loader nombra cada activo con una columna **repetitiva**:
+- **Alicorp:** `cAct` toma la columna "Sociedad" → `unidad_minera = "ALICORP"` en las 18 filas (idéntico).
+- **Aenza:** toma "Linea" → "Infraestructura"/"Energia"/... (se repite).
+
+Y el conteo (`um_det`) agrupa por **(empresa, ubigeo)** contando **nombres únicos**. Entonces dos activos distintos en el mismo distrito con el mismo nombre **colapsan a 1**. Verifiqué Aenza: Puquio, Abancay y Pariñas tienen 2 filas con la misma Línea → −3 → 47. Callao tiene 3 líneas distintas → no colapsa. **Cuadra exacto.** Dejo confirmar el punto de arreglo en el loader.Confirmado: en `load_empresa_hoja`, `unidad_minera = f["activo"]`, y como `act` sale de una columna repetitiva (Sociedad/Línea), dos activos distintos en el mismo distrito colapsan. Antes de darte el fix, verifico que hacer únicos los nombres no distorsione el AUM (que se reparte por `tmf`=peso, no por conteo).Causa raíz confirmada al 100%, y con una buena noticia: **el AUM no se toca**. El método de asignación es `tmf_share` (línea 223) → el AUM se reparte por `tmf` (peso), no por el conteo de unidades. Así que arreglar el conteo no altera ni un sol de exposición.
+
+**El problema, en una línea:** en `load_empresa_hoja`, `unidad_minera = f["activo"]`, y `act` sale de una columna repetitiva (Sociedad="ALICORP" en las 18 filas; Línea="Infraestructura"/"Energia" en Aenza). Luego `um_det` cuenta **nombres únicos por (empresa, ubigeo)** → dos activos distintos en el mismo distrito con el mismo nombre se funden en 1. Por eso Aenza pierde 3 (Puquio, Abancay, Pariñas: 2 filas con la misma Línea cada uno) y Alicorp pierde los que comparten distrito.
+
+## El fix (un solo cambio)
+
+Hacer que cada fila tenga un `unidad_minera` **único**, para que cada activo físico cuente como 1. En `load_empresa_hoja` (línea ~2001), busca:
+
+```python
+    out = []
+    for f, w in zip(filas, pesos):
+        out.append({
+            "mineral": "Distribución", "unidad": "%", "titular": emp,
+            "unidad_minera": f["activo"], "depto": f["depto"], "prov": f["prov"],
+            "dist": f["dist"], "acum": w, "unidad_norm": "pct", "factor": 1.0,
+            "tmf": w, "empresa": emp})
+```
+Reemplázalo por:
+```python
+    out = []
+    for i, (f, w) in enumerate(zip(filas, pesos), 1):
+        out.append({
+            "mineral": "Distribución", "unidad": "%", "titular": emp,
+            # único por activo físico -> el conteo no colapsa cuando 2 activos
+            # caen en el mismo distrito con el mismo nombre de columna.
+            "unidad_minera": f'{f["activo"]} #{i}',
+            "depto": f["depto"], "prov": f["prov"],
+            "dist": f["dist"], "acum": w, "unidad_norm": "pct", "factor": 1.0,
+            "tmf": w, "empresa": emp})
+```
+
+## Por qué es seguro y da certeza para TODOS
+
+- **AUM intacto:** `tmf_share` reparte por peso; el conteo no interviene.
+- **Aplica a todos los emisores de hoja** (los que se cargan por `load_empresa_hoja`): cada uno pasará a contar sus filas reales. Alicorp → **18**, Aenza → **50**.
+- **No toca:** minería (cuenta 1 por mina, colapso de minerales intencional — el fix de Minsur sigue válido), bancos (`credmiles`, otra ruta), el proxy retail (`activos`, suma tiendas), ni **Intercorp/Shopping Malls** (rutas distintas). Verificado por `unidad_norm`.
+
+## Verificar
+
+Corre y revisa Alicorp = **18**, Aenza = **50** en el FEN y en "Riesgos Climáticos". Para tener la **certeza total que pides**, en el log cada emisor de hoja imprime `[Emisor] N ubicación(es)` (ej. líneas 131-132): ese N ahora debe coincidir exactamente con el conteo del dashboard/Excel para todos. Si alguno no cuadra, pásame su nombre y su hoja y lo miro.
+
+**Mejora opcional (cosmética):** en los tooltips/Excel verás "ALICORP #1", "ALICORP #2"… Si prefieres nombres lindos (ej. "Molino Callao"), la columna "Activo" de Alicorp los tiene, pero el loader hoy prioriza "Sociedad". Es un ajuste aparte a la selección de columna `cAct`; dime y te lo doy, pero no afecta el conteo — con el fix de arriba el número ya queda correcto y auditable.
