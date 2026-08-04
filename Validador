@@ -1,0 +1,179 @@
+PASO 1 — Agregar el sistema de tracking (nuevo bloque)
+
+Busca (Ctrl+F):
+```
+class ProcesoError(Exception):
+    """Error controlado del pipeline (archivo/hoja/columna/celda/red)."""
+```
+
+Justo después de esas 2 líneas, agrega:
+
+```python
+# ============================================================================
+#  TRACKING DE INSTRUMENTOS DESCARTADOS (SBS que se pierden en cada filtro)
+# ============================================================================
+_DESCARTES = []  # lista de dicts: {SBS, ISIN, Etapa, Motivo, Valor}
+
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.loc[i]
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Etapa': etapa,
+                            'Motivo': motivo, 'Valor': valor})
+
+def imprimir_descartes():
+    if not _DESCARTES:
+        print("[DESCARTES] No se descartó ningún instrumento.")
+        return
+    df_desc = pd.DataFrame(_DESCARTES)
+    print("\n================  INSTRUMENTOS DESCARTADOS  ================")
+    print(df_desc.to_string(index=False))
+    print("\n--- Weight/valor diluido por SBS (suma en todas las etapas) ---")
+    resumen = df_desc.groupby('SBS')['Valor'].apply(
+        lambda s: pd.to_numeric(s, errors='coerce').sum())
+    print(resumen.to_string())
+```
+
+---
+
+PASO 2 — Trackear SBS sin ISIN en VP.xlsm
+
+Busca (Ctrl+F):
+```
+    dfg.insert(0, 'ISIN', dfg["SBS"].map(dic_vp['ISIN']))
+```
+
+Justo después de esa línea, agrega:
+
+```python
+    _sin_isin = dfg[dfg['ISIN'].isna()]
+    for _, fila in _sin_isin.iterrows():
+        _DESCARTES.append({'SBS': fila.get('SBS'), 'ISIN': None,
+                            'Etapa': 'Mapeo ISIN (VP.xlsm)',
+                            'Motivo': 'SBS sin ISIN en VP!CalcP', 'Valor': None})
+```
+
+---
+
+PASO 3 — Trackear filtro de Asset Class
+
+Busca (Ctrl+F):
+```
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable'])]
+    return df
+```
+
+Reemplaza por:
+
+```python
+    df_antes = df.copy()
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable'])]
+    _registrar_descarte(df_antes, df, 'operaciones() - Asset Class',
+                        'Asset Class distinto de Renta Fija/Renta Variable')
+    return df
+```
+
+---
+
+PASO 4 — Trackear filtros de la función BU()
+
+Busca (Ctrl+F):
+```
+    d = d.drop(d.loc[d['SBS2'].isin(excl)].index)
+    return d
+```
+
+Reemplaza por:
+
+```python
+    d = d.drop(d.loc[d['SBS2'].isin(excl)].index)
+    _registrar_descarte(df, d, 'BU() - filtros Bottom-Up',
+                        'No calificó para BU (Gobierno/Categoría/AC Dir/SBS2)')
+    return d
+```
+
+---
+
+PASO 5 — Trackear instrumentos con peso <= 0 (aquí ya existe Weight real)
+
+Busca (Ctrl+F):
+```
+def df_result(fondo, data):
+    df = data.copy(deep=True)
+    df = df.drop(df[df[fondo] <= 0].index)
+```
+
+Reemplaza por:
+
+```python
+def df_result(fondo, data):
+    df = data.copy(deep=True)
+    df_antes = df.copy()
+    df = df.drop(df[df[fondo] <= 0].index)
+    _registrar_descarte(df_antes, df, f'df_result() - Fondo {fondo}',
+                        'Peso <= 0 en ese fondo', col_valor=fondo)
+```
+
+---
+
+PASO 6 — Trackear instrumentos que no calificaron en NINGUNA rama (BU/TD/SOB)
+
+Busca (Ctrl+F):
+```
+    Portafolio = pd.concat([IN, HA, PF, RI, SI]).sort_index(ignore_index=True)
+```
+
+Justo ANTES de esa línea, agrega:
+
+```python
+    _idx_validos = set(df_BU.index) | set(df_TD.index)
+    if soberanos:
+        _idx_validos |= set(df_SOB.index)
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+
+```
+
+---
+
+PASO 7 — Trackear instrumentos del ETF/EPU sin match en el portafolio
+
+Busca (Ctrl+F):
+```
+    epu = epu.dropna(subset=['Weight'])
+```
+
+Reemplaza por:
+
+```python
+    epu_antes = epu.copy()
+    epu = epu.dropna(subset=['Weight'])
+    _registrar_descarte(epu_antes, epu, 'EPU/ETF - generar_relacion',
+                        'Instrumento del ETF/EPU sin Weight en BD (no está en portafolio)',
+                        col_valor='Weight')
+```
+
+---
+
+PASO 8 — Imprimir el resumen al final de cada rama
+
+Busca (Ctrl+F):
+```
+    print(f"[OK] BD1{suf} -> {ruta_bd1}")
+    return {'BD1': ruta_bd1, 'Portafolio': ruta_port}
+```
+
+Reemplaza por:
+
+```python
+    print(f"[OK] BD1{suf} -> {ruta_bd1}")
+    print(f"\n[DESCARTES] Resumen para rama {etiqueta}:")
+    imprimir_descartes()
+    _DESCARTES.clear()
+    return {'BD1': ruta_bd1, 'Portafolio': ruta_port}
+```
