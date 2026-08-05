@@ -1,0 +1,29 @@
+El Diccionario está bien: sí tiene `Banco Efectiva → Banco Efectiva`. La causa era el candado de escritura. Comparaba el nombre **ya mapeado** contra la base histórica; como `Banco Efectiva` es una entidad nueva que aún no existía en la base (la base llega hasta Abril 2026), lo marcaba como "nuevo" y frenaba, aunque estuviera correctamente mapeado. Verificado: con el arreglo, escribe `2026-06-01` y agrega 168 filas de `Banco Efectiva`.
+
+Dos cambios (bloque: función `main`, sección `#### RENOM` / `#### AGREGAR A LA BASE`).
+
+**1) Ctrl+F →** busca esta línea:
+
+```python
+    dic_ren = df_ren.to_dict()
+```
+
+**Debajo de ella añade:**
+
+```python
+    _mapeados_dic = set(str(v) for v in dic_ren['Nombre_Nuevo'].values())
+```
+
+**2) Ctrl+F →** busca esta línea:
+
+```python
+    new_values1 = compare_string_arrays1(NombresHis, NombresTemp)
+```
+
+**Reemplázala por:**
+
+```python
+    new_values1 = [n for n in NombresTemp if (n not in NombresHis) and (n not in _mapeados_dic)]
+```
+
+Con esto, un nombre solo frena la escritura si **no está en la base histórica** y **tampoco** es un `Nombre_Nuevo` aprobado en el Diccionario (es decir, un nombre realmente desconocido o con typo). Los ya conocidos (Citibank, Cofide, etc.) y los nuevos bien mapeados (Banco Efectiva) pasan y se agregan.
