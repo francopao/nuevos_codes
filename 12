@@ -1,0 +1,350 @@
+#%%
+# Parameters
+inicio = "062026"
+final  = "062026"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+import shutil
+import warnings
+warnings.filterwarnings("ignore")
+
+# Blindaje de dtype: forzamos strings tipo 'object' (no Arrow) para evitar
+# el TypeError "Invalid value for dtype 'str'" al reasignar columnas numéricas.
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
+
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1), int(a2) + 1)
+
+#%%
+meses    = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio',
+            'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_   = ['en', 'fe', 'ma', 'ab', 'my', 'jn', 'jl', 'ag', 'se', 'oc', 'no', 'di']
+meses_n  = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+
+#%% md
+#### Generador de Backups
+#%%
+# Archivo fuente
+source_file = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\12.Flujo Créditos Castigados por Tipo.xlsx"
+# Carpeta de aterrizaje del backup
+destination_dir = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\Backups"
+
+
+def copy_file_to_directory(source, des):
+    """Copia el archivo base a la carpeta de backups. No detiene el proceso si falla."""
+    try:
+        if not os.path.exists(source):
+            print(f"[AVISO] No existe el archivo fuente para backup: {source}")
+            return
+        if not os.path.exists(des):
+            os.makedirs(des)
+        file_name = os.path.basename(source)
+        dest_file = os.path.join(des, file_name)
+        shutil.copyfile(source, dest_file)
+        print("[OK] Backup creado correctamente.")
+    except Exception as e:
+        print(f"[ERROR] No se pudo crear el backup: {e}")
+
+
+copy_file_to_directory(source_file, destination_dir)
+
+#%%
+# Construcción de rutas (periodos MMYYYY a procesar)
+array_rutas = []
+for i in rango_anios:
+    if (rango_anios[-1] == i):
+        if (len(rango_anios) == 1):
+            for j in range(int(m1), int(m2) + 1):
+                ruta = str(j).zfill(2) + str(i)
+                array_rutas.append(ruta)
+        else:
+            for j in range(1, int(m2) + 1):
+                ruta = str(j).zfill(2) + str(i)
+                array_rutas.append(ruta)
+    elif (i != rango_anios[0]):
+        for j in range(1, 13):
+            ruta = str(j).zfill(2) + str(i)
+            array_rutas.append(ruta)
+    else:
+        if (len(rango_anios) == 1):
+            for j in range(int(m1), int(m2) + 1):
+                ruta = str(j).zfill(2) + str(i)
+                array_rutas.append(ruta)
+        else:
+            for j in range(int(m1), 13):
+                ruta = str(j).zfill(2) + str(i)
+                array_rutas.append(ruta)
+
+#%%
+# Rutas base reutilizadas
+PREF_DESCARGAS = ("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\"
+                  "Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\"
+                  "Complementos\\Carpeta de Descarga\\12. Flujo Créditos Castigados por Tipo\\"
+                  "descargas_SBS\\")
+
+RUTA_DICCIONARIO = ("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\"
+                    "Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\"
+                    "Complementos\\Diccionario_SBS.xlsx")
+
+RUTA_BASE = ("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\"
+             "Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\"
+             "Complementos\\Historicos\\12.Flujo Créditos Castigados por Tipo.xlsx")
+
+# Mapeo de mes numérico -> abreviatura SBS (para fallback al mes anterior)
+MESES_ABREV = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn",
+               "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+
+
+#%%
+def renombrar_columnas_por_posicion(df, mapping):
+    """Renombra columnas por índice posicional de forma segura."""
+    cols = list(df.columns)
+    for pos, nombre in mapping.items():
+        if pos < len(cols):
+            cols[pos] = nombre
+        else:
+            print(f"   [AVISO] No existe la columna en posición {pos} "
+                  f"(el DF tiene {len(cols)} columnas). No se renombró a '{nombre}'.")
+    df.columns = cols
+    return df
+
+
+def resolver_archivo(subcarpeta, codigo, mes_, anio, etiqueta):
+    """
+    Devuelve la ruta del archivo del mes; si no existe, cae al mes anterior.
+    Lanza FileNotFoundError con mensaje claro si tampoco existe el mes anterior.
+    """
+    base_dir = PREF_DESCARGAS + subcarpeta + "\\"
+    archivo = f"{base_dir}{codigo}-{mes_}{anio}.XLS"
+    if os.path.isfile(archivo):
+        return archivo
+
+    print(f"   [AVISO] {etiqueta}: no se halló '{codigo}-{mes_}{anio}.XLS'. "
+          f"Probando mes anterior...")
+    idx = meses_.index(mes_)
+    mn = meses_n[idx]
+    if mn == '01':
+        mesA = '12'
+        a = str(int(anio) - 1)
+    else:
+        mesA = str(int(mn) - 1).zfill(2)
+        a = anio
+    mesB = MESES_ABREV.get(mesA)
+    archivo = f"{base_dir}{codigo}-{mesB}{a}.XLS"
+    if not os.path.isfile(archivo):
+        raise FileNotFoundError(
+            f"{etiqueta}: no se encontró archivo para {mes_}{anio} "
+            f"ni para el mes anterior ({mesB}{a}). Ruta esperada: {archivo}")
+    print(f"   [AVISO] {etiqueta}: usando fallback del mes anterior ({mesB}{a}).")
+    return archivo
+
+
+def convertir_numerico(df):
+    """
+    Convierte a numérico todas las columnas salvo la primera (Detallada).
+    Usa isetitem (asignación posicional de columna completa) para permitir el
+    cambio de dtype y así EVITAR el error 'Invalid value for dtype str' que
+    ocurría con DF.iloc[:, 1:] = ...  (asignación in-place que preservaba el dtype).
+    """
+    for pos in range(1, df.shape[1]):
+        df.isetitem(pos, pd.to_numeric(df.iloc[:, pos], errors="coerce"))
+    return df
+
+
+def _aplicar_diccionario(row, dic_ren):
+    """Renombra 'Detallada' según el diccionario; si no está, deja el valor original."""
+    try:
+        return dic_ren['Nombre_Nuevo'][row["Detallada"]]
+    except Exception:
+        return row["Detallada"]
+
+
+def leer_y_limpiar(archivo, etiqueta, dropna_numerico=False, filtro_no_cero=False):
+    """Lee el XLS de la SBS, recorta cabecera y limpia. Devuelve el DF listo para transponer."""
+    DF = pd.read_excel(archivo, sheet_name=0)
+
+    if DF.shape[1] <= 3:
+        raise ValueError(f"{etiqueta}: el archivo tiene solo {DF.shape[1]} columnas; "
+                         f"estructura inesperada -> {archivo}")
+
+    # Recorta filas hasta la primera no nula de la columna 3
+    for index, row in enumerate(DF.iloc[:, 3]):
+        if not pd.isnull(row):
+            break
+        DF.drop(index, inplace=True)
+
+    if DF.empty:
+        raise ValueError(f"{etiqueta}: DF vacío tras recortar cabecera -> {archivo}")
+
+    DF.columns = DF.iloc[0, ::]
+    DF.drop(DF.index[0], inplace=True)
+    DF = DF.dropna(axis=1, how="all")
+    DF = DF.dropna(how="all")
+
+    if filtro_no_cero:
+        DF = DF.loc[(DF != 0).any(axis=1)]
+
+    if DF.shape[1] <= 8:
+        print(f"   [AVISO] {etiqueta}: DF con {DF.shape[1]} columnas; "
+              f"no se pudo mapear la posición 8 ('Total').")
+
+    DF = renombrar_columnas_por_posicion(DF, {0: "Detallada"})
+    DF = renombrar_columnas_por_posicion(DF, {8: "Total"})
+
+    if dropna_numerico:
+        DF = DF.dropna()
+        DF = convertir_numerico(DF)   # <-- fix del error original
+        DF = DF.fillna(0)
+
+    if DF.empty:
+        raise ValueError(f"{etiqueta}: DF vacío tras la limpieza -> {archivo}")
+
+    return DF
+
+
+def transformar_y_construir(DF, institucion, mes_, anio, dic_ren, limpiar_check=False):
+    """Aplica diccionario, transpone y arma la base larga para una institución."""
+    DF["Detallada"] = DF.apply(lambda r: _aplicar_diccionario(r, dic_ren), axis=1)
+    DF = DF.T
+    DF = DF.reset_index()
+    DF.columns = DF.iloc[0, ::]
+    DF = DF.drop([0])
+    DF["Detallada"] = DF.apply(lambda r: _aplicar_diccionario(r, dic_ren), axis=1)
+    DF = DF.dropna(axis=1, how="all")
+
+    if limpiar_check:
+        nan_columns = [col for col in DF.columns if pd.isnull(col)]
+        if nan_columns:
+            DF = DF.drop(columns=nan_columns)
+        if "CHECK TOTALES EDP" in DF.columns:
+            DF = DF.drop("CHECK TOTALES EDP", axis=1)
+
+    fecha_str = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+    fecha_col = datetime.datetime.strptime(fecha_str, '%d/%m/%Y')
+
+    base = pd.DataFrame()
+    for i in range(0, len(DF.columns) - 1):
+        a = DF.columns[1::][i]
+        DF_1 = DF.get(['Detallada']).copy()
+        DF_1.insert(0, "Tipo", "Riesgo Crediticio")
+        DF_1.insert(0, 'Nombre', a)
+        DF_1.insert(0, 'Moneda', "MN")
+        DF_1.insert(0, 'Institución', institucion)
+        DF_1.insert(1, 'Estructura', "Castigos")
+        DF_1.insert(6, fecha_col, DF[a])
+        base = pd.concat([base, DF_1])
+
+    print(f"   [OK] {institucion}: {len(DF.columns) - 1} entidades procesadas.")
+    return base
+
+
+#%%
+# Configuración por institución: (etiqueta, subcarpeta, codigo, dropna_numerico, filtro_no_cero, limpiar_check)
+INSTITUCIONES = [
+    ("Bancos",        "Bancos",        "B-2369", True,  False, False),
+    ("Financieras",   "Financieras",   "B-3234", True,  False, False),
+    ("Cajas",         "Cajas",         "C-1253", False, False, False),
+    ("Cajas Rurales", "Cajas Rurales", "C-2258", False, False, False),
+    ("Mypes",         "Mypes",         "C-4242", False, True,  True),
+]
+
+
+def main(mes, mes_, anio):
+    # Diccionario de renombres (una sola lectura por periodo)
+    try:
+        df_ren = pd.read_excel(RUTA_DICCIONARIO, sheet_name='Flujo de Castigos por Tipo')
+        df_ren = df_ren.set_index("Nombre_Antiguo")
+        dic_ren = df_ren.to_dict()
+    except Exception as e:
+        raise RuntimeError(f"No se pudo leer el diccionario SBS: {e}")
+
+    bases = []
+    for etiqueta, subcarpeta, codigo, dropna_num, filtro0, limpiar in INSTITUCIONES:
+        archivo = resolver_archivo(subcarpeta, codigo, mes_, anio, etiqueta)
+        DF = leer_y_limpiar(archivo, etiqueta,
+                            dropna_numerico=dropna_num, filtro_no_cero=filtro0)
+        base = transformar_y_construir(DF, etiqueta, mes_, anio, dic_ren,
+                                       limpiar_check=limpiar)
+        bases.append(base)
+
+    ########### BASE TOTAL ###################
+    DF_Total = pd.concat(bases)
+    if DF_Total.empty:
+        raise ValueError("DF_Total vacío: ninguna institución aportó datos.")
+
+    DF_Total.insert(0, "key",
+                    DF_Total["Institución"] + DF_Total["Estructura"] +
+                    DF_Total["Moneda"] + DF_Total["Nombre"] +
+                    DF_Total["Tipo"] + DF_Total["Detallada"])
+
+    if not os.path.exists(RUTA_BASE):
+        raise FileNotFoundError(f"No existe la base histórica: {RUTA_BASE}")
+
+    with pd.ExcelFile(RUTA_BASE) as writer:
+        BD_Total = writer.parse(sheet_name='Castigos')
+
+    BD_Total_ = BD_Total.copy()
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("key")
+    dic_Total_ = BD_Total_.to_dict()
+
+    # Filas nuevas (aún no presentes en la base)
+    DF_Total2 = DF_Total.copy()
+    DF_Total2['Indicador'] = DF_Total2['key'].map(dic_Total_['Indicador'])
+    DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+    DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+    n_nuevas = len(DF_Total2)
+    BD_Total = pd.concat([BD_Total, DF_Total2])
+
+    # Volcado de la columna del periodo
+    DF_Total = DF_Total.set_index("key")
+    dic_cr = DF_Total.to_dict()
+    fecha_str = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+    fecha_col = datetime.datetime.strptime(fecha_str, '%d/%m/%Y')
+    BD_Total[fecha_col] = BD_Total['key'].map(dic_cr[fecha_col])
+
+    with pd.ExcelWriter(RUTA_BASE, mode="a", engine="openpyxl",
+                        if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Castigos", index=False)
+
+    print(f"   [OK] Escritura completada. Filas nuevas agregadas: {n_nuevas}.")
+
+
+#%%
+# Bucle principal con reporte final de éxitos y errores
+periodos_ok = []
+periodos_err = []
+
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses[int(m) - 1]
+    anio = i[2::]
+    mes_ = meses_[int(m) - 1]
+    print(f"\n=== {mes} {anio} ===")
+    try:
+        main(mes, mes_, anio)
+        periodos_ok.append(f"{mes} {anio}")
+    except Exception as e:
+        periodos_err.append(f"{mes} {anio}")
+        print(f"   [ERROR] {mes} {anio}: {type(e).__name__} -> {e}")
+
+#%%
+# Resumen final
+print("\n" + "=" * 50)
+print("RESUMEN DE EJECUCIÓN")
+print("=" * 50)
+print(f"[OK]    Periodos procesados ({len(periodos_ok)}): "
+      f"{', '.join(periodos_ok) if periodos_ok else '-'}")
+print(f"[ERROR] Periodos con fallo ({len(periodos_err)}): "
+      f"{', '.join(periodos_err) if periodos_err else '-'}")
+if periodos_err:
+    print(">> Revisa los mensajes [ERROR]/[AVISO] anteriores para el detalle.")
