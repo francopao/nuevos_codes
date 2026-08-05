@@ -1,0 +1,56 @@
+Busca este bloque exacto en tu script (justo antes del cierre del `main()`):
+
+```python
+    print(f"\nOmitidos por ejecución reciente ({len(omitidos)}):")
+    for n in omitidos:
+        print(f"   - {n}")
+    print("=====================================================")
+```
+
+Reemplázalo por este (agrega la alerta explícita, un archivo de texto con pendientes, y un código de salida para automatización/Task Scheduler):
+
+```python
+    print(f"\nOmitidos por ejecución reciente ({len(omitidos)}):")
+    for n in omitidos:
+        print(f"   - {n}")
+    print("=====================================================")
+
+    if fallidos:
+        print("\n" + "!" * 60)
+        print(f"⚠️  ALERTA: {len(fallidos)} archivo(s) NO se ejecutaron correctamente:")
+        for n in fallidos:
+            print(f"   >>> {n}")
+        print("!" * 60)
+
+        ruta_pendientes = os.path.join(RUTA_BASE, "_PENDIENTES_REVISAR.txt")
+        try:
+            with open(ruta_pendientes, "w", encoding="utf-8") as f:
+                f.write(f"Última corrida: {datetime.now().isoformat()}\n")
+                f.write(f"Total fallidos: {len(fallidos)}\n\n")
+                for n in fallidos:
+                    mensaje_corto, ruta_log = detalle_fallidos[n]
+                    f.write(f"- {n}\n    Motivo: {mensaje_corto}\n    Log: {ruta_log}\n\n")
+            print(f"\nSe generó el archivo de pendientes: {ruta_pendientes}")
+        except Exception as e:
+            print(f"[ADVERTENCIA] No se pudo generar el archivo de pendientes: {e}")
+    else:
+        print("\n✅ Todos los scripts programados para correr se ejecutaron correctamente.")
+
+    return len(fallidos)
+```
+
+Y busca esta línea al final del archivo:
+
+```python
+if __name__ == "__main__":
+    main()
+```
+
+Reemplázala por:
+
+```python
+if __name__ == "__main__":
+    import sys
+    codigo_salida = main()
+    sys.exit(1 if codigo_salida else 0)
+```
