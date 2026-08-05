@@ -1,0 +1,29 @@
+Tu mejora funcionó bien — el RESUMEN FINAL se imprimió correcto. Lo que ves al final **no es un error nuevo ni causado por mi bloque**: es el `SystemExit: 1` del bloque original `sys.exit(1 if codigo_salida else 0)`. Ese `sys.exit` se dispara siempre que hay scripts fallidos, y en Spyder/IPython se muestra como "An exception has occurred... SystemExit: 1". Ya estaba antes; solo que ahora lo notas porque quedó al final.
+
+Si quieres que deje de mostrar ese `SystemExit` cuando corres dentro de Spyder (y siga funcionando igual si algún día lo corres desde consola):
+
+**Dónde:** con Ctrl+F busca el bloque final:
+
+```
+if __name__ == "__main__":
+    import sys
+    codigo_salida = main()
+    sys.exit(1 if codigo_salida else 0)
+```
+
+**Qué hacer:** reemplázalo por:
+
+```python
+if __name__ == "__main__":
+    import sys
+    codigo_salida = main()
+    # En Spyder/IPython evitamos sys.exit() porque lanza SystemExit en consola.
+    # Detectamos si estamos en un entorno interactivo (IPython) y, si es así, no salimos.
+    en_ipython = hasattr(sys, "ps1") or "IPython" in sys.modules
+    if en_ipython:
+        print(f"\n[FIN] Código de salida (informativo): {1 if codigo_salida else 0}")
+    else:
+        sys.exit(1 if codigo_salida else 0)
+```
+
+Con esto: en Spyder ya no verás el `SystemExit: 1` (solo un mensaje informativo del código de salida), y si lo ejecutas desde terminal seguirá devolviendo el código de salida real igual que antes.
