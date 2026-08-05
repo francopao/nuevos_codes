@@ -1,0 +1,37 @@
+El script ya reporta exitosos y fallidos, pero el bloque de fallidos aparece mezclado con motivos, logs y la sección de omitidos, así que al final cuesta ver de un vistazo solo los nombres. La mejora es agregar un bloque final que imprima, como último texto en consola, dos listas limpias (solo nombres): los que corrieron bien y los que fallaron.
+
+**Dónde:** con Ctrl+F busca esta línea (es la última línea de la función `main()`, justo antes de `if __name__ == "__main__":`):
+
+```
+    return len(fallidos)
+```
+
+**Qué hacer:** pega el siguiente bloque JUSTO ANTES de esa línea `return len(fallidos)`:
+
+```python
+    # ---- RESUMEN FINAL LIMPIO (solo nombres) ----
+    print("\n============ RESUMEN FINAL (SOLO NOMBRES) ============")
+    print(f"\n>>> SE CORRIERON CORRECTAMENTE ({len(exitosos)}):")
+    if exitosos:
+        for n in exitosos:
+            print(f"   - {n}")
+    else:
+        print("   (ninguno)")
+
+    print(f"\n>>> NO SE CORRIERON / FALLARON ({len(fallidos)}):")
+    if fallidos:
+        for n in fallidos:
+            print(f"   - {n}")
+    else:
+        print("   (ninguno)")
+
+    if omitidos:
+        print(f"\n>>> OMITIDOS (exito reciente, no se volvieron a correr) ({len(omitidos)}):")
+        for n in omitidos:
+            print(f"   - {n}")
+    print("======================================================\n")
+
+    return len(fallidos)
+```
+
+Nota: incluí también `return len(fallidos)` al final del bloque para que quede claro que reemplaza la línea que buscaste (no la dupliques: la que estaba se sustituye por todo este bloque).
