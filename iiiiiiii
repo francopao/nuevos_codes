@@ -1,0 +1,31 @@
+Modificación única (bloque: función `_drop_col_nan`).
+
+**Ctrl+F →** busca estas dos líneas:
+
+```python
+    if np.nan in DF.columns:
+        del DF[np.nan]
+```
+
+**Reemplázalas por** (respetando la sangría de 4 espacios):
+
+```python
+    _mask_nan = DF.columns.isna()
+    if _mask_nan.any():
+        DF = DF.loc[:, ~_mask_nan]
+```
+
+La función queda así:
+
+```python
+def _drop_col_nan(DF, institucion):
+    """Elimina TODAS las columnas cuyo encabezado es NaN. Avisa si no existe (no rompe)."""
+    _mask_nan = DF.columns.isna()
+    if _mask_nan.any():
+        DF = DF.loc[:, ~_mask_nan]
+    else:
+        log("[{}] Aviso: no se halló columna NaN para eliminar (se continúa).".format(institucion))
+    return DF
+```
+
+Causa: `del DF[np.nan]` borraba solo **una** columna NaN; quedaban columnas separadoras NaN que rompían el conteo de a-3 en `columns[2::][i][:-3]`. Verificado con Bancos (23 entidades) y Financieras (7 entidades): el build completa sin `IndexError`.
