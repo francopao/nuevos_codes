@@ -1,0 +1,1412 @@
+#%%
+# Parameters
+inicio = "062026"
+final = "062026"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import warnings
+import os
+#%%
+# mes = 'Enero'
+# anio = "2021"
+# mes_ = "en"
+# meses_n = "01"
+# meses_ = "en"
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1),int(a2)+1)
+#%%
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+#%% md
+#### Generador de Backups
+#%%
+import os
+import shutil
+
+#Archivo
+source_file = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\6.Créditos Directos según Tipo de Crédito y Situación.xlsx"
+#landing
+destination_dir = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\Backups"
+
+
+def copy_file_to_directory(source, des):
+    # Crear el directorio de destino si no existe
+    if not os.path.exists(des):
+        os.makedirs(des)
+    # Extraer el nombre del archivo de la ruta de origen
+    file_name = os.path.basename(source)
+    # Construir la ruta de destino completa
+    dest_file = os.path.join(des, file_name)
+    try:
+        # Copiar el archivo
+        shutil.copyfile(source, dest_file)
+        print(f"Archivo copiado exitosamente.")
+    except Exception as e:
+        print(f"Error al copiar el archivo: {str(e)}")
+        
+copy_file_to_directory(source_file, destination_dir)
+
+#%%
+array_rutas = []
+for i in rango_anios:
+    if(rango_anios[-1]==i):
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                    
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(1,int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i) 
+                array_rutas.append(ruta)
+                
+    elif(i != rango_anios[0]):
+        for j in range(1,13):
+            if(len(str(j))==1):
+                j = '0' + str(j)
+            ruta = str(j) + str(i)
+            array_rutas.append(ruta)
+        
+    else:
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(int(m1),13):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+#%%
+array_rutas
+#%%
+warnings.filterwarnings("ignore")
+#%%
+anio=inicio[2:]
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+
+for i in range(len(meses_n)):
+    if inicio[0:2] == meses_n[i]:
+        mes_=meses_[i]
+        mes=meses[i]
+
+### BANCOS ##############################################################################################################
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Bancos\\" + "B-2334-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Bancos"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Bancos\\" + "B-2334-" + mesB + a + ".XLS"
+
+DF = pd.read_excel(archivo, sheet_name = '12')
+def limpiar_texto(s):
+    return str(s).replace('*', '').strip()
+
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+DF = DF.iloc[4::]
+
+c = DF.iloc[0:1]
+c1 = DF.iloc[0:1]
+lista = []
+for i,n in zip(DF.columns,range(len(DF.columns))):
+    a = DF[i].iloc[0]
+    if (str(a) != 'nan'):
+        lista.append(n)
+
+for i in lista[1:-1]:
+    a = c['Unnamed: '+ str(i)][4]
+    if (a == 'Consumo'):
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        c['Unnamed: '+ str(i+3)] = a + ' Vigentes_'
+        c['Unnamed: '+ str(i+4)] = a + ' Refinanc. y Reestruct._'
+        c['Unnamed: '+ str(i+5)] = a + ' Atrasados_'
+        c['Unnamed: '+ str(i+6)] = a + ' TOTAL'
+    else:
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        c['Unnamed: '+ str(i+3)] = a + ' TOTAL'
+
+DF.columns = c.iloc[0,::]
+
+
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+
+DF = DF.iloc[4:-1]
+
+for i in lista[1:-1]:
+    if(c['Unnamed: '+ str(i)][4] == 'Consumo Vigentes' ):
+        DF[c['Unnamed: '+ str(i+6)][4]] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]] + DF[c['Unnamed: '+ str(i+3)][4]] + DF[c['Unnamed: '+ str(i+4)][4]] +DF[c['Unnamed: '+ str(i+5)][4]]     
+    else:    
+        DF[c['Unnamed: '+ str(i+3)][4]] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]]
+
+
+DF['Total Créditos Directos Vigentes'] = 0
+DF['Total Créditos Directos Refinanc. y Reestruct.'] = 0
+DF['Total Créditos Directos Atrasados'] = 0
+for i in DF.columns[1:-3]:
+    a = re.findall('Vigentes', i )
+    b = re.findall('Refinanc. y Reestruct.', i )
+    c = re.findall('Atrasados', i )
+    if (a != []):
+        DF['Total Créditos Directos Vigentes'] = DF['Total Créditos Directos Vigentes'] + DF[i]
+    if (b != []):
+        DF['Total Créditos Directos Refinanc. y Reestruct.'] = DF['Total Créditos Directos Refinanc. y Reestruct.'] + DF[i]
+    if (c != []):
+        DF['Total Créditos Directos Atrasados'] = DF['Total Créditos Directos Atrasados'] + DF[i]
+
+DF['Consumo General Vigentes'] = DF['Consumo Vigentes'] + DF['Consumo Vigentes_']
+DF['Consumo General Refinanc. y Reestruct.'] = DF['Consumo Refinanc. y Reestruct.'] + DF['Consumo Refinanc. y Reestruct._']
+DF['Consumo General Atrasados'] = DF['Consumo Atrasados'] + DF['Consumo Atrasados_']        
+
+DF = DF.rename(columns={"Total Créditos Directos": "Total Créditos Directos TOTAL"})
+
+####### diccionario
+DF_dic = DF.set_index("Empresas")
+dic_ = DF_dic.to_dict()
+
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+
+def _clave_ok(diccionario, clave, empresa, ctx=""):
+    # Blindaje: avisa en consola si la clave o la empresa no existen y devuelve NaN
+    try:
+        return diccionario[clave][empresa]
+    except KeyError:
+        print(f"[ALERTA lookup] {ctx} | clave no hallada: '{clave}' | empresa: '{empresa}'")
+        return np.nan
+
+def dic_bc(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'], row['Empresas'], 'dic_bc')
+def dic_bc2(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'] + '_', row['Empresas'], 'dic_bc2')
+def dic_bc3(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' General ' + row['Detalle'], row['Empresas'], 'dic_bc3')
+
+DF_Bancos = pd.DataFrame()
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+for i in lista[1::]:
+    if (limpiar_texto(c1.loc[4].iloc[i]) != 'Consumo' and limpiar_texto(c1.loc[4].iloc[i]) != 'Total Créditos Directos'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Bancos')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Bancos')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'General')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Bancos')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'General')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Bancos')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'General')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Bancos = pd.concat([DF_Bancos ,DF_T])
+
+    elif(limpiar_texto(c1.loc[4].iloc[i]) == 'Consumo'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Bancos')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Bancos')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'Revolventes')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Bancos')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'Revolventes')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Bancos')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'Revolventes')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF5 = DF.get(['Empresas'])
+        DF5.insert(0, 'Entidad', 'Bancos')
+        DF5.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF5.insert(3, 'Tipo2', 'No Revolventes')
+        DF5.insert(4, 'Detalle', 'Vigentes')
+        DF5[fecha_col] = DF5.apply(dic_bc2,axis=1)
+
+        DF6 = DF.get(['Empresas'])
+        DF6.insert(0, 'Entidad', 'Bancos')
+        DF6.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF6.insert(3, 'Tipo2', 'No Revolventes')
+        DF6.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF6[fecha_col] = DF6.apply(dic_bc2,axis=1)
+
+        DF7 = DF.get(['Empresas'])
+        DF7.insert(0, 'Entidad', 'Bancos')
+        DF7.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF7.insert(3, 'Tipo2', 'No Revolventes')
+        DF7.insert(4, 'Detalle', 'Atrasados')
+        DF7[fecha_col] = DF7.apply(dic_bc2,axis=1)
+
+        ######
+        DF8 = DF.get(['Empresas'])
+        DF8.insert(0, 'Entidad', 'Bancos')
+        DF8.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF8.insert(3, 'Tipo2', 'General')
+        DF8.insert(4, 'Detalle', 'Vigentes')
+        DF8[fecha_col] = DF8.apply(dic_bc3,axis=1)
+
+
+        DF9 = DF.get(['Empresas'])
+        DF9.insert(0, 'Entidad', 'Bancos')
+        DF9.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF9.insert(3, 'Tipo2', 'General')
+        DF9.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF9[fecha_col] = DF9.apply(dic_bc3,axis=1)
+
+        DF10 = DF.get(['Empresas'])
+        DF10.insert(0, 'Entidad', 'Bancos')
+        DF10.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF10.insert(3, 'Tipo2', 'General')
+        DF10.insert(4, 'Detalle', 'Atrasados')
+        DF10[fecha_col] = DF10.apply(dic_bc3,axis=1)
+
+        #####
+        DF_T = pd.concat([DF1, DF2, DF3, DF4, DF5, DF6, DF7, DF8, DF9, DF10]) 
+        DF_Bancos = pd.concat([DF_Bancos ,DF_T])
+
+    else:
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Bancos')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'TOTAL')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Bancos')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'TOTAL')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Bancos')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'TOTAL')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Bancos')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'TOTAL')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Bancos = pd.concat([DF_Bancos ,DF_T])
+    
+    DF_Bancos = DF_Bancos.dropna()
+############################################################################################################
+### FINANCIERAS ############################################################################################
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Financieras\\" + "B-3220-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Financieras"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Financieras\\" + "B-3220-" + mesB + a + ".XLS"
+
+DF = pd.read_excel(archivo, sheet_name = '11')
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+DF = DF.iloc[4::]
+
+c = DF.iloc[0:1]
+c1 = DF.iloc[0:1]
+lista = []
+for i,n in zip(DF.columns,range(len(DF.columns))):
+    a = DF[i].iloc[0]
+    if (str(a) != 'nan'):
+        lista.append(n)
+
+for i in lista[1:-1]:
+    a = c['Unnamed: '+ str(i)][4]
+    if (a == 'Consumo'):
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        c['Unnamed: '+ str(i+3)] = a + ' Vigentes_'
+        c['Unnamed: '+ str(i+4)] = a + ' Refinanc. y Reestruct._'
+        c['Unnamed: '+ str(i+5)] = a + ' Atrasados_'
+        #c['Unnamed: '+ str(i+6)] = a + ' TOTAL'
+    else:
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        #c['Unnamed: '+ str(i+3)] = a + ' TOTAL'
+
+DF.columns = c.iloc[0,::]
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+DF = DF.iloc[4:-1]
+
+for i in lista[1:-1]:
+    a = c1['Unnamed: '+ str(i)][4]
+    if(c['Unnamed: '+ str(i)][4] == 'Consumo Vigentes' ):
+        DF[a + ' TOTAL'] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]] + DF[c['Unnamed: '+ str(i+3)][4]] + DF[c['Unnamed: '+ str(i+4)][4]] +DF[c['Unnamed: '+ str(i+5)][4]]     
+    else:    
+        DF[a + ' TOTAL'] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]]
+
+DF['Total Créditos Directos Vigentes'] = 0
+DF['Total Créditos Directos Refinanc. y Reestruct.'] = 0
+DF['Total Créditos Directos Atrasados'] = 0
+for i in DF.columns[1:-3]:
+    a = re.findall('Vigentes', i )
+    b = re.findall('Refinanc. y Reestruct.', i )
+    c = re.findall('Atrasados', i )
+    if (a != []):
+        DF['Total Créditos Directos Vigentes'] = DF['Total Créditos Directos Vigentes'] + DF[i]
+    if (b != []):
+        DF['Total Créditos Directos Refinanc. y Reestruct.'] = DF['Total Créditos Directos Refinanc. y Reestruct.'] + DF[i]
+    if (c != []):
+        DF['Total Créditos Directos Atrasados'] = DF['Total Créditos Directos Atrasados'] + DF[i]
+
+DF['Consumo General Vigentes'] = DF['Consumo Vigentes'] + DF['Consumo Vigentes_']
+DF['Consumo General Refinanc. y Reestruct.'] = DF['Consumo Refinanc. y Reestruct.'] + DF['Consumo Refinanc. y Reestruct._']
+DF['Consumo General Atrasados'] = DF['Consumo Atrasados'] + DF['Consumo Atrasados_']  
+
+DF = DF.rename(columns={"Total Créditos Directos": "Total Créditos Directos TOTAL", "Empresas*": "Empresas"})
+
+####### diccionario
+DF_dic = DF.set_index("Empresas")
+dic_ = DF_dic.to_dict()
+
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+
+def _clave_ok(diccionario, clave, empresa, ctx=""):
+    # Blindaje: avisa en consola si la clave o la empresa no existen y devuelve NaN
+    try:
+        return diccionario[clave][empresa]
+    except KeyError:
+        print(f"[ALERTA lookup] {ctx} | clave no hallada: '{clave}' | empresa: '{empresa}'")
+        return np.nan
+
+def dic_bc(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'], row['Empresas'], 'dic_bc')
+def dic_bc2(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'] + '_', row['Empresas'], 'dic_bc2')
+def dic_bc3(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' General ' + row['Detalle'], row['Empresas'], 'dic_bc3')
+
+DF_Fin = pd.DataFrame()
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+for i in lista[1::]:
+    if (limpiar_texto(c1.loc[4].iloc[i]) != 'Consumo' and limpiar_texto(c1.loc[4].iloc[i]) != 'Total Créditos Directos'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Financieras')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Financieras')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'General')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Financieras')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'General')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Financieras')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'General')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Fin = pd.concat([DF_Fin ,DF_T])
+
+    elif(limpiar_texto(c1.loc[4].iloc[i]) == 'Consumo'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Financieras')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Financieras')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'Revolventes')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Financieras')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'Revolventes')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Financieras')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'Revolventes')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF5 = DF.get(['Empresas'])
+        DF5.insert(0, 'Entidad', 'Financieras')
+        DF5.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF5.insert(3, 'Tipo2', 'No Revolventes')
+        DF5.insert(4, 'Detalle', 'Vigentes')
+        DF5[fecha_col] = DF5.apply(dic_bc2,axis=1)
+
+        DF6 = DF.get(['Empresas'])
+        DF6.insert(0, 'Entidad', 'Financieras')
+        DF6.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF6.insert(3, 'Tipo2', 'No Revolventes')
+        DF6.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF6[fecha_col] = DF6.apply(dic_bc2,axis=1)
+
+        DF7 = DF.get(['Empresas'])
+        DF7.insert(0, 'Entidad', 'Financieras')
+        DF7.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF7.insert(3, 'Tipo2', 'No Revolventes')
+        DF7.insert(4, 'Detalle', 'Atrasados')
+        DF7[fecha_col] = DF7.apply(dic_bc2,axis=1)
+
+        ######
+        DF8 = DF.get(['Empresas'])
+        DF8.insert(0, 'Entidad', 'Financieras')
+        DF8.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF8.insert(3, 'Tipo2', 'General')
+        DF8.insert(4, 'Detalle', 'Vigentes')
+        DF8[fecha_col] = DF8.apply(dic_bc3,axis=1)
+
+
+        DF9 = DF.get(['Empresas'])
+        DF9.insert(0, 'Entidad', 'Financieras')
+        DF9.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF9.insert(3, 'Tipo2', 'General')
+        DF9.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF9[fecha_col] = DF9.apply(dic_bc3,axis=1)
+
+        DF10 = DF.get(['Empresas'])
+        DF10.insert(0, 'Entidad', 'Financieras')
+        DF10.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF10.insert(3, 'Tipo2', 'General')
+        DF10.insert(4, 'Detalle', 'Atrasados')
+        DF10[fecha_col] = DF10.apply(dic_bc3,axis=1)
+
+        #####
+        DF_T = pd.concat([DF1, DF2, DF3, DF4, DF5, DF6, DF7, DF8, DF9, DF10]) 
+        DF_Fin = pd.concat([DF_Fin ,DF_T])
+
+    else:
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Financieras')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'TOTAL')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Financieras')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'TOTAL')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Financieras')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'TOTAL')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Financieras')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'TOTAL')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Fin = pd.concat([DF_Fin ,DF_T]) 
+        
+    DF_Fin = DF_Fin.dropna()
+
+############################################################################################################
+### ESTATALES ##############################################################################################
+
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Estatales\\" + "E-5205-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Estatales"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Estatales\\" + "E-5205-" + mesB + a + ".XLS"
+
+DF = pd.read_excel(archivo, sheet_name = '14')
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+DF = DF.iloc[4::]
+
+c = DF.iloc[0:1]
+c1 = DF.iloc[0:1]
+lista = []
+for i,n in zip(DF.columns,range(len(DF.columns))):
+    a = DF[i].iloc[0]
+    if (str(a) != 'nan'):
+        lista.append(n)
+
+for i in lista[1:-1]:
+    a = c['Unnamed: '+ str(i)][4]
+    if (a == 'Consumo'):
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        c['Unnamed: '+ str(i+3)] = a + ' Vigentes_'
+        c['Unnamed: '+ str(i+4)] = a + ' Refinanc. y Reestruct._'
+        c['Unnamed: '+ str(i+5)] = a + ' Atrasados_'
+        c['Unnamed: '+ str(i+6)] = a + ' TOTAL'
+    else:
+        c['Unnamed: '+ str(i)] = a + ' Vigentes'
+        c['Unnamed: '+ str(i+1)] = a + ' Refinanc. y Reestruct.'
+        c['Unnamed: '+ str(i+2)] = a + ' Atrasados'
+        c['Unnamed: '+ str(i+3)] = a + ' TOTAL'
+
+DF.columns = c.iloc[0,::]
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+DF = DF.iloc[4:-4]
+
+for i in lista[1:-1]:
+    if(c['Unnamed: '+ str(i)][4] == 'Consumo Vigentes' ):
+        DF[c['Unnamed: '+ str(i+6)][4]] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]] + DF[c['Unnamed: '+ str(i+3)][4]] + DF[c['Unnamed: '+ str(i+4)][4]] +DF[c['Unnamed: '+ str(i+5)][4]]     
+    else:    
+        DF[c['Unnamed: '+ str(i+3)][4]] = DF[c['Unnamed: '+ str(i)][4]] + DF[c['Unnamed: '+ str(i+1)][4]] +DF[c['Unnamed: '+ str(i+2)][4]]
+
+
+DF['Total Créditos Directos Vigentes'] = 0
+DF['Total Créditos Directos Refinanc. y Reestruct.'] = 0
+DF['Total Créditos Directos Atrasados'] = 0
+for i in DF.columns[1:-3]:
+    a = re.findall('Vigentes', i )
+    b = re.findall('Refinanc. y Reestruct.', i )
+    c = re.findall('Atrasados', i )
+    if (a != []):
+        DF['Total Créditos Directos Vigentes'] = DF['Total Créditos Directos Vigentes'] + DF[i]
+    if (b != []):
+        DF['Total Créditos Directos Refinanc. y Reestruct.'] = DF['Total Créditos Directos Refinanc. y Reestruct.'] + DF[i]
+    if (c != []):
+        DF['Total Créditos Directos Atrasados'] = DF['Total Créditos Directos Atrasados'] + DF[i]
+
+DF['Consumo General Vigentes'] = DF['Consumo Vigentes'] + DF['Consumo Vigentes_']
+DF['Consumo General Refinanc. y Reestruct.'] = DF['Consumo Refinanc. y Reestruct.'] + DF['Consumo Refinanc. y Reestruct._']
+DF['Consumo General Atrasados'] = DF['Consumo Atrasados'] + DF['Consumo Atrasados_']  
+
+
+DF = DF.rename(columns={"Total Créditos Directos": "Total Créditos Directos TOTAL"})
+
+####### diccionario
+DF_dic = DF.set_index("Empresas")
+dic_ = DF_dic.to_dict()
+
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+
+def _clave_ok(diccionario, clave, empresa, ctx=""):
+    # Blindaje: avisa en consola si la clave o la empresa no existen y devuelve NaN
+    try:
+        return diccionario[clave][empresa]
+    except KeyError:
+        print(f"[ALERTA lookup] {ctx} | clave no hallada: '{clave}' | empresa: '{empresa}'")
+        return np.nan
+
+def dic_bc(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'], row['Empresas'], 'dic_bc')
+def dic_bc2(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' ' + row['Detalle'] + '_', row['Empresas'], 'dic_bc2')
+def dic_bc3(row):
+    return _clave_ok(dic_, limpiar_texto(row['Tipo']) + ' General ' + row['Detalle'], row['Empresas'], 'dic_bc3')
+
+
+DF_Estatales = pd.DataFrame()
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+for i in lista[1::]:
+    if (limpiar_texto(c1.loc[4].iloc[i]) != 'Consumo' and limpiar_texto(c1.loc[4].iloc[i]) != 'Total Créditos Directos'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Estatales')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Estatales')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'General')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Estatales')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'General')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Estatales')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'General')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Estatales = pd.concat([DF_Estatales ,DF_T])
+
+    elif(limpiar_texto(c1.loc[4].iloc[i]) == 'Consumo'):
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Estatales')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'General')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Estatales')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'Revolventes')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Estatales')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'Revolventes')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Estatales')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'Revolventes')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF5 = DF.get(['Empresas'])
+        DF5.insert(0, 'Entidad', 'Estatales')
+        DF5.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF5.insert(3, 'Tipo2', 'No Revolventes')
+        DF5.insert(4, 'Detalle', 'Vigentes')
+        DF5[fecha_col] = DF5.apply(dic_bc2,axis=1)
+
+        DF6 = DF.get(['Empresas'])
+        DF6.insert(0, 'Entidad', 'Estatales')
+        DF6.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF6.insert(3, 'Tipo2', 'No Revolventes')
+        DF6.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF6[fecha_col] = DF6.apply(dic_bc2,axis=1)
+
+        DF7 = DF.get(['Empresas'])
+        DF7.insert(0, 'Entidad', 'Estatales')
+        DF7.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF7.insert(3, 'Tipo2', 'No Revolventes')
+        DF7.insert(4, 'Detalle', 'Atrasados')
+        DF7[fecha_col] = DF7.apply(dic_bc2,axis=1)
+
+        ######
+        DF8 = DF.get(['Empresas'])
+        DF8.insert(0, 'Entidad', 'Estatales')
+        DF8.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF8.insert(3, 'Tipo2', 'General')
+        DF8.insert(4, 'Detalle', 'Vigentes')
+        DF8[fecha_col] = DF8.apply(dic_bc3,axis=1)
+
+
+        DF9 = DF.get(['Empresas'])
+        DF9.insert(0, 'Entidad', 'Estatales')
+        DF9.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF9.insert(3, 'Tipo2', 'General')
+        DF9.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF9[fecha_col] = DF9.apply(dic_bc3,axis=1)
+
+        DF10 = DF.get(['Empresas'])
+        DF10.insert(0, 'Entidad', 'Estatales')
+        DF10.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF10.insert(3, 'Tipo2', 'General')
+        DF10.insert(4, 'Detalle', 'Atrasados')
+        DF10[fecha_col] = DF10.apply(dic_bc3,axis=1)
+
+        #####
+        DF_T = pd.concat([DF1, DF2, DF3, DF4, DF5, DF6, DF7, DF8, DF9, DF10]) 
+        DF_Estatales = pd.concat([DF_Estatales ,DF_T])
+
+    else:
+        DF1 = DF.get(['Empresas'])
+        DF1.insert(0, 'Entidad', 'Estatales')
+        DF1.insert(2,'Tipo', limpiar_texto(limpiar_texto(c1.loc[4].iloc[i])))
+        DF1.insert(3, 'Tipo2', 'TOTAL')
+        DF1.insert(4, 'Detalle', 'TOTAL')
+        DF1[fecha_col] = DF1.apply(dic_bc,axis=1)
+
+        DF2 = DF.get(['Empresas'])
+        DF2.insert(0, 'Entidad', 'Estatales')
+        DF2.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF2.insert(3, 'Tipo2', 'TOTAL')
+        DF2.insert(4, 'Detalle', 'Vigentes')
+        DF2[fecha_col] = DF2.apply(dic_bc,axis=1)
+
+        DF3 = DF.get(['Empresas'])
+        DF3.insert(0, 'Entidad', 'Estatales')
+        DF3.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF3.insert(3, 'Tipo2', 'TOTAL')
+        DF3.insert(4, 'Detalle', 'Refinanc. y Reestruct.')
+        DF3[fecha_col] = DF3.apply(dic_bc,axis=1)
+
+        DF4 = DF.get(['Empresas'])
+        DF4.insert(0, 'Entidad', 'Estatales')
+        DF4.insert(2,'Tipo', limpiar_texto(c1.loc[4].iloc[i]))
+        DF4.insert(3, 'Tipo2', 'TOTAL')
+        DF4.insert(4, 'Detalle', 'Atrasados')
+        DF4[fecha_col] = DF4.apply(dic_bc,axis=1)
+
+        DF_T = pd.concat([DF1, DF2, DF3, DF4]) 
+        DF_Estatales = pd.concat([DF_Estatales ,DF_T])
+        
+    DF_Estatales = DF_Estatales.dropna()
+
+############################################################################################################
+### MYPES ##################################################################################################
+
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Mypes\\" + "C-4223-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Cajas Rurales"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Mypes\\" + "C-4223-" + mesB + a + ".XLS"
+
+DF = pd.read_excel(archivo, sheet_name = 'EDP')
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+for index, row in enumerate(DF.iloc[:, 1]):
+    if not pd.isnull(row):
+        column_index = index
+        break
+
+DF.columns = DF.iloc[column_index]
+DF = DF.drop(column_index)
+
+for i in DF.columns:
+    if ( str(i) == 'nan'):
+        del DF[i]
+
+DF = DF.dropna(subset=['Situación'])
+
+DF = DF.drop("Tipo de crédito", axis = 1)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+DF.insert(4, "Total1", 0.0)
+DF.insert(8, "Total2", 0.0)
+DF.insert(12, "Total3", 0.0)
+DF.insert(16, "Total4", 0.0)
+DF.insert(20, "Total5", 0.0)
+DF.insert(24, "Total6", 0.0)
+DF.insert(28, "Total7", 0.0)
+
+# DF.iloc[:,4] = DF.iloc[:,1] + DF.iloc[:,2] + DF.iloc[:,3]
+# DF.iloc[:,8] = DF.iloc[:,5] + DF.iloc[:,6] + DF.iloc[:,7]
+# DF.iloc[:,12] = DF.iloc[:,9] + DF.iloc[:,10] + DF.iloc[:,11]
+# DF.iloc[:,16] = DF.iloc[:,13] + DF.iloc[:,14] + DF.iloc[:,15]
+# DF.iloc[:,20] = DF.iloc[:,17] + DF.iloc[:,18] + DF.iloc[:,19]
+# DF.iloc[:,24] = DF.iloc[:,21] + DF.iloc[:,22] + DF.iloc[:,23]
+# DF.iloc[:,28] = DF.iloc[:,25] + DF.iloc[:,26] + DF.iloc[:,27]
+
+DF.iloc[:, 4]  = DF.iloc[:, 1:4].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 8]  = DF.iloc[:, 5:8].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 12] = DF.iloc[:, 9:12].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 16] = DF.iloc[:, 13:16].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 20] = DF.iloc[:, 17:20].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 24] = DF.iloc[:, 21:24].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 28] = DF.iloc[:, 25:28].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+
+totales = {"Total1" : "TOTAL" , "Total2" : "TOTAL", "Total3" : "TOTAL", "Total4" : "TOTAL", "Total5" : "TOTAL", "Total6" : "TOTAL", "Total7" : "TOTAL"}
+
+DF = DF.rename(columns=totales)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+
+DF_Totales = DF.groupby(["Situación"]).sum()
+DF_Totales = DF_Totales.reset_index()
+DF = pd.concat([DF, DF_Totales])
+
+tipos = ["Corporativos", "Corporativos", "Corporativos", "Corporativos",
+        "Grandes Empresas","Grandes Empresas","Grandes Empresas","Grandes Empresas",
+        "Medianas Empresas", "Medianas Empresas","Medianas Empresas","Medianas Empresas",
+        "Pequeñas Empresas","Pequeñas Empresas", "Pequeñas Empresas","Pequeñas Empresas",
+        "Micro Empresas", "Micro Empresas", "Micro Empresas","Micro Empresas",
+        "Consumo","Consumo", "Consumo", "Consumo",
+        "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda",
+        "TOTAL","TOTAL", "TOTAL", "TOTAL"]
+
+DF.insert(0, "Tipo de crédito", tipos)
+
+
+DF.insert(0,'key',DF['Tipo de crédito']+DF['Situación'])
+
+DF_dicc = DF.copy()
+DF_dicc = DF_dicc.set_index("key")
+dic_ = DF_dicc.to_dict()
+
+DF_Mypes = pd.DataFrame()
+for i in DF.columns[3::]:
+    DF_ = DF.copy()
+    DF_ = DF_.get(['Tipo de crédito', 'Situación'])
+    DF_.insert(0, 'Empresas', i)
+    DF_.insert(0, 'Entidad', 'Mypes')
+    DF_Mypes = pd.concat([DF_Mypes, DF_])
+
+DF_Mypes.rename(columns={'Tipo de crédito':'Tipo','Situación':'Detalle'},inplace=True)
+DF_Mypes.insert(3, 'Tipo2', 'General')
+
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+
+def fech(row):
+    try:
+        return dic_[row['Empresas']][row['Tipo']+row['Detalle']]
+    except KeyError:
+        print(f"[ALERTA lookup] fech | empresa: '{row['Empresas']}' | clave: '{row['Tipo']}{row['Detalle']}'")
+        return np.nan
+
+DF_Mypes[fecha_col] =  DF_Mypes.apply(fech,axis=1)
+
+DF_Mypes = DF_Mypes[DF_Mypes["Empresas"] != "Chequeo de totales subsistema"]
+DF_Mypes = DF_Mypes.dropna()
+
+############################################################################################################
+### CAJAS ##################################################################################################
+
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Cajas\\" + "C-1228-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Cajas"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Cajas\\" + "C-1228-" + mesB + a + ".XLS"
+
+
+DF = pd.read_excel(archivo, sheet_name = 'CM')
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+for index, row in enumerate(DF.iloc[:, 1]):
+    if not pd.isnull(row):
+        column_index = index
+        break
+
+DF.columns = DF.iloc[column_index]
+DF = DF.drop(column_index)
+
+for i in DF.columns:
+    if ( str(i) == 'nan'):
+        del DF[i]
+
+DF = DF.dropna(subset=['Situación'])
+
+DF = DF.drop("Tipo de crédito", axis = 1)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+DF.insert(4, "Total1", 0.0)
+DF.insert(8, "Total2", 0.0)
+DF.insert(12, "Total3", 0.0)
+DF.insert(16, "Total4", 0.0)
+DF.insert(20, "Total5", 0.0)
+DF.insert(24, "Total6", 0.0)
+DF.insert(28, "Total7", 0.0)
+
+# DF.iloc[:,4] = DF.iloc[:,1] + DF.iloc[:,2] + DF.iloc[:,3]
+# DF.iloc[:,8] = DF.iloc[:,5] + DF.iloc[:,6] + DF.iloc[:,7]
+# DF.iloc[:,12] = DF.iloc[:,9] + DF.iloc[:,10] + DF.iloc[:,11]
+# DF.iloc[:,16] = DF.iloc[:,13] + DF.iloc[:,14] + DF.iloc[:,15]
+# DF.iloc[:,20] = DF.iloc[:,17] + DF.iloc[:,18] + DF.iloc[:,19]
+# DF.iloc[:,24] = DF.iloc[:,21] + DF.iloc[:,22] + DF.iloc[:,23]
+# DF.iloc[:,28] = DF.iloc[:,25] + DF.iloc[:,26] + DF.iloc[:,27]
+
+DF.iloc[:, 4]  = DF.iloc[:, 1:4].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 8]  = DF.iloc[:, 5:8].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 12] = DF.iloc[:, 9:12].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 16] = DF.iloc[:, 13:16].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 20] = DF.iloc[:, 17:20].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 24] = DF.iloc[:, 21:24].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 28] = DF.iloc[:, 25:28].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+
+totales = {"Total1" : "TOTAL" , "Total2" : "TOTAL", "Total3" : "TOTAL", "Total4" : "TOTAL", "Total5" : "TOTAL", "Total6" : "TOTAL", "Total7" : "TOTAL"}
+
+DF = DF.rename(columns=totales)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+
+DF_Totales = DF.groupby(["Situación"]).sum()
+DF_Totales = DF_Totales.reset_index()
+DF = pd.concat([DF, DF_Totales])
+
+tipos = ["Corporativos", "Corporativos", "Corporativos", "Corporativos",
+        "Grandes Empresas","Grandes Empresas","Grandes Empresas","Grandes Empresas",
+        "Medianas Empresas", "Medianas Empresas","Medianas Empresas","Medianas Empresas",
+        "Pequeñas Empresas","Pequeñas Empresas", "Pequeñas Empresas","Pequeñas Empresas",
+        "Micro Empresas", "Micro Empresas", "Micro Empresas","Micro Empresas",
+        "Consumo","Consumo", "Consumo", "Consumo",
+        "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda",
+        "TOTAL","TOTAL", "TOTAL", "TOTAL"]
+
+DF.insert(0, "Tipo de crédito", tipos)
+
+
+DF.insert(0,'key',DF['Tipo de crédito']+DF['Situación'])
+
+DF_dicc = DF.copy()
+DF_dicc = DF_dicc.set_index("key")
+dic_ = DF_dicc.to_dict()
+
+
+DF_Cajas = pd.DataFrame()
+for i in DF.columns[3::]:
+    DF_ = DF.copy()
+    DF_ = DF_.get(['Tipo de crédito', 'Situación'])
+    DF_.insert(0, 'Empresas', i)
+    DF_.insert(0, 'Entidad', 'Cajas')
+    DF_Cajas = pd.concat([DF_Cajas, DF_])
+
+DF_Cajas.rename(columns={'Tipo de crédito':'Tipo','Situación':'Detalle'},inplace=True)
+DF_Cajas.insert(3, 'Tipo2', 'General')
+
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+
+def fech(row):
+    try:
+        return dic_[row['Empresas']][row['Tipo']+row['Detalle']]
+    except KeyError:
+        print(f"[ALERTA lookup] fech | empresa: '{row['Empresas']}' | clave: '{row['Tipo']}{row['Detalle']}'")
+        return np.nan
+
+DF_Cajas[fecha_col] =  DF_Cajas.apply(fech,axis=1)
+
+DF_Cajas = DF_Cajas.dropna()
+
+####Cajas Rurales #############################
+archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Cajas Rurales\\" + "C-2228-" + mes_ + anio + ".XLS"
+file_found = False
+
+for i in range(12, 0, -1):
+    if os.path.isfile(archivo):
+        file_found = True
+        last_file = archivo
+        break
+
+if not file_found:
+    print("Error: Cajas Rurales"+ mes)
+    if (meses_n[meses_.index(mes_)] == '01'):
+        mesA = '12'
+        a = str(int(anio) -1)
+    else:
+        mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+        if (len(mesA) == 1 ):
+               mesA = '0' + mesA
+        a = anio
+    months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag","09":"se", "10":"oc", "11":"no","12": "di"}
+    mesB = months.get(mesA)
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\6. Créditos Según tipo de credito y situación\\descargas_SBS\\Cajas Rurales\\" + "C-2228-" + mesB + a + ".XLS"
+
+DF = pd.read_excel(archivo, sheet_name = 0)
+# limpiar nombres de columnas
+DF.columns = [limpiar_texto(col) for col in DF.columns]
+
+
+for index, row in enumerate(DF.iloc[:, 1]):
+    if not pd.isnull(row):
+        column_index = index
+        break
+
+DF.columns = DF.iloc[column_index]
+DF = DF.drop(column_index)
+
+for i in DF.columns:
+    if ( str(i) == 'nan'):
+        del DF[i]
+
+DF = DF.dropna(subset=['Situación'])
+
+DF = DF.drop("Tipo de crédito", axis = 1)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+DF.insert(4, "Total1", 0.0)
+DF.insert(8, "Total2", 0.0)
+DF.insert(12, "Total3", 0.0)
+DF.insert(16, "Total4", 0.0)
+DF.insert(20, "Total5", 0.0)
+DF.insert(24, "Total6", 0.0)
+DF.insert(28, "Total7", 0.0)
+
+# DF.iloc[:,4] = DF.iloc[:,1] + DF.iloc[:,2] + DF.iloc[:,3]
+# DF.iloc[:,8] = DF.iloc[:,5] + DF.iloc[:,6] + DF.iloc[:,7]
+# DF.iloc[:,12] = DF.iloc[:,9] + DF.iloc[:,10] + DF.iloc[:,11]
+# DF.iloc[:,16] = DF.iloc[:,13] + DF.iloc[:,14] + DF.iloc[:,15]
+# DF.iloc[:,20] = DF.iloc[:,17] + DF.iloc[:,18] + DF.iloc[:,19]
+# DF.iloc[:,24] = DF.iloc[:,21] + DF.iloc[:,22] + DF.iloc[:,23]
+# DF.iloc[:,28] = DF.iloc[:,25] + DF.iloc[:,26] + DF.iloc[:,27]
+
+DF.iloc[:, 4]  = DF.iloc[:, 1:4].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 8]  = DF.iloc[:, 5:8].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 12] = DF.iloc[:, 9:12].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 16] = DF.iloc[:, 13:16].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 20] = DF.iloc[:, 17:20].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 24] = DF.iloc[:, 21:24].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+DF.iloc[:, 28] = DF.iloc[:, 25:28].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+
+totales = {"Total1" : "TOTAL" , "Total2" : "TOTAL", "Total3" : "TOTAL", "Total4" : "TOTAL", "Total5" : "TOTAL", "Total6" : "TOTAL", "Total7" : "TOTAL"}
+
+DF = DF.rename(columns=totales)
+DF = DF.T
+DF = DF.reset_index()
+DF.columns = DF.iloc[0, ::]
+DF = DF.drop([0])
+
+DF_Totales = DF.groupby(["Situación"]).sum()
+DF_Totales = DF_Totales.reset_index()
+DF = pd.concat([DF, DF_Totales])
+
+tipos = ["Corporativos", "Corporativos", "Corporativos", "Corporativos",
+        "Grandes Empresas","Grandes Empresas","Grandes Empresas","Grandes Empresas",
+        "Medianas Empresas", "Medianas Empresas","Medianas Empresas","Medianas Empresas",
+        "Pequeñas Empresas","Pequeñas Empresas", "Pequeñas Empresas","Pequeñas Empresas",
+        "Micro Empresas", "Micro Empresas", "Micro Empresas","Micro Empresas",
+        "Consumo","Consumo", "Consumo", "Consumo",
+        "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda", "Hipotecarios para Vivienda",
+        "TOTAL","TOTAL", "TOTAL", "TOTAL"]
+
+DF.insert(0, "Tipo de crédito", tipos)
+
+
+DF.insert(0,'key',DF['Tipo de crédito']+DF['Situación'])
+
+DF_dicc = DF.copy()
+DF_dicc = DF_dicc.set_index("key")
+dic_ = DF_dicc.to_dict()
+
+DF_CajasR = pd.DataFrame()
+for i in DF.columns[3::]:
+    DF_ = DF.copy()
+    DF_ = DF_.get(['Tipo de crédito', 'Situación'])
+    DF_.insert(0, 'Empresas', i)
+    DF_.insert(0, 'Entidad', 'Cajas Rurales')
+    DF_CajasR = pd.concat([DF_CajasR, DF_])
+
+DF_CajasR.rename(columns={'Tipo de crédito':'Tipo','Situación':'Detalle'},inplace=True)
+DF_CajasR.insert(3, 'Tipo2', 'General')
+
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+
+def fech(row):
+    try:
+        return dic_[row['Empresas']][row['Tipo']+row['Detalle']]
+    except KeyError:
+        print(f"[ALERTA lookup] fech | empresa: '{row['Empresas']}' | clave: '{row['Tipo']}{row['Detalle']}'")
+        return np.nan
+
+DF_CajasR[fecha_col] =  DF_CajasR.apply(fech,axis=1)
+
+DF_CajasR = DF_CajasR.dropna()
+
+
+### BASE DE CRÉDITO
+# --- Diagnostico por subsistema: si alguno sale en 0, revisar el archivo fuente ---
+_subsistemas = {
+    'Bancos': DF_Bancos, 'Financieras': DF_Fin, 'Estatales': DF_Estatales,
+    'Mypes': DF_Mypes, 'Cajas': DF_Cajas, 'Cajas Rurales': DF_CajasR,
+}
+print('----- Conteo de filas por subsistema -----')
+for _nom, _dfsub in _subsistemas.items():
+    _n = len(_dfsub)
+    print(f"[{'OK ' if _n > 0 else 'VACIO'}] {_nom}: {_n} filas")
+    if _n == 0:
+        print(f"    >> ADVERTENCIA: '{_nom}' quedo sin datos. Revisar el .XLS o los rotulos de columnas.")
+print('------------------------------------------')
+DF_CR = pd.concat([DF_Bancos, DF_Fin, DF_Estatales, DF_Mypes, DF_Cajas, DF_CajasR])
+# print(DF_CR)
+
+DF_CR = DF_CR.rename(columns={"Entidad": "Institución", "Empresas": "Nombre", "Detalle": "Detallada"})
+DF_CR["Estructura"] = "CréditoD_TCS"
+DF_CR = DF_CR.get(["Institución","Estructura","Nombre","Tipo","Tipo2","Detallada",fecha_col])
+#####################
+### Renombre 
+
+ruta_renombre = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Diccionario_SBS.xlsx'
+df_ren = pd.read_excel(ruta_renombre, sheet_name ='Créditos según Tipo y Situación')
+df_ren = df_ren.set_index("Nombre_Antiguo")
+dic_ren = df_ren.to_dict()    
+
+
+def dic_cambio_n(row):
+    try:
+        nom = dic_ren['Nombre_Nuevo'][row['Nombre']]
+    except:
+        nom =  row['Nombre']
+    return nom
+
+DF_CR['Nombre'] = DF_CR.apply(dic_cambio_n, axis=1)
+
+#####################
+
+DF_CR.insert(0, 'key', DF_CR["Institución"]+DF_CR["Estructura"]+DF_CR["Nombre"]+DF_CR["Tipo"] +DF_CR["Tipo2"]+DF_CR["Detallada"])
+
+NombresTemp = DF_CR["Nombre"].unique()
+DetalladaTemp = DF_CR["Detallada"].unique()
+
+########################
+############## 
+ruta_base = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\6.Créditos Directos según Tipo de Crédito y Situación.xlsx"
+
+with pd.ExcelFile(ruta_base) as writer:  
+    BD_Total = writer.parse(sheet_name='CréditoD_TCS')
+    
+NombresHis = BD_Total["Nombre"].unique()
+DetalladaHis = BD_Total["Detallada"].unique()
+
+def compare_string_arrays1(NombresHis, NombresTemp):
+    new_values = [value for value in NombresTemp if value not in NombresHis]
+    return new_values
+
+new_values1 = compare_string_arrays1(NombresHis, NombresTemp)
+
+def compare_string_arrays2(DetalladaHis, DetalladaTemp):
+    new_values2 = [value for value in DetalladaTemp if value not in DetalladaHis]
+    return new_values2
+
+new_values2 = compare_string_arrays2(DetalladaHis, DetalladaTemp)
+
+# --- Aviso de novedades no mapeadas en el historico ---
+if new_values1:
+    print(f"[NOVEDAD] Nombres nuevos no presentes en el historico ({len(new_values1)}): {new_values1}")
+else:
+    print('[OK] Sin nombres nuevos respecto al historico.')
+if new_values2:
+    print(f"[NOVEDAD] Detalladas nuevas no presentes en el historico ({len(new_values2)}): {new_values2}")
+else:
+    print('[OK] Sin detalladas nuevas respecto al historico.')
+
+if new_values1 and new_values2:
+    a = []
+    a.append(new_values1)
+    a.append(new_values2)
+    #return a
+elif new_values1:
+    a = []
+    a.append(new_values1)
+    #return a
+elif new_values2:
+    a = []
+    a.append(new_values2)
+    #return a
+
+BD_Total_ = BD_Total.copy()
+BD_Total_['Indicador'] = 'Mapeado'
+BD_Total_ = BD_Total_.set_index("key")
+dic_Total_ = BD_Total_.to_dict()
+
+DF_CR2 = DF_CR.copy()
+DF_CR2['Indicador'] =  DF_CR2['key'].map(dic_Total_['Indicador'])
+DF_CR2 = DF_CR2.loc[DF_CR2['Indicador'].isin([np.nan])].sort_index(ignore_index=True) 
+DF_CR2 = DF_CR2.drop(['Indicador'], axis=1)
+# DF_CR2.to_excel("Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\bb.xlsx")
+BD_Total = pd.concat([BD_Total, DF_CR2])
+
+DF_CR = DF_CR.set_index("key")
+dic_cr = DF_CR.to_dict()
+fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')  
+BD_Total[fecha_col] = BD_Total['key'].map(dic_cr[fecha_col])    
+
+try:
+    with pd.ExcelWriter(ruta_base ,  mode="a", engine="openpyxl",if_sheet_exists = 'replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="CréditoD_TCS", index = False)
+    print(f"[OK] Escritura completada. Total de filas en base: {len(BD_Total)} | Nuevas este periodo: {len(DF_CR2)}")
+    print("listo")
+except PermissionError:
+    print("[ERROR ESCRITURA] El Excel base esta abierto o bloqueado. Cierralo y vuelve a ejecutar.")
+    raise
+except Exception as _e:
+    print(f"[ERROR ESCRITURA] No se pudo guardar la base: {type(_e).__name__}: {_e}")
+    raise
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
+
+#%%
