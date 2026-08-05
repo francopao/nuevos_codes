@@ -1,0 +1,1172 @@
+# -*- coding: utf-8 -*-
+# =====================================================================================
+#  1. Balance General (IS)  -  Versión blindada
+#  Objetivo y estructura originales intactos. Se añade:
+#    - Resolución robusta del libro destino en Excel (soporta múltiples instancias / OneDrive)
+#    - Manejo de errores con mensajes claros e identificables por institución / archivo / etapa
+#    - Guardas ante colisión de nombre de hoja, archivos inexistentes y etiquetas faltantes
+# =====================================================================================
+
+#%%
+# Parameters
+inicio = "062026"
+final = "062026"
+
+#%% md
+# EEFF
+#%% md
+#### Se pone la fecha respectiva
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+#%%
+# mes = 'Abril'
+# anio = '2023'
+# mes_ = "ab"
+# meses_n = "04"
+# meses_ = "ab"
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1), int(a2) + 1)
+#%%
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en', 'fe', 'ma', 'ab', 'my', 'jn', 'jl', 'ag', 'se', 'oc', 'no', 'di']
+meses_n = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+
+#%%
+# -------------------------------------------------------------------------------------
+#  Utilidades de blindaje reutilizadas por main() (no alteran la lógica de negocio)
+# -------------------------------------------------------------------------------------
+def log(msg):
+    print("[{}] {}".format(datetime.datetime.now().strftime("%H:%M:%S"), msg))
+
+
+def _leer_sbs(archivo, sheet_name, institucion):
+    """Lee el Excel SBS validando existencia y reportando la institución si falla."""
+    if not os.path.isfile(archivo):
+        raise FileNotFoundError(
+            "[{}] No existe el archivo SBS esperado:\n{}".format(institucion, archivo)
+        )
+    try:
+        return pd.read_excel(archivo, sheet_name=sheet_name)
+    except Exception as e:
+        raise RuntimeError(
+            "[{}] Error leyendo '{}' (hoja='{}'): {}: {}".format(
+                institucion, archivo, sheet_name, type(e).__name__, e
+            )
+        ) from e
+
+
+def _indices_tipos(DF, tipos, institucion):
+    """
+    Equivalente a: for i in tipos: index_.append(DF.loc[DF['Detallada'].isin([i])].index[0])
+    pero informando con claridad qué etiquetas faltan en lugar de un IndexError opaco.
+    """
+    index_ = []
+    faltantes = []
+    for etiqueta in tipos:
+        coincidencias = DF.loc[DF['Detallada'].isin([etiqueta])].index
+        if len(coincidencias) == 0:
+            faltantes.append(etiqueta)
+            continue
+        index_.append(coincidencias[0])
+    if faltantes:
+        raise RuntimeError(
+            "[{}] No se encontraron en la columna 'Detallada' las etiquetas: {}. "
+            "Revisa el formato/plantilla del archivo SBS.".format(institucion, faltantes)
+        )
+    return index_
+
+
+def _drop_col_nan(DF, institucion):
+    """Elimina la columna cuyo encabezado es NaN. Avisa si no existe (no rompe)."""
+    if np.nan in DF.columns:
+        del DF[np.nan]
+    else:
+        log("[{}] Aviso: no se halló columna NaN para eliminar (se continúa).".format(institucion))
+    return DF
+
+#%% md
+#### Generador de Backups
+#%%
+import os
+import shutil
+
+# Archivo
+source_file = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\1.Estado Financieros (IS).xlsx"
+# landing
+destination_dir = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\Backups"
+
+
+def copy_file_to_directory(source, des):
+    # Crear el directorio de destino si no existe
+    if not os.path.exists(des):
+        os.makedirs(des)
+    # Validar que el archivo origen exista
+    if not os.path.isfile(source):
+        print("Error: no existe el archivo a respaldar:\n{}".format(source))
+        return
+    # Extraer el nombre del archivo de la ruta de origen
+    file_name = os.path.basename(source)
+    # Construir la ruta de destino completa
+    dest_file = os.path.join(des, file_name)
+    try:
+        # Copiar el archivo
+        shutil.copyfile(source, dest_file)
+        print("Archivo copiado exitosamente.")
+    except Exception as e:
+        print("Error al copiar el archivo: {}".format(str(e)))
+
+
+copy_file_to_directory(source_file, destination_dir)
+
+#%% md
+#### Buble de periodos
+#%%
+array_rutas = []
+for i in rango_anios:
+    if (rango_anios[-1] == i):
+        if (len(rango_anios) == 1):
+            for j in range(int(m1), int(m2) + 1):
+                if (len(str(j)) == 1):
+                    j = '0' + str(j)
+
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(1, int(m2) + 1):
+                if (len(str(j)) == 1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+    elif (i != rango_anios[0]):
+        for j in range(1, 13):
+            if (len(str(j)) == 1):
+                j = '0' + str(j)
+            ruta = str(j) + str(i)
+            array_rutas.append(ruta)
+
+    else:
+        if (len(rango_anios) == 1):
+            for j in range(int(m1), int(m2) + 1):
+                if (len(str(j)) == 1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(int(m1), 13):
+                if (len(str(j)) == 1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+#%%
+def main(mes, mes_, anio):
+    archivo = None  # último archivo intentado (para diagnóstico)
+
+    ## Bancos
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Bancos\\" + "B-2201-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Bancos" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Bancos\\" + "B-2201-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, '2', 'Bancos')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan' and str(a) != 'Activo'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    # DF = DF.dropna()
+    DF = _drop_col_nan(DF, 'Bancos')
+    # DF= DF.dropna(axis= 1, how= "all")
+    # DF= DF.dropna( how= "all")
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Bancos')
+
+    DF_Bancos = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_Bancos = pd.concat([DF_Bancos, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_Bancos = pd.concat([DF_Bancos, df]).sort_index(ignore_index=True)
+
+    DF_Base_Bancos = pd.DataFrame()
+    for i in range(0, len(DF_Bancos.columns) - 2, 3):
+        DF_Bancos_ = DF_Bancos.copy()
+        a = DF_Bancos_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_Bancos1 = DF_Bancos_.get(['Tipo', 'Detallada'])
+        DF_Bancos1.insert(0, 'Nombre', a)
+        DF_Bancos1.insert(0, 'Moneda', 'MN')
+        DF_Bancos1.insert(4, fecha_col, DF_Bancos_[a + ' MN'])
+
+        DF_Bancos2 = DF_Bancos_.get(['Tipo', 'Detallada'])
+        DF_Bancos2.insert(0, 'Nombre', a)
+        DF_Bancos2.insert(0, 'Moneda', 'ME')
+        DF_Bancos2.insert(4, fecha_col, DF_Bancos_[a + ' ME'])
+
+        DF_Bancos3 = DF_Bancos_.get(['Tipo', 'Detallada'])
+        DF_Bancos3.insert(0, 'Nombre', a)
+        DF_Bancos3.insert(0, 'Moneda', 'TOTAL')
+        DF_Bancos3.insert(4, fecha_col, DF_Bancos_[a + ' TOTAL'])
+
+        DF_Bancos_tem = pd.concat([DF_Bancos1, DF_Bancos2, DF_Bancos3])
+
+        DF_Base_Bancos = pd.concat([DF_Base_Bancos, DF_Bancos_tem])
+
+    DF_Base_Bancos.insert(0, "Estructura", 'IS')
+    DF_Base_Bancos.insert(0, "Institución", 'Bancos')
+
+    ## Financieras
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Financieras\\" + "B-3101-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Financieras" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Financieras\\" + "B-3101-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, '2', 'Financieras')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan' and str(a) != 'Activo'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    DF = _drop_col_nan(DF, 'Financieras')
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Financieras')
+
+    DF_F = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_F = pd.concat([DF_F, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_F = pd.concat([DF_F, df]).sort_index(ignore_index=True)
+
+    DF_Base_F = pd.DataFrame()
+    for i in range(0, len(DF_F.columns) - 2, 3):
+        DF_F_ = DF_F.copy()
+        a = DF_F_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_F1 = DF_F_.get(['Tipo', 'Detallada'])
+        DF_F1.insert(0, 'Nombre', a)
+        DF_F1.insert(0, 'Moneda', 'MN')
+        DF_F1.insert(4, fecha_col, DF_F_[a + ' MN'])
+
+        DF_F2 = DF_F_.get(['Tipo', 'Detallada'])
+        DF_F2.insert(0, 'Nombre', a)
+        DF_F2.insert(0, 'Moneda', 'ME')
+        DF_F2.insert(4, fecha_col, DF_F_[a + ' ME'])
+
+        DF_F3 = DF_F_.get(['Tipo', 'Detallada'])
+        DF_F3.insert(0, 'Nombre', a)
+        DF_F3.insert(0, 'Moneda', 'TOTAL')
+        DF_F3.insert(4, fecha_col, DF_F_[a + ' TOTAL'])
+
+        DF_F_tem = pd.concat([DF_F1, DF_F2, DF_F3])
+
+        DF_Base_F = pd.concat([DF_Base_F, DF_F_tem])
+
+    DF_Base_F.insert(0, "Estructura", 'IS')
+    DF_Base_F.insert(0, "Institución", 'Financiera')
+
+    ## Cajas
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cajas\\" + "C-1101-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Cajas" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cajas\\" + "C-1101-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, 'gyp_cm', 'Cajas')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan' and str(a) != 'Activo'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    DF = _drop_col_nan(DF, 'Cajas')
+
+    tipos = ['INGRESOS FINANCIEROS', 'GASTOS FINANCIEROS', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA CREDITICIA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DEL IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Cajas')
+
+    DF_Caj = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_Caj = pd.concat([DF_Caj, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_Caj = pd.concat([DF_Caj, df]).sort_index(ignore_index=True)
+
+    DF_Base_Caj = pd.DataFrame()
+    for i in range(0, len(DF_Caj.columns) - 2, 3):
+        DF_Caj_ = DF_Caj.copy()
+        a = DF_Caj_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_Caj1 = DF_Caj_.get(['Tipo', 'Detallada'])
+        DF_Caj1.insert(0, 'Nombre', a)
+        DF_Caj1.insert(0, 'Moneda', 'MN')
+        DF_Caj1.insert(4, fecha_col, DF_Caj_[a + ' MN'])
+
+        DF_Caj2 = DF_Caj_.get(['Tipo', 'Detallada'])
+        DF_Caj2.insert(0, 'Nombre', a)
+        DF_Caj2.insert(0, 'Moneda', 'ME')
+        DF_Caj2.insert(4, fecha_col, DF_Caj_[a + ' ME'])
+
+        DF_Caj3 = DF_Caj_.get(['Tipo', 'Detallada'])
+        DF_Caj3.insert(0, 'Nombre', a)
+        DF_Caj3.insert(0, 'Moneda', 'TOTAL')
+        DF_Caj3.insert(4, fecha_col, DF_Caj_[a + ' TOTAL'])
+
+        DF_Caj_tem = pd.concat([DF_Caj1, DF_Caj2, DF_Caj3])
+
+        DF_Base_Caj = pd.concat([DF_Base_Caj, DF_Caj_tem])
+
+    DF_Base_Caj.insert(0, "Estructura", 'IS')
+    DF_Base_Caj.insert(0, "Institución", 'Cajas')
+
+    ## Mypes
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Mypes\\" + "C-4103-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Mypes" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Mypes\\" + "C-4103-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, 'gyp_edp', 'Mypes')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    DF = _drop_col_nan(DF, 'Mypes')
+
+    tipos = ['INGRESOS FINANCIEROS', 'GASTOS FINANCIEROS', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA CREDITICIA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DEL IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Mypes')
+
+    DF_Myp = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_Myp = pd.concat([DF_Myp, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_Myp = pd.concat([DF_Myp, df]).sort_index(ignore_index=True)
+    DF_Myp = DF_Myp.dropna(axis=1, how='all')
+
+    DF_Base_Myp = pd.DataFrame()
+    for i in range(0, len(DF_Myp.columns) - 2, 3):
+        DF_Myp_ = DF_Myp.copy()
+        a = DF_Myp_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_Myp1 = DF_Myp_.get(['Tipo', 'Detallada'])
+        DF_Myp1.insert(0, 'Nombre', a)
+        DF_Myp1.insert(0, 'Moneda', 'MN')
+        DF_Myp1.insert(4, fecha_col, DF_Myp_[a + ' MN'])
+
+        DF_Myp2 = DF_Myp_.get(['Tipo', 'Detallada'])
+        DF_Myp2.insert(0, 'Nombre', a)
+        DF_Myp2.insert(0, 'Moneda', 'ME')
+        DF_Myp2.insert(4, fecha_col, DF_Myp_[a + ' ME'])
+
+        DF_Myp3 = DF_Myp_.get(['Tipo', 'Detallada'])
+        DF_Myp3.insert(0, 'Nombre', a)
+        DF_Myp3.insert(0, 'Moneda', 'TOTAL')
+        DF_Myp3.insert(4, fecha_col, DF_Myp_[a + ' TOTAL'])
+
+        DF_Myp_tem = pd.concat([DF_Myp1, DF_Myp2, DF_Myp3])
+
+        DF_Base_Myp = pd.concat([DF_Base_Myp, DF_Myp_tem])
+
+    DF_Base_Myp.insert(0, "Estructura", 'IS')
+    DF_Base_Myp.insert(0, "Institución", 'Mypes')
+
+    #### RENOM
+
+    ## Cofide
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cofide\\" + "B-5103-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Cofide" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cofide\\" + "B-5103-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, '4', 'Cofide')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Cofide')
+
+    DF_Cof = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_Cof = pd.concat([DF_Cof, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_Cof = pd.concat([DF_Cof, df]).sort_index(ignore_index=True)
+
+    DF_Base_Cof = pd.DataFrame()
+    for i in range(0, len(DF_Cof.columns) - 2, 3):
+        DF_Cof_ = DF_Cof.copy()
+        a = DF_Cof_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_Cof1 = DF_Cof_.get(['Tipo', 'Detallada'])
+        DF_Cof1.insert(0, 'Nombre', a)
+        DF_Cof1.insert(0, 'Moneda', 'MN')
+        DF_Cof1.insert(4, fecha_col, DF_Cof_[a + ' MN'])
+
+        DF_Cof2 = DF_Cof_.get(['Tipo', 'Detallada'])
+        DF_Cof2.insert(0, 'Nombre', a)
+        DF_Cof2.insert(0, 'Moneda', 'ME')
+        DF_Cof2.insert(4, fecha_col, DF_Cof_[a + ' ME'])
+
+        DF_Cof3 = DF_Cof_.get(['Tipo', 'Detallada'])
+        DF_Cof3.insert(0, 'Nombre', a)
+        DF_Cof3.insert(0, 'Moneda', 'TOTAL')
+        DF_Cof3.insert(4, fecha_col, DF_Cof_[a + ' TOTAL'])
+
+        DF_Cof_tem = pd.concat([DF_Cof1, DF_Cof2, DF_Cof3])
+
+        DF_Base_Cof = pd.concat([DF_Base_Cof, DF_Cof_tem])
+
+    DF_Base_Cof.insert(0, "Estructura", 'IS')
+    DF_Base_Cof.insert(0, "Institución", 'Estatales')
+
+    ## Fondo MiVivienda
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\FondoMiVivienda\\" + "B-5105-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Fondo MiVivienda" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\FondoMiVivienda\\" + "B-5105-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, '8', 'Fondo MiVivienda')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Fondo MiVivienda')
+
+    DF_Mv = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_Mv = pd.concat([DF_Mv, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_Mv = pd.concat([DF_Mv, df]).sort_index(ignore_index=True)
+
+    DF_Base_Mv = pd.DataFrame()
+    for i in range(0, len(DF_Mv.columns) - 2, 3):
+        DF_Mv_ = DF_Mv.copy()
+        a = DF_Mv_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_Mv1 = DF_Mv_.get(['Tipo', 'Detallada'])
+        DF_Mv1.insert(0, 'Nombre', a)
+        DF_Mv1.insert(0, 'Moneda', 'MN')
+        DF_Mv1.insert(4, fecha_col, DF_Mv_[a + ' MN'])
+
+        DF_Mv2 = DF_Mv_.get(['Tipo', 'Detallada'])
+        DF_Mv2.insert(0, 'Nombre', a)
+        DF_Mv2.insert(0, 'Moneda', 'ME')
+        DF_Mv2.insert(4, fecha_col, DF_Mv_[a + ' ME'])
+
+        DF_Mv3 = DF_Mv_.get(['Tipo', 'Detallada'])
+        DF_Mv3.insert(0, 'Nombre', a)
+        DF_Mv3.insert(0, 'Moneda', 'TOTAL')
+        DF_Mv3.insert(4, fecha_col, DF_Mv_[a + ' TOTAL'])
+
+        DF_Mv_tem = pd.concat([DF_Mv1, DF_Mv2, DF_Mv3])
+
+        DF_Base_Mv = pd.concat([DF_Base_Mv, DF_Mv_tem])
+
+    DF_Base_Mv.insert(0, "Estructura", 'IS')
+    DF_Base_Mv.insert(0, "Institución", 'Estatales')
+
+    ###### CAJAS RURALES ##############################################
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cajas Rurales\\" + "C-2101-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Cajas Rurales" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Cajas Rurales\\" + "C-2101-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, 1, 'Cajas Rurales')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = c[i].iloc[0]
+        if (str(a) != 'nan' and str(a) != 'Detallada'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    DF = _drop_col_nan(DF, 'Cajas Rurales')
+
+    tipos = ['INGRESOS FINANCIEROS', 'GASTOS FINANCIEROS', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA CREDITICIA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DEL IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Cajas Rurales')
+
+    DF_CajR = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_CajR = pd.concat([DF_CajR, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_CajR = pd.concat([DF_CajR, df]).sort_index(ignore_index=True)
+    DF_CajR = DF_CajR.dropna(axis=1)
+
+    DF_Base_CajR = pd.DataFrame()
+    for i in range(0, len(DF_CajR.columns) - 2, 3):
+        DF_CajR_ = DF_CajR.copy()
+        a = DF_CajR_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_CajR1 = DF_CajR_.get(['Tipo', 'Detallada'])
+        DF_CajR1.insert(0, 'Nombre', a)
+        DF_CajR1.insert(0, 'Moneda', 'MN')
+        DF_CajR1.insert(4, fecha_col, DF_CajR_[a + ' MN'])
+
+        DF_CajR2 = DF_CajR_.get(['Tipo', 'Detallada'])
+        DF_CajR2.insert(0, 'Nombre', a)
+        DF_CajR2.insert(0, 'Moneda', 'ME')
+        DF_CajR2.insert(4, fecha_col, DF_CajR_[a + ' ME'])
+
+        DF_CajR3 = DF_CajR_.get(['Tipo', 'Detallada'])
+        DF_CajR3.insert(0, 'Nombre', a)
+        DF_CajR3.insert(0, 'Moneda', 'TOTAL')
+        DF_CajR3.insert(4, fecha_col, DF_CajR_[a + ' TOTAL'])
+
+        DF_CajR_tem = pd.concat([DF_CajR1, DF_CajR2, DF_CajR3])
+
+        DF_Base_CajR = pd.concat([DF_Base_CajR, DF_CajR_tem])
+
+    DF_Base_CajR.insert(0, "Estructura", 'IS')
+    DF_Base_CajR.insert(0, "Institución", 'Cajas Rurales')
+
+    ## Banco de la Nación
+    import warnings
+    warnings.filterwarnings("ignore")
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Banco de la Nación\\" + "B-5102-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Banco de la Nación" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Banco de la Nación\\" + "B-5102-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, 1, 'Banco de la Nación')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+
+    DF = DF.dropna(how="all")
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+    index_ = _indices_tipos(DF, tipos, 'Banco de la Nación')
+
+    DF_BancoN = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_BancoN = pd.concat([DF_BancoN, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_BancoN = pd.concat([DF_BancoN, df]).sort_index(ignore_index=True)
+    DF_BancoN = DF_BancoN.dropna(axis=1)
+
+    DF_Base_BancoN = pd.DataFrame()
+    for i in range(0, len(DF_BancoN.columns) - 2, 3):
+        DF_BancoN_ = DF_BancoN.copy()
+        a = DF_BancoN_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_BancoN1 = DF_BancoN_.get(['Tipo', 'Detallada'])
+        DF_BancoN1.insert(0, 'Nombre', a)
+        DF_BancoN1.insert(0, 'Moneda', 'MN')
+        DF_BancoN1.insert(4, fecha_col, DF_BancoN_[a + ' MN'])
+
+        DF_BancoN2 = DF_BancoN_.get(['Tipo', 'Detallada'])
+        DF_BancoN2.insert(0, 'Nombre', a)
+        DF_BancoN2.insert(0, 'Moneda', 'ME')
+        DF_BancoN2.insert(4, fecha_col, DF_BancoN_[a + ' ME'])
+
+        DF_BancoN3 = DF_BancoN_.get(['Tipo', 'Detallada'])
+        DF_BancoN3.insert(0, 'Nombre', a)
+        DF_BancoN3.insert(0, 'Moneda', 'TOTAL')
+        DF_BancoN3.insert(4, fecha_col, DF_BancoN_[a + ' TOTAL'])
+
+        DF_BancoN_tem = pd.concat([DF_BancoN1, DF_BancoN2, DF_BancoN3])
+
+        DF_Base_BancoN = pd.concat([DF_Base_BancoN, DF_BancoN_tem])
+
+    DF_Base_BancoN.insert(0, "Estructura", 'IS')
+    DF_Base_BancoN.insert(0, "Institución", 'Estatales')
+
+    ## AgroBanco
+    import warnings
+    warnings.filterwarnings("ignore")
+    archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Agrobanco\\" + "B-5104-" + mes_ + anio + ".XLS"
+    file_found = False
+
+    for i in range(12, 0, -1):
+        if os.path.isfile(archivo):
+            file_found = True
+            last_file = archivo
+            break
+
+    if not file_found:
+        print("Error: Agrobanco" + mes)
+        if (meses_n[meses_.index(mes_)] == '01'):
+            mesA = '12'
+            a = str(int(anio) - 1)
+        else:
+            mesA = str(int(meses_n[meses_.index(mes_)]) - 1)
+            if (len(mesA) == 1):
+                mesA = '0' + mesA
+            a = anio
+        months = {"01": "en", "02": "fe", "03": "ma", "04": "ab", "05": "my", "06": "jn", "07": "jl", "08": "ag", "09": "se", "10": "oc", "11": "no", "12": "di"}
+        mesB = months.get(mesA)
+        archivo = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Carpeta de Descarga\\1. IS y BS\\descargas_SBS\\Agrobanco\\" + "B-5104-" + mesB + a + ".XLS"
+
+    DF = _leer_sbs(archivo, 1, 'Agrobanco')
+    DF = DF.iloc[4::]
+    c = DF.iloc[0:1]
+
+    c['Unnamed: 0'] = 'Detallada'
+    lista = []
+    for i, n in zip(DF.columns, range(len(DF.columns))):
+        a = DF[i].iloc[0]
+        if (str(a) != 'nan'):
+            lista.append(n)
+
+    for i in lista:
+        a = c['Unnamed: ' + str(i)]
+        c['Unnamed: ' + str(i)] = a + ' MN'
+        c['Unnamed: ' + str(i + 1)] = a + ' ME'
+        c['Unnamed: ' + str(i + 2)] = a + ' TOTAL'
+
+    DF.columns = c.iloc[0, ::]
+    DF = DF.iloc[3::]
+    DF = DF.dropna(how="all")
+
+#     del DF[np.nan]
+
+    tipos = ['INGRESOS FINANCIEROS ', 'GASTOS FINANCIEROS ', 'MARGEN FINANCIERO BRUTO', 'PROVISIONES PARA CRÉDITOS DIRECTOS',
+             'MARGEN FINANCIERO NETO', 'INGRESOS POR SERVICIOS FINANCIEROS', 'GASTOS POR SERVICIOS FINANCIEROS', 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA',
+             'MARGEN OPERACIONAL', 'GASTOS ADMINISTRATIVOS', 'MARGEN OPERACIONAL NETO', 'PROVISIONES, DEPRECIACIÓN Y AMORTIZACIÓN',
+             'OTROS INGRESOS Y GASTOS', 'RESULTADO ANTES DE IMPUESTO A LA RENTA', 'RESULTADO NETO DEL EJERCICIO']
+
+    DF = DF.dropna(subset=["Detallada"])
+    index_ = _indices_tipos(DF, tipos, 'Agrobanco')
+
+    DF_BancoA = pd.DataFrame()
+    for i in range(0, len(index_) - 1):
+        df = DF.loc[index_[i]:index_[i + 1] - 2]
+        df = df.dropna(subset=[df.columns[1]])
+        # if (len(df) > 1) :
+            # df = df.drop([index_[i]],axis=0)
+        df.insert(0, 'Tipo', tipos[i])
+        DF_BancoA = pd.concat([DF_BancoA, df]).sort_index(ignore_index=True)
+
+    df = DF.loc[index_[-1]::]
+    df = df.dropna(subset=[df.columns[1]])
+    df.insert(0, 'Tipo', tipos[-1])
+    DF_BancoA = pd.concat([DF_BancoA, df]).sort_index(ignore_index=True)
+    DF_BancoA = DF_BancoA.dropna(axis=1)
+
+    DF_Base_BancoA = pd.DataFrame()
+    for i in range(0, len(DF_BancoA.columns) - 2, 3):
+        DF_BancoA_ = DF_BancoA.copy()
+        a = DF_BancoA_.columns[2::][i][:-3]
+        fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+        DF_BancoA1 = DF_BancoA_.get(['Tipo', 'Detallada'])
+        DF_BancoA1.insert(0, 'Nombre', a)
+        DF_BancoA1.insert(0, 'Moneda', 'MN')
+        DF_BancoA1.insert(4, fecha_col, DF_BancoA_[a + ' MN'])
+
+        DF_BancoA2 = DF_BancoA_.get(['Tipo', 'Detallada'])
+        DF_BancoA2.insert(0, 'Nombre', a)
+        DF_BancoA2.insert(0, 'Moneda', 'ME')
+        DF_BancoA2.insert(4, fecha_col, DF_BancoA_[a + ' ME'])
+
+        DF_BancoA3 = DF_BancoA_.get(['Tipo', 'Detallada'])
+        DF_BancoA3.insert(0, 'Nombre', a)
+        DF_BancoA3.insert(0, 'Moneda', 'TOTAL')
+        DF_BancoA3.insert(4, fecha_col, DF_BancoA_[a + ' TOTAL'])
+
+        DF_BancoA_tem = pd.concat([DF_BancoA1, DF_BancoA2, DF_BancoA3])
+
+        DF_Base_BancoA = pd.concat([DF_Base_BancoA, DF_BancoA_tem])
+
+    DF_Base_BancoA.insert(0, "Estructura", 'IS')
+    DF_Base_BancoA.insert(0, "Institución", 'Estatales')
+
+    ## BASE IS
+    DF_IS = pd.concat([DF_Base_Bancos, DF_Base_F, DF_Base_Caj, DF_Base_Myp, DF_Base_Cof, DF_Base_Mv, DF_Base_CajR, DF_Base_BancoN, DF_Base_BancoA])
+
+    def re_col(data):
+        if (data == "INGRESOS FINANCIEROS "):
+            n_c = 'INGRESOS FINANCIEROS'
+        elif (data == "GASTOS FINANCIEROS "):
+            n_c = 'GASTOS FINANCIEROS'
+        elif (data == "UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA CREDITICIA"):
+            n_c = 'UTILIDAD (PÉRDIDA) POR VENTA DE CARTERA'
+        elif (data == 'RESULTADO ANTES DEL IMPUESTO A LA RENTA'):
+            n_c = 'RESULTADO ANTES DE IMPUESTO A LA RENTA'
+        else:
+            n_c = data
+        return n_c
+
+    DF_IS['Tipo'] = DF_IS['Tipo'].apply(re_col)
+
+    def re_col2(data):
+        if (data == "INGRESOS FINANCIEROS "):
+            n_c = 'INGRESOS FINANCIEROS'
+        elif (data == "GASTOS FINANCIEROS "):
+            n_c = 'GASTOS FINANCIEROS'
+        else:
+            n_c = data
+        return n_c
+
+    DF_IS["Detallada"] = DF_IS["Detallada"].apply(re_col2)
+
+    ruta_renombre = 'Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Diccionario_SBS.xlsx'
+    if not os.path.isfile(ruta_renombre):
+        raise FileNotFoundError("No existe el diccionario de renombre:\n{}".format(ruta_renombre))
+    try:
+        df_ren = pd.read_excel(ruta_renombre, sheet_name='IS y BS')
+    except Exception as e:
+        raise RuntimeError("Error leyendo el diccionario '{}': {}: {}".format(ruta_renombre, type(e).__name__, e)) from e
+    df_ren = df_ren.set_index("Nombre_Antiguo")
+    dic_ren = df_ren.to_dict()
+
+    def dic_cambio_n(row):
+        try:
+            nom = dic_ren['Nombre_Nuevo'][row['Nombre']]
+        except Exception:
+            nom = row['Nombre']
+        return nom
+
+    DF_IS['Nombre'] = DF_IS.apply(dic_cambio_n, axis=1)
+
+    def key(row):
+        return row['Institución'] + row['Estructura'] + row['Moneda'] + row['Nombre'] + row['Tipo'] + re.sub(" ", "", row['Detallada'])
+
+    DF_IS.insert(0, 'key', DF_IS.apply(key, axis=1))
+    NombresTemp = DF_IS["Nombre"].unique()
+    DetalladaTemp = DF_IS["Detallada"].unique()
+
+    #### AGREGAR A LA BASE
+
+    ruta_base = "Z:\\Mesa de Inversiones\\Bottom-Up\\2 Proceso de Inversión Renta Fija\\Corporates - Emisiones\\Crédito - BU\\1. Emisores\\1. One pagers\\Complementos\\Historicos\\1.Estado Financieros (IS).xlsx"
+    if not os.path.isfile(ruta_base):
+        raise FileNotFoundError("No existe la base histórica IS:\n{}".format(ruta_base))
+
+    try:
+        with pd.ExcelFile(ruta_base) as writer:
+            BD_Total = writer.parse(sheet_name='IS')
+    except Exception as e:
+        raise RuntimeError("Error leyendo la base IS '{}': {}: {}".format(ruta_base, type(e).__name__, e)) from e
+
+    NombresHis = BD_Total["Nombre"].unique()
+    DetalladaHis = DF_IS["Detallada"].unique()
+
+    def compare_string_arrays1(NombresHis, NombresTemp):
+        new_values = [value for value in NombresTemp if value not in NombresHis]
+        return new_values
+
+    new_values1 = compare_string_arrays1(NombresHis, NombresTemp)
+
+    def compare_string_arrays2(DetalladaHis, DetalladaTemp):
+        new_values2 = [value for value in DetalladaTemp if value not in DetalladaHis]
+        return new_values2
+
+    new_values2 = compare_string_arrays2(DetalladaHis, DetalladaTemp)
+
+    if new_values1 and new_values2:
+        a = []
+        a.append(new_values1)
+        a.append(new_values2)
+        return a
+    elif new_values1:
+        a = []
+        a.append(new_values1)
+        return a
+    elif new_values2:
+        a = []
+        a.append(new_values2)
+        return a
+
+    BD_Total_ = BD_Total.copy()
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("key")
+    dic_Total_ = BD_Total_.to_dict()
+
+    DF_IS2 = DF_IS.copy()
+    DF_IS2['Indicador'] = DF_IS2['key'].map(dic_Total_['Indicador'])
+    DF_IS2 = DF_IS2.loc[DF_IS2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+    DF_IS2 = DF_IS2.drop(['Indicador'], axis=1)
+    BD_Total = pd.concat([BD_Total, DF_IS2])
+
+    DF_IS = DF_IS.set_index("key")
+    dic_is = DF_IS.to_dict()
+    fecha_col = '01' + '/' + meses_n[meses_.index(mes_)] + '/' + anio
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+    BD_Total[fecha_col] = BD_Total['key'].map(dic_is[fecha_col])
+
+    try:
+        with pd.ExcelWriter(ruta_base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+            BD_Total.to_excel(writer, sheet_name="IS", index=False)
+    except Exception as e:
+        raise RuntimeError("Error escribiendo la base IS en '{}': {}: {}".format(ruta_base, type(e).__name__, e)) from e
+
+
+#%%
+import warnings
+warnings.filterwarnings("ignore")
+stop_iteration = False
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses[int(m) - 1]
+    anio = i[2::]
+    mes_ = meses_[int(m) - 1]
+    print(mes + ' ' + anio)
+    try:
+        valores = main(mes, mes_, anio)
+    except Exception as e:
+        # Fail-fast identificando el periodo exacto que falló
+        raise RuntimeError(
+            "Error procesando el periodo {} {} -> {}: {}".format(mes, anio, type(e).__name__, e)
+        ) from e
+    if valores:
+        stop_iteration = True
+        break
+
+if stop_iteration:
+    print(str(valores))
