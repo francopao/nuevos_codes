@@ -1,0 +1,380 @@
+# -*- coding: utf-8 -*-
+"""
+========================================================================
+2. Estados Financieros (BS)  -  Versión modernizada
+------------------------------------------------------------------------
+- Motor único y dinámico para las 9 fuentes SBS (antes ~1400 líneas
+  repetidas -> ahora un solo parser configurable).
+- Corrige el error 'KeyError: nan' (del DF[np.nan]) usando limpieza
+  posicional de columnas basura (robusta ante etiquetas duplicadas).
+- Corrige las secuencias de escape inválidas (\\C, \\1) usando rutas raw.
+- Reemplaza el "falso" bucle de búsqueda de archivo por un fallback real
+  que retrocede hasta N meses.
+- Blindado con prints en consola en cada paso para anticipar errores.
+- Respeta EXACTAMENTE la estructura del output (hoja 'BS').
+========================================================================
+"""
+
+import os
+import re
+import shutil
+import datetime
+import warnings
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+# ======================================================================
+# 0. PARÁMETROS
+# ======================================================================
+inicio = "062026"        # MMAAAA
+final  = "062026"        # MMAAAA
+
+# Cuántos meses hacia atrás se permite buscar si no existe el archivo del mes
+MAX_FALLBACK_MESES = 12
+
+# ----------------------------------------------------------------------
+# RUTAS BASE (ajusta solo estas si cambia la estructura de carpetas)
+# ----------------------------------------------------------------------
+RUTA_COMPLEMENTOS = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\1. Emisores\1. One pagers\Complementos"
+RUTA_DESCARGAS    = os.path.join(RUTA_COMPLEMENTOS, "Carpeta de Descarga", "1. IS y BS", "descargas_SBS")
+RUTA_DICCIONARIO  = os.path.join(RUTA_COMPLEMENTOS, "Diccionario_SBS.xlsx")
+RUTA_BASE         = os.path.join(RUTA_COMPLEMENTOS, "Historicos", "2.Estado Financieros (BS).xlsx")
+RUTA_BACKUPS      = os.path.join(RUTA_COMPLEMENTOS, "Historicos", "Backups")
+
+# ======================================================================
+# 1. CALENDARIO / GENERACIÓN DE PERIODOS
+# ======================================================================
+meses   = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+           'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_  = ['en', 'fe', 'ma', 'ab', 'my', 'jn', 'jl', 'ag', 'se', 'oc', 'no', 'di']
+meses_n = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+
+
+def generar_periodos(inicio, final):
+    """Devuelve lista de 'MMAAAA' entre inicio y final (inclusive)."""
+    a1, a2 = int(inicio[2:]), int(final[2:])
+    m1, m2 = int(inicio[0:2]), int(final[0:2])
+    rutas = []
+    for anio in range(a1, a2 + 1):
+        mes_ini = m1 if anio == a1 else 1
+        mes_fin = m2 if anio == a2 else 12
+        for mes in range(mes_ini, mes_fin + 1):
+            rutas.append("%02d%d" % (mes, anio))
+    return rutas
+
+
+array_rutas = generar_periodos(inicio, final)
+print("=" * 70)
+print("PERIODOS A PROCESAR:", array_rutas)
+print("=" * 70)
+
+# ======================================================================
+# 2. BACKUP DE LA BASE
+# ======================================================================
+def backup_base(origen, destino_dir):
+    try:
+        if not os.path.exists(origen):
+            print("[BACKUP] AVISO: no existe la base origen -> %s" % origen)
+            return
+        os.makedirs(destino_dir, exist_ok=True)
+        destino = os.path.join(destino_dir, os.path.basename(origen))
+        shutil.copyfile(origen, destino)
+        print("[BACKUP] OK -> %s" % destino)
+    except Exception as e:
+        print("[BACKUP] ERROR al copiar: %s" % e)
+
+
+# ======================================================================
+# 3. CONFIGURACIÓN DE LAS 9 FUENTES SBS
+#    Un solo parser las procesa todas gracias a esta tabla.
+# ======================================================================
+CONFIG_FUENTES = [
+    # etiqueta          carpeta                 codigo    sheet     institucion
+    ("Bancos",             "Bancos",               "B-2201", "1",      "Bancos"),
+    ("Financieras",        "Financieras",          "B-3101", "1",      "Financieras"),
+    ("Cajas",              "Cajas",                "C-1101", "bg_cm",  "Cajas"),
+    ("Mypes",              "Mypes",                "C-4103", "bg_edp", "Mypes"),
+    ("Cofide",             "Cofide",               "B-5103", "3",      "Estatales"),
+    ("Fondo MiVivienda",   "FondoMiVivienda",      "B-5105", "7",      "Estatales"),
+    ("Cajas Rurales",      "Cajas Rurales",        "C-2101", 0,        "Cajas Rurales"),
+    ("Banco de la Nación", "Banco de la Nación",   "B-5102", 0,        "Estatales"),
+    ("Agrobanco",          "Agrobanco",            "B-5104", 0,        "Estatales"),
+]
+
+# Relabels aplicados universalmente (los que no existan, se ignoran)
+RELABELS = [
+    ("Activo", "DISPONIBLE"),
+    ("Activo", "Otros"),
+    ("Activo", "Provisiones"),
+    ("Pasivo", "Depósitos a la Vista"),
+    ("Pasivo", "Depósitos de Ahorro"),
+    ("Pasivo", "Depósitos a Plazo"),
+]
+
+
+# ======================================================================
+# 4. DICCIONARIO DE RENOMBRAMIENTO (una sola lectura, reutilizado)
+# ======================================================================
+def cargar_diccionario(ruta):
+    try:
+        df_ren = pd.read_excel(ruta, sheet_name="IS y BS", engine="openpyxl")
+        df_ren = df_ren.set_index("Nombre_Antiguo")
+        dic = df_ren.to_dict()["Nombre_Nuevo"]
+        print("[DICCIONARIO] OK -> %d entradas" % len(dic))
+        return dic
+    except Exception as e:
+        print("[DICCIONARIO] AVISO: no se pudo cargar (%s). Se usarán nombres originales." % e)
+        return {}
+
+
+def renombrar(valor, dic):
+    return dic.get(valor, valor)
+
+
+# ======================================================================
+# 5. BÚSQUEDA DE ARCHIVO CON FALLBACK REAL A MESES ANTERIORES
+# ======================================================================
+def resolver_archivo(carpeta, codigo, mes_, anio, etiqueta):
+    """Busca el archivo del mes; si no está, retrocede hasta MAX_FALLBACK_MESES."""
+    m_idx = meses_.index(mes_)          # 0..11
+    y = int(anio)
+    for retro in range(0, MAX_FALLBACK_MESES + 1):
+        idx = m_idx - retro
+        yy = y
+        while idx < 0:
+            idx += 12
+            yy -= 1
+        mm_ = meses_[idx]
+        ruta = os.path.join(RUTA_DESCARGAS, carpeta,
+                            "%s-%s%d.XLS" % (codigo, mm_, yy))
+        if os.path.isfile(ruta):
+            if retro > 0:
+                print("   [%s] AVISO: sin archivo del mes; usando fallback %s%d (%d mes(es) atrás)"
+                      % (etiqueta, mm_, yy, retro))
+            return ruta
+    print("   [%s] ERROR: no se encontró archivo en %d meses de búsqueda." % (etiqueta, MAX_FALLBACK_MESES))
+    return None
+
+
+# ======================================================================
+# 6. PARSER UNIFICADO: crudo SBS -> DataFrame ancho limpio
+# ======================================================================
+def leer_bloque(archivo, sheet, etiqueta):
+    DF = pd.read_excel(archivo, sheet_name=sheet, engine="openpyxl")
+    DF = DF.iloc[4:]
+
+    # normaliza el nombre de la primera columna (algunos archivos difieren)
+    if DF.columns[0] != "Unnamed: 0":
+        DF.rename(columns={DF.columns[0]: "Unnamed: 0"}, inplace=True)
+
+    c = DF.iloc[0:1].copy()
+    c["Unnamed: 0"] = "Activo_"
+
+    # Detección dinámica de columnas de entidad (fila de nombres = primera fila)
+    fila_nombres = DF.iloc[0]
+    entidades = [pos for col, pos in zip(DF.columns, range(len(DF.columns)))
+                 if str(fila_nombres[col]) not in ("nan", "Activo")]
+
+    for i in entidades:
+        base = c["Unnamed: " + str(i)]
+        c["Unnamed: " + str(i)] = base + " MN"
+        if i + 1 < len(DF.columns):
+            c["Unnamed: " + str(i + 1)] = base + " ME"
+        if i + 2 < len(DF.columns):
+            c["Unnamed: " + str(i + 2)] = base + " TOTAL"
+
+    DF.columns = c.iloc[0, :]
+    DF = DF.iloc[3:]
+
+    # --- Limpieza robusta de columnas basura (reemplaza del DF[np.nan]/['Activo']) ---
+    mask = []
+    for col in DF.columns:
+        s = str(col)
+        es_basura = ((isinstance(col, float) and pd.isna(col)) or s == "nan"
+                     or s in ("Activo", "Eliminar") or s.startswith("Unnamed:"))
+        mask.append(not es_basura)
+    DF = DF.loc[:, mask]
+    DF = DF.dropna(axis=1, how="all")
+
+    n_ent = max((len(DF.columns) - 1) // 3, 0)
+    print("   [%s] parseado -> %d filas x %d cols | entidades detectadas: %d"
+          % (etiqueta, DF.shape[0], DF.shape[1], n_ent))
+    return DF
+
+
+# ======================================================================
+# 7. TRANSFORMACIÓN: ancho -> largo (formato de la base BS)
+# ======================================================================
+def transformar_largo(DF, institucion, mes_, anio, etiqueta, dic):
+    DF = DF.copy()
+
+    # Renombrar detallada (Activo_) con el diccionario
+    DF["Activo_"] = DF["Activo_"].apply(lambda v: renombrar(v, dic))
+
+    # Separar Activo / Pasivo
+    idx_pasivo = DF.loc[DF["Activo_"].isin(["Pasivo"])].index
+    if len(idx_pasivo) == 0:
+        print("   [%s] ERROR: no se encontró fila 'Pasivo'. Se omite esta fuente." % etiqueta)
+        return None
+    n = idx_pasivo[0]
+
+    DF_A = DF.loc[:n - 1].copy()
+    DF_P = DF.loc[n + 3:].copy()
+
+    DF_A.rename(columns={"Activo_": "Detallada"}, inplace=True)
+    DF_P.rename(columns={"Activo_": "Detallada"}, inplace=True)
+
+    DF_A = DF_A.dropna(subset=[DF_A.columns[1]])
+    DF_P = DF_P.dropna(subset=[DF_P.columns[1]])
+
+    DF_A.insert(0, "Tipo", "Activo")
+    DF_P.insert(0, "Tipo", "Pasivo")
+
+    DF_IS = pd.concat([DF_A, DF_P]).sort_index(ignore_index=True)
+
+    # Relabels universales (ignora los que no apliquen)
+    det = DF_IS["Detallada"].astype(str).str.strip()
+    for tipo, lbl in RELABELS:
+        idx = DF_IS.index[(DF_IS["Tipo"] == tipo) & (det == lbl)]
+        if len(idx) > 0:
+            DF_IS.loc[idx[0], "Detallada"] = lbl + "_"
+
+    # Fecha del periodo
+    fecha_col = datetime.datetime.strptime(
+        "01/" + meses_n[meses_.index(mes_)] + "/" + anio, "%d/%m/%Y")
+
+    # Pivotar cada entidad (MN/ME/TOTAL) a formato largo
+    base = pd.DataFrame()
+    n_cols = len(DF_IS.columns)
+    for i in range(0, n_cols - 2, 3):
+        nombre_ent = DF_IS.columns[2:][i][:-3]   # quita ' MN'
+        for moneda in ("MN", "ME", "TOTAL"):
+            col_ent = nombre_ent + " " + moneda
+            if col_ent not in DF_IS.columns:
+                continue
+            temp = DF_IS.get(["Tipo", "Detallada"]).copy()
+            temp.insert(0, "Nombre", nombre_ent)
+            temp.insert(0, "Moneda", moneda)
+            temp.insert(4, fecha_col, DF_IS[col_ent])
+            base = pd.concat([base, temp])
+
+    if base.empty:
+        print("   [%s] ERROR: no se generaron filas en formato largo." % etiqueta)
+        return None
+
+    base.insert(0, "Estructura", "BS")
+    base.insert(0, "Institución", institucion)
+    print("   [%s] largo OK -> %d filas | fecha col: %s"
+          % (etiqueta, base.shape[0], fecha_col.date()))
+    return base
+
+
+# ======================================================================
+# 8. PROCESO PRINCIPAL POR PERIODO
+# ======================================================================
+def construir_key(row):
+    return (str(row["Institución"]) + str(row["Estructura"]) + str(row["Moneda"])
+            + str(row["Nombre"]) + str(row["Tipo"]) + re.sub(" ", "", str(row["Detallada"])))
+
+
+def main1(mes, mes_, anio, dic):
+    print("-" * 70)
+    print("PROCESANDO: %s %s" % (mes, anio))
+    print("-" * 70)
+
+    bloques = []
+    for etiqueta, carpeta, codigo, sheet, institucion in CONFIG_FUENTES:
+        try:
+            archivo = resolver_archivo(carpeta, codigo, mes_, anio, etiqueta)
+            if archivo is None:
+                continue
+            DF = leer_bloque(archivo, sheet, etiqueta)
+            base = transformar_largo(DF, institucion, mes_, anio, etiqueta, dic)
+            if base is not None:
+                bloques.append(base)
+        except Exception as e:
+            print("   [%s] ERROR inesperado: %s" % (etiqueta, e))
+
+    if not bloques:
+        print("[%s %s] ERROR: ninguna fuente pudo procesarse. Se omite el periodo." % (mes, anio))
+        return
+
+    DF_BS = pd.concat(bloques)
+    print("[CONSOLIDADO] filas totales: %d" % DF_BS.shape[0])
+
+    # Renombrar 'Nombre' con el diccionario
+    DF_BS["Nombre"] = DF_BS["Nombre"].apply(lambda v: renombrar(v, dic))
+
+    # Key
+    DF_BS.insert(0, "key", DF_BS.apply(construir_key, axis=1))
+
+    # ------------------------------------------------------------------
+    # Merge contra la base histórica
+    # ------------------------------------------------------------------
+    if not os.path.exists(RUTA_BASE):
+        print("[BASE] ERROR: no existe la base histórica -> %s" % RUTA_BASE)
+        return
+
+    with pd.ExcelFile(RUTA_BASE, engine="openpyxl") as xls:
+        BD_Total = xls.parse(sheet_name="BS")
+    print("[BASE] histórica cargada -> %d filas x %d cols" % (BD_Total.shape[0], BD_Total.shape[1]))
+
+    fecha_col = datetime.datetime.strptime(
+        "01/" + meses_n[meses_.index(mes_)] + "/" + anio, "%d/%m/%Y")
+
+    if fecha_col in BD_Total.columns:
+        print("[BASE] AVISO: la columna %s ya existe; se sobrescribirá." % fecha_col.date())
+
+    # 1) Agregar filas nuevas (keys que no existían)
+    keys_existentes = set(BD_Total["key"].astype(str))
+    DF_nuevos = DF_BS[~DF_BS["key"].astype(str).isin(keys_existentes)].copy()
+    if not DF_nuevos.empty:
+        DF_nuevos = DF_nuevos.reset_index(drop=True)
+        BD_Total = pd.concat([BD_Total, DF_nuevos], ignore_index=True)
+        print("[BASE] filas NUEVAS agregadas: %d" % DF_nuevos.shape[0])
+        # Muestra hasta 10 keys nuevas para auditar
+        for k in DF_nuevos["key"].head(10).tolist():
+            print("        + %s" % k)
+    else:
+        print("[BASE] sin keys nuevas.")
+
+    # 2) Mapear valores del mes por key
+    dic_valores = DF_BS.set_index("key")[fecha_col].to_dict()
+    BD_Total[fecha_col] = BD_Total["key"].map(dic_valores)
+    mapeados = BD_Total[fecha_col].notna().sum()
+    print("[BASE] valores mapeados en %s: %d / %d filas"
+          % (fecha_col.date(), mapeados, BD_Total.shape[0]))
+
+    # 3) Escribir (reemplazando solo la hoja BS)
+    try:
+        with pd.ExcelWriter(RUTA_BASE, mode="a", engine="openpyxl",
+                            if_sheet_exists="replace") as writer:
+            BD_Total.to_excel(writer, sheet_name="BS", index=False)
+        print("[BASE] GUARDADO OK -> %s (%d cols)" % (RUTA_BASE, BD_Total.shape[1]))
+    except Exception as e:
+        print("[BASE] ERROR al guardar: %s" % e)
+
+
+# ======================================================================
+# 9. EJECUCIÓN
+# ======================================================================
+if __name__ == "__main__":
+    backup_base(RUTA_BASE, RUTA_BACKUPS)
+    dic = cargar_diccionario(RUTA_DICCIONARIO)
+
+    for periodo in array_rutas:
+        m = periodo[0:2]
+        anio = periodo[2:]
+        mes = meses[int(m) - 1]
+        mes_ = meses_[int(m) - 1]
+        try:
+            main1(mes, mes_, anio, dic)
+        except Exception as e:
+            print("[%s %s] ERROR fatal en periodo: %s" % (mes, anio, e))
+
+    print("=" * 70)
+    print("PROCESO FINALIZADO.")
+    print("=" * 70)
