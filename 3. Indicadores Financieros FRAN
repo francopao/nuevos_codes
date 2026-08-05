@@ -1,0 +1,476 @@
+# -*- coding: utf-8 -*-
+"""
+Indicadores Financieros SBS - version robustecida
+Corrige el NameError (DF indefinido) causado por una linea de debug
+suelta fuera de la funcion, y agrega manejo de errores + prints
+estrategicos para deteccion y correccion rapida de fallos.
+"""
+
+import os
+import shutil
+import warnings
+import datetime
+import traceback
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+# ============================================================
+# PARAMETROS
+# ============================================================
+INICIO = "062026"
+FINAL = "062026"
+
+RUTA_BASE_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\1. Emisores\1. One pagers\Complementos"
+RUTA_HISTORICOS = os.path.join(RUTA_BASE_DIR, "Historicos")
+RUTA_DESCARGAS = os.path.join(RUTA_BASE_DIR, "Carpeta de Descarga", "3. Indicadores Financieros", "descargas_SBS")
+RUTA_DICCIONARIO = os.path.join(RUTA_BASE_DIR, "Diccionario_SBS.xlsx")
+RUTA_ARCHIVO_BASE = os.path.join(RUTA_HISTORICOS, "3.Indicadores Financieros.xlsx")
+RUTA_BACKUPS = os.path.join(RUTA_HISTORICOS, "Backups")
+
+MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto',
+         'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+MESES_ABR = ['en', 'fe', 'ma', 'ab', 'my', 'jn', 'jl', 'ag', 'se', 'oc', 'no', 'di']
+MESES_NUM = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+MONTHS_MAP = dict(zip(MESES_NUM, MESES_ABR))
+
+MAX_RETROCESO_MESES = 12
+
+INSTITUCIONES = [
+    {"nombre": "Bancos", "carpeta": "Bancos", "prefijo": "B-2401-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ"],
+     "drop_rows": [0, 1, 2], "truncar_en": None, "dropna_all": False},
+    {"nombre": "Financieras", "carpeta": "Financieras", "prefijo": "B-3301-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ"],
+     "drop_rows": [0, 1, 2, 3], "truncar_en": 21, "dropna_all": False},
+    {"nombre": "Mypes", "carpeta": "Mypes", "prefijo": "C-4301-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ",
+               "POSICIÓN EN MONEDA EXTRANJERA"],
+     "drop_rows": [0], "truncar_en": 26, "dropna_all": True},
+    {"nombre": "Cajas", "carpeta": "Cajas", "prefijo": "C-1301-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ",
+               "POSICIÓN EN MONEDA EXTRANJERA"],
+     "drop_rows": [0], "truncar_en": None, "dropna_all": True},
+    {"nombre": "Estatales", "carpeta": "Estatales", "prefijo": "E-5201-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ"],
+     "drop_rows": [0, 1, 2], "truncar_en": None, "dropna_all": True},
+    {"nombre": "Cajas Rurales", "carpeta": "Cajas Rurales", "prefijo": "C-2301-",
+     "tipos": ["SOLVENCIA", "CALIDAD DE ACTIVOS", "EFICIENCIA Y GESTIÓN", "RENTABILIDAD", "LIQUIDEZ",
+               "POSICIÓN EN MONEDA EXTRANJERA"],
+     "drop_rows": [0, 1, 2], "truncar_en": None, "dropna_all": False},
+]
+
+
+# ============================================================
+# LOG ESTRATEGICO
+# ============================================================
+def log_info(msg):
+    print(f"[INFO] {msg}")
+
+
+def log_ok(msg):
+    print(f"[OK]   {msg}")
+
+
+def log_warn(msg):
+    print(f"[WARN] {msg}")
+
+
+def log_error(msg):
+    print(f"[ERROR] {msg}")
+
+
+def log_step(msg):
+    print(f"   -> {msg}")
+
+
+# ============================================================
+# GENERACION DE PERIODOS A PROCESAR
+# ============================================================
+def generar_array_rutas(inicio, final):
+    if len(inicio) != 6 or len(final) != 6 or not inicio.isdigit() or not final.isdigit():
+        raise ValueError(f"Parametros 'inicio'/'final' invalidos (formato esperado MMAAAA): {inicio}, {final}")
+
+    a1, a2, m1, m2 = inicio[2:], final[2:], inicio[0:2], final[0:2]
+
+    if not (1 <= int(m1) <= 12) or not (1 <= int(m2) <= 12):
+        raise ValueError(f"Mes fuera de rango: m1={m1}, m2={m2}")
+
+    rango_anios = list(range(int(a1), int(a2) + 1))
+    if not rango_anios:
+        raise ValueError("Rango de anios vacio: revisa 'inicio' y 'final'.")
+
+    array_rutas = []
+    for i in rango_anios:
+        if rango_anios[-1] == i:
+            meses_range = range(int(m1), int(m2) + 1) if len(rango_anios) == 1 else range(1, int(m2) + 1)
+        elif i != rango_anios[0]:
+            meses_range = range(1, 13)
+        else:
+            meses_range = range(int(m1), int(m2) + 1) if len(rango_anios) == 1 else range(int(m1), 13)
+
+        for j in meses_range:
+            array_rutas.append(str(j).zfill(2) + str(i))
+
+    return array_rutas
+
+
+# ============================================================
+# BACKUP
+# ============================================================
+def generar_backup(source, destino_dir):
+    try:
+        if not os.path.isfile(source):
+            log_warn(f"No se encontro el archivo base para backup: {source}")
+            return False
+        os.makedirs(destino_dir, exist_ok=True)
+        file_name = os.path.basename(source)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_file = os.path.join(destino_dir, f"{stamp}_{file_name}")
+        shutil.copyfile(source, dest_file)
+        log_ok(f"Backup creado: {dest_file}")
+        return True
+    except Exception as e:
+        log_error(f"No se pudo crear el backup: {e}")
+        return False
+
+
+# ============================================================
+# BUSQUEDA DE ARCHIVO CON RETROCESO REAL DE MESES
+# ============================================================
+def buscar_archivo(prefijo, carpeta, mes_abr, anio, max_retroceso=MAX_RETROCESO_MESES):
+    carpeta_full = os.path.join(RUTA_DESCARGAS, carpeta)
+    mes_num = MESES_NUM[MESES_ABR.index(mes_abr)]
+    anio_actual = int(anio)
+    mes_actual = int(mes_num)
+
+    for retro in range(0, max_retroceso + 1):
+        m_probar = mes_actual - retro
+        a_probar = anio_actual
+        while m_probar <= 0:
+            m_probar += 12
+            a_probar -= 1
+        mes_num_str = str(m_probar).zfill(2)
+        mes_abr_probar = MONTHS_MAP[mes_num_str]
+        anio_str = str(a_probar)
+        archivo = os.path.join(carpeta_full, f"{prefijo}{mes_abr_probar}{anio_str}.XLS")
+
+        if os.path.isfile(archivo):
+            if retro > 0:
+                log_warn(f"{carpeta}: no existe archivo de {mes_abr}/{anio}. "
+                         f"Se usara {mes_abr_probar}/{anio_str} ({retro} mes(es) atras).")
+            return archivo, mes_abr_probar, anio_str
+
+    log_error(f"{carpeta}: no se encontro archivo en los ultimos {max_retroceso} meses (prefijo '{prefijo}').")
+    return None, None, None
+
+
+# ============================================================
+# DICCIONARIO DE RENOMBRE (cacheado una sola vez)
+# ============================================================
+def cargar_diccionario_renombre():
+    if not os.path.isfile(RUTA_DICCIONARIO):
+        raise FileNotFoundError(f"No se encontro el diccionario de renombre: {RUTA_DICCIONARIO}")
+    df_ren = pd.read_excel(RUTA_DICCIONARIO, sheet_name='Indicadores Financieros')
+    if "Nombre_Antiguo" not in df_ren.columns or "Nombre_Nuevo" not in df_ren.columns:
+        raise KeyError("El diccionario de renombre no tiene las columnas 'Nombre_Antiguo'/'Nombre_Nuevo'.")
+    df_ren = df_ren.set_index("Nombre_Antiguo")
+    return df_ren.to_dict()
+
+
+def renombrar_valor(row, campo, dic_ren):
+    try:
+        return dic_ren['Nombre_Nuevo'][row[campo]]
+    except Exception:
+        return row[campo]
+
+
+# ============================================================
+# PROCESAMIENTO POR INSTITUCION
+# ============================================================
+def procesar_institucion(cfg, mes, mes_abr, anio, dic_ren):
+    nombre = cfg["nombre"]
+    carpeta = cfg["carpeta"]
+    prefijo = cfg["prefijo"]
+    tipos = cfg["tipos"]
+    drop_rows = cfg["drop_rows"]
+    truncar_en = cfg["truncar_en"]
+    dropna_all = cfg["dropna_all"]
+
+    log_step(f"Procesando {nombre} ({mes} {anio})...")
+
+    archivo, mes_abr_usado, anio_usado = buscar_archivo(prefijo, carpeta, mes_abr, anio)
+    if archivo is None:
+        log_error(f"{nombre}: sin archivo disponible, se omite para {mes} {anio}.")
+        return None
+
+    try:
+        DF = pd.read_excel(archivo, sheet_name=0)
+    except Exception as e:
+        log_error(f"{nombre}: error leyendo '{archivo}': {e}")
+        return None
+
+    if DF.empty or DF.shape[1] < 2:
+        log_error(f"{nombre}: el archivo '{archivo}' esta vacio o con formato inesperado.")
+        return None
+
+    try:
+        column_index = None
+        for index, row in enumerate(DF.iloc[:, 1]):
+            if not pd.isnull(row):
+                column_index = index
+                break
+        if column_index is None:
+            log_error(f"{nombre}: no se hallo fila de encabezado valida en '{archivo}'.")
+            return None
+
+        DF.columns = DF.iloc[column_index]
+        DF = DF.drop(column_index)
+        DF = DF.transpose()
+        DF.columns = DF.iloc[0, ::]
+        mask = DF.index.notna()
+        DF = DF[mask]
+        DF = DF.transpose()
+        DF = DF.rename_axis("Detallada")
+        DF = DF.reset_index()
+
+        if dropna_all:
+            DF = DF.dropna(how="all")
+
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+
+        drop_validos = [r for r in drop_rows if r in DF.index]
+        if drop_validos:
+            DF = DF.drop(drop_validos)
+
+        if truncar_en is not None and truncar_en < len(DF.index):
+            DF = DF.drop(index=DF.index[truncar_en:])
+
+        DF = DF.transpose()
+        DF.columns = DF.iloc[0, ::]
+        DF = DF.reset_index()
+        DF.rename(columns={DF.columns[0]: "Index"}, inplace=True)
+
+        DF["Index"] = DF.apply(lambda r: renombrar_valor(r, "Index", dic_ren), axis=1)
+        if 0 in DF.index:
+            DF = DF.drop([0])
+        DF = DF.transpose()
+        DF.columns = DF.iloc[0, ::]
+        DF = DF.reset_index()
+        if 0 in DF.index:
+            DF = DF.drop([0])
+
+        if "Detallada" not in DF.columns:
+            log_error(f"{nombre}: no se encontro la columna 'Detallada' tras la transformacion.")
+            return None
+
+        index_ = []
+        tipos_faltantes = []
+        for t in tipos:
+            coincidencias = DF.loc[DF['Detallada'].isin([t])].index
+            if len(coincidencias) == 0:
+                tipos_faltantes.append(t)
+                continue
+            index_.append(coincidencias[0])
+
+        if tipos_faltantes:
+            log_error(f"{nombre}: no se encontraron las categorias {tipos_faltantes} en '{archivo}'. Se omite.")
+            return None
+
+        DF_grupo = pd.DataFrame()
+        for i in range(0, len(index_) - 1):
+            df_tmp = DF.loc[index_[i]:index_[i + 1]]
+            df_tmp = df_tmp.dropna(subset=[df_tmp.columns[1]])
+            df_tmp.insert(0, 'Tipo', tipos[i])
+            DF_grupo = pd.concat([DF_grupo, df_tmp]).sort_index(ignore_index=True)
+
+        last_index = index_[-1]
+        last_df = DF.loc[last_index:]
+        last_df = last_df.dropna(subset=[last_df.columns[1]])
+        last_df.insert(0, 'Tipo', tipos[-1])
+        DF_grupo = pd.concat([DF_grupo, last_df]).sort_index(ignore_index=True)
+
+        if DF_grupo.shape[1] < 3:
+            log_error(f"{nombre}: columnas de datos insuficientes tras el agrupamiento.")
+            return None
+
+        DF_Base = pd.DataFrame()
+        for i in range(0, len(DF_grupo.columns) - 2):
+            DF_ = DF_grupo.copy()
+            a = DF_grupo.columns[2::][i]
+            fecha_col_str = '01/' + MESES_NUM[MESES_ABR.index(mes_abr)] + '/' + anio
+            fecha_col = datetime.datetime.strptime(fecha_col_str, '%d/%m/%Y')
+            DF_1 = DF_.get(["Tipo", "Detallada"])
+            DF_1.insert(0, 'Nombre', a)
+            DF_1.insert(0, 'Moneda', "MN")
+            DF_1.insert(0, 'Institución', nombre)
+            DF_1.insert(1, 'Estructura', "Indicadores")
+            DF_1.insert(6, fecha_col, DF_grupo[a])
+            DF_Base = pd.concat([DF_Base, DF_1])
+
+        log_ok(f"{nombre}: procesado correctamente ({len(DF_Base)} filas).")
+        return DF_Base
+
+    except Exception as e:
+        log_error(f"{nombre}: fallo inesperado -> {type(e).__name__}: {e}")
+        log_step(traceback.format_exc().splitlines()[-1])
+        return None
+
+
+# ============================================================
+# PROCESAMIENTO DE UN PERIODO (MES) COMPLETO
+# ============================================================
+def procesar_mes(mes, mes_abr, anio, dic_ren):
+    log_info(f"===== Procesando periodo: {mes} {anio} =====")
+    resultados = []
+    for cfg in INSTITUCIONES:
+        try:
+            resultado = procesar_institucion(cfg, mes, mes_abr, anio, dic_ren)
+        except Exception as e:
+            log_error(f"{cfg['nombre']}: excepcion no controlada -> {e}")
+            resultado = None
+        if resultado is not None and not resultado.empty:
+            resultados.append(resultado)
+
+    if not resultados:
+        log_error(f"Periodo {mes} {anio}: ninguna institucion se pudo procesar. Se omite el periodo.")
+        return None
+
+    DF_Total = pd.concat(resultados, ignore_index=True)
+
+    mask = DF_Total["Detallada"].astype(str).str.contains("Ratio de Capital Global", na=False)
+    DF_Total.loc[mask, "Detallada"] = "Ratio de Capital Global(-1M)"
+
+    DF_Total.insert(0, "key",
+        DF_Total["Institución"].astype(str) + DF_Total["Estructura"].astype(str) +
+        DF_Total["Moneda"].astype(str) + DF_Total["Nombre"].astype(str) +
+        DF_Total["Tipo"].astype(str) + DF_Total["Detallada"].astype(str))
+
+    return DF_Total
+
+
+# ============================================================
+# GUARDADO EN LA BASE HISTORICA
+# ============================================================
+def guardar_en_base(DF_Total, mes, mes_abr, anio):
+    try:
+        if not os.path.isfile(RUTA_ARCHIVO_BASE):
+            log_error(f"No existe el archivo base '{RUTA_ARCHIVO_BASE}'.")
+            return False
+
+        with pd.ExcelFile(RUTA_ARCHIVO_BASE) as reader:
+            if "Indicadores" not in reader.sheet_names:
+                log_error(f"La hoja 'Indicadores' no existe en '{RUTA_ARCHIVO_BASE}'.")
+                return False
+            BD_Total = reader.parse(sheet_name='Indicadores')
+
+        BD_Total_ = BD_Total.copy()
+        BD_Total_['Indicador'] = 'Mapeado'
+        BD_Total_ = BD_Total_.set_index("key")
+        dic_Total_ = BD_Total_.to_dict()
+
+        DF_Total2 = DF_Total.copy()
+        DF_Total2['Indicador'] = DF_Total2['key'].map(dic_Total_.get('Indicador', {}))
+        DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+        DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+        BD_Total = pd.concat([BD_Total, DF_Total2])
+
+        DF_Total_idx = DF_Total.set_index("key")
+        dic_cr = DF_Total_idx.to_dict()
+
+        fecha_col_str = '01/' + MESES_NUM[MESES_ABR.index(mes_abr)] + '/' + anio
+        fecha_col = datetime.datetime.strptime(fecha_col_str, '%d/%m/%Y')
+
+        if fecha_col not in dic_cr:
+            log_error(f"No se hallo columna de fecha {fecha_col} en datos de {mes} {anio}.")
+            return False
+
+        BD_Total[fecha_col] = BD_Total['key'].map(dic_cr[fecha_col])
+
+        with pd.ExcelWriter(RUTA_ARCHIVO_BASE, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+            BD_Total.to_excel(writer, sheet_name="Indicadores", index=False)
+
+        log_ok(f"Periodo {mes} {anio}: guardado exitosamente en '{RUTA_ARCHIVO_BASE}'.")
+        return True
+
+    except PermissionError:
+        log_error(f"Periodo {mes} {anio}: archivo base abierto o sin permisos de escritura. Cierralo e intenta de nuevo.")
+        return False
+    except Exception as e:
+        log_error(f"Periodo {mes} {anio}: fallo al guardar -> {type(e).__name__}: {e}")
+        return False
+
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    print("=" * 70)
+    print("INICIO: Actualizacion de Indicadores Financieros SBS")
+    print("=" * 70)
+
+    if not os.path.isdir(RUTA_BASE_DIR):
+        log_error(f"No se puede acceder a la ruta de red: {RUTA_BASE_DIR}")
+        log_error("Verifica tu conexion VPN / unidad Z: antes de continuar.")
+        return
+
+    try:
+        array_rutas = generar_array_rutas(INICIO, FINAL)
+    except ValueError as e:
+        log_error(f"Parametros invalidos: {e}")
+        return
+
+    log_info(f"Periodos a procesar: {array_rutas}")
+
+    generar_backup(RUTA_ARCHIVO_BASE, RUTA_BACKUPS)
+
+    try:
+        dic_ren = cargar_diccionario_renombre()
+    except Exception as e:
+        log_error(f"No se pudo cargar el diccionario de renombre: {e}")
+        return
+
+    resumen_ok, resumen_error = [], []
+
+    for ruta in array_rutas:
+        m, anio = ruta[0:2], ruta[2:]
+        try:
+            mes = MESES[int(m) - 1]
+            mes_abr = MESES_ABR[int(m) - 1]
+        except (ValueError, IndexError):
+            log_error(f"Periodo invalido: '{ruta}'. Se omite.")
+            resumen_error.append(ruta)
+            continue
+
+        try:
+            DF_Total = procesar_mes(mes, mes_abr, anio, dic_ren)
+            if DF_Total is None:
+                resumen_error.append(f"{mes} {anio}")
+                continue
+
+            if guardar_en_base(DF_Total, mes, mes_abr, anio):
+                resumen_ok.append(f"{mes} {anio}")
+            else:
+                resumen_error.append(f"{mes} {anio}")
+
+        except Exception as e:
+            log_error(f"Periodo {mes} {anio}: excepcion no controlada -> {type(e).__name__}: {e}")
+            log_step(traceback.format_exc().splitlines()[-1])
+            resumen_error.append(f"{mes} {anio}")
+
+    print("=" * 70)
+    print("RESUMEN DE EJECUCION")
+    print("=" * 70)
+    print(f"Periodos con exito ({len(resumen_ok)}): {resumen_ok}")
+    print(f"Periodos con error/omitidos ({len(resumen_error)}): {resumen_error}")
+    if resumen_error:
+        log_warn("Revisa los mensajes [ERROR]/[WARN] anteriores para corregir y reprocesar.")
+    else:
+        log_ok("Todos los periodos se procesaron correctamente.")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
