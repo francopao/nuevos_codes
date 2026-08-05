@@ -1,0 +1,182 @@
+import os
+import re
+import json
+import traceback
+from datetime import datetime, timedelta
+
+# Requiere: pip install nbformat nbclient ipykernel
+import nbformat
+from nbclient import NotebookClient
+
+# ==================== CONFIGURACIÓN ====================
+
+RUTA_BASE = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\1. Emisores\1. One pagers\Complementos\codigos_SBS"
+
+def calcular_fecha_default():
+    """Devuelve MMYYYY correspondiente al mes de hace 2 meses respecto a hoy."""
+    hoy = datetime.now()
+    mes = hoy.month - 2
+    anio = hoy.year
+    if mes <= 0:
+        mes += 12
+        anio -= 1
+    return f"{mes:02d}{anio}"
+
+FECHA_DEFAULT = calcular_fecha_default()
+
+# ---- EDITABLE MANUALMENTE POR EL USUARIO ----
+# Si se dejan en None, se usa el valor por defecto (mes de hace 2 meses, año actual)
+INICIO = None   # Ejemplo: '062026'
+FINAL = None    # Ejemplo: '062026'
+# ----------------------------------------------
+
+INICIO = INICIO if INICIO else FECHA_DEFAULT
+FINAL = FINAL if FINAL else FECHA_DEFAULT
+
+# Horas dentro de las cuales un script ejecutado EXITOSAMENTE no se vuelve a correr
+HORAS_SKIP_EXITOSOS = 24  # editable
+
+ARCHIVO_ESTADO = os.path.join(RUTA_BASE, "_estado_ejecucion.json")
+
+# Scripts que, aunque cumplan el patrón u otro, NUNCA deben ejecutarse
+SCRIPTS_EXCLUIDOS = {
+    "Codigo Corre Codigos - Financiera.ipynb",
+    "Posicion GP-CORTES.ipynb",
+    "Posicion GP-T.ipynb",
+    "Posicion GP.ipynb",
+}
+
+# ==================== FUNCIONES AUXILIARES ====================
+
+def cargar_estado():
+    if os.path.exists(ARCHIVO_ESTADO):
+        try:
+            with open(ARCHIVO_ESTADO, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def guardar_estado(estado):
+    try:
+        with open(ARCHIVO_ESTADO, "w", encoding="utf-8") as f:
+            json.dump(estado, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ADVERTENCIA] No se pudo guardar el archivo de estado: {e}")
+
+def debe_ejecutarse(nombre_script, estado):
+    info = estado.get(nombre_script)
+    if not info:
+        return True
+    if info.get("status") != "exito":
+        return True
+    ultima_ejecucion = info.get("timestamp")
+    if not ultima_ejecucion:
+        return True
+    try:
+        ts = datetime.fromisoformat(ultima_ejecucion)
+    except Exception:
+        return True
+    if datetime.now() - ts < timedelta(hours=HORAS_SKIP_EXITOSOS):
+        return False
+    return True
+
+def obtener_scripts_validos(ruta):
+    patron = re.compile(r"^\d+")
+    archivos = []
+    for nombre in os.listdir(ruta):
+        if not nombre.lower().endswith(".ipynb"):
+            continue
+        if nombre in SCRIPTS_EXCLUIDOS:
+            continue
+        if patron.match(nombre):
+            archivos.append(nombre)
+
+    def clave_orden(nombre):
+        match = re.match(r"^(\d+)", nombre)
+        return int(match.group(1)) if match else 0
+
+    archivos.sort(key=clave_orden)
+    return archivos
+
+def inyectar_parametros(nb, inicio, final):
+    patron_inicio = re.compile(r"^(\s*inicio\s*=\s*)['\"].*?['\"]", re.MULTILINE)
+    patron_final = re.compile(r"^(\s*final\s*=\s*)['\"].*?['\"]", re.MULTILINE)
+    for celda in nb.cells:
+        if celda.cell_type == "code":
+            fuente = celda.source
+            nueva_fuente = fuente
+            if patron_inicio.search(nueva_fuente):
+                nueva_fuente = patron_inicio.sub(rf"\1'{inicio}'", nueva_fuente)
+            if patron_final.search(nueva_fuente):
+                nueva_fuente = patron_final.sub(rf"\1'{final}'", nueva_fuente)
+            celda.source = nueva_fuente
+    return nb
+
+def ejecutar_notebook(ruta_completa, inicio, final):
+    nb = nbformat.read(ruta_completa, as_version=4)
+    nb = inyectar_parametros(nb, inicio, final)
+    client = NotebookClient(
+        nb,
+        timeout=1800,
+        kernel_name="python3",
+        resources={"metadata": {"path": os.path.dirname(ruta_completa)}}
+    )
+    client.execute()
+    nbformat.write(nb, ruta_completa)
+
+# ==================== EJECUCIÓN PRINCIPAL ====================
+
+def main():
+    print(f"Ruta de trabajo: {RUTA_BASE}")
+    print(f"Parámetros por defecto -> inicio: {INICIO} | final: {FINAL}")
+    print(f"Ventana de 'skip' para exitosos: {HORAS_SKIP_EXITOSOS} horas\n")
+
+    if not os.path.isdir(RUTA_BASE):
+        print(f"[ERROR] La ruta no existe o no es accesible: {RUTA_BASE}")
+        return
+
+    scripts = obtener_scripts_validos(RUTA_BASE)
+    estado = cargar_estado()
+
+    exitosos = []
+    fallidos = []
+    omitidos = []
+
+    for nombre in scripts:
+        ruta_completa = os.path.join(RUTA_BASE, nombre)
+
+        if not debe_ejecutarse(nombre, estado):
+            print(f"[OMITIDO] '{nombre}' se ejecutó exitosamente hace menos de {HORAS_SKIP_EXITOSOS}h. Se salta.")
+            omitidos.append(nombre)
+            continue
+
+        print(f"[EJECUTANDO] {nombre} ...")
+        try:
+            ejecutar_notebook(ruta_completa, INICIO, FINAL)
+            print(f"[OK] '{nombre}' ejecutado correctamente.")
+            estado[nombre] = {
+                "status": "exito",
+                "timestamp": datetime.now().isoformat()
+            }
+            exitosos.append(nombre)
+        except Exception as e:
+            print(f"[ERROR] Falló la ejecución del script: '{nombre}'")
+            print(f"        Detalle: {e}")
+            estado[nombre] = {
+                "status": "error",
+                "timestamp": datetime.now().isoformat(),
+                "detalle": str(e)
+            }
+            fallidos.append(nombre)
+        finally:
+            guardar_estado(estado)
+
+    print("\n===================== RESUMEN =====================")
+    print(f"Exitosos ({len(exitosos)}): {exitosos}")
+    print(f"Fallidos ({len(fallidos)}): {fallidos}")
+    print(f"Omitidos por ejecución reciente ({len(omitidos)}): {omitidos}")
+    print("=====================================================")
+
+if __name__ == "__main__":
+    main()
