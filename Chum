@@ -1,0 +1,47 @@
+PASO A — Arreglar el índice duplicado en la concatenación EPU/ETF
+
+Busca (Ctrl+F):
+```
+    df_epu_etf = pd.concat([plantilla_epu, plantilla_ETF])
+```
+
+Reemplaza por:
+
+```python
+    df_epu_etf = pd.concat([plantilla_epu, plantilla_ETF], ignore_index=True)
+```
+
+---
+
+PASO B — Blindar `_registrar_descarte` para que nunca vuelva a romperse por índices duplicados (defensivo, por si aparece en otro lado)
+
+Busca (Ctrl+F):
+```
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.loc[i]
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Etapa': etapa,
+                            'Motivo': motivo, 'Valor': valor})
+```
+
+Reemplaza por:
+
+```python
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    df_antes = df_antes.reset_index(drop=True)
+    df_despues = df_despues.reset_index(drop=True) if len(df_despues) else df_despues
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.iloc[i]
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Etapa': etapa,
+                            'Motivo': motivo, 'Valor': valor})
+```
+
+**Ojo:** este PASO B cambia la lógica de comparación (ahora compara por *posición*, no por índice original). Solo funciona bien si `df_despues` es siempre un subconjunto de filas de `df_antes` en el mismo orden (que es el caso en todos tus `.drop()` con máscara booleana). Si en algún punto reordenas antes de filtrar, avísame y ajustamos ese llamado puntual en vez de esto.
