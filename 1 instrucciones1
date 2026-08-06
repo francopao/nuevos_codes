@@ -1,0 +1,29 @@
+Fácil: en vez de importarlo, **pegas el código dentro de tu propio script** y lo llamas como una función local. Reusa igual los objetos que ya tienes en `main()`, así que no duplicamos parseo ni arriesgamos re-meter bugs.
+
+Un solo detalle técnico que evita un error: quité la línea `from __future__ import annotations` (esa línea *tiene* que ir al inicio absoluto de un archivo, y al pegar a media hoja rompería). Ya la saqué en la versión de abajo.Sintaxis verificada. Así queda tu situación con la condición de no importar:
+
+**Paso 1** — Abre `calculadora_pegar.py` (abajo) y **copia todo su contenido**. Pégalo dentro de tu script principal, en cualquier punto **después de tus `import`** y **antes de `def main()`**. Son solo definiciones de funciones (`_recuadro`, `_dump`, `generar`); no ejecutan nada al pegarse, solo quedan disponibles.
+
+**Paso 2** — Los `import` de openpyxl que trae el bloque (`from openpyxl import Workbook`, etc.) pueden quedarse donde los pegas o subirlos junto a tus otros imports; da igual, Python no se queja de que `numpy`/`pandas` se importen dos veces.
+
+**Paso 3** — En `main()`, busca (Ctrl+F):
+
+```python
+    comprobar_bd(df_final, fecha_corte)
+```
+
+y justo debajo pega la llamada (ahora sin el `import`, porque `generar` ya vive en tu propio archivo):
+
+```python
+    generar(
+        MONITOR_PATH.parent / "Calculadora_Auditable_RVL.xlsx",
+        param=param, precios_vp=precios_vp, retornos_vp=retornos_vp,
+        TC_F=TC_F, Q=Q, df_final=df_final, dicc_parametria=dicc_parametria,
+        fecha_corte=fecha_corte, afp_ancla="IN",
+        sbs_ancla="312039100001", anio=2025)
+    print("Calculadora auditable generada.")
+```
+
+Eso es todo: un solo archivo, cero imports entre scripts. Si algún día prefieres separarlo en su propio módulo, vuelves a poner `from __future__ import annotations` en la primera línea de ese módulo y lo importas; pero con esto ya no lo necesitas.Ahí está `calculadora_pegar.py` listo para copiar y pegar dentro de tu script.
+
+Resumen de qué cambió con tu condición: nada de la lógica; solo pasa de "módulo importado" a "bloque pegado". Las funciones quedan en tu mismo archivo y `generar(...)` se llama como cualquier otra función tuya. El único cuidado —quitar `from __future__ import annotations`— ya viene resuelto en esta versión.
