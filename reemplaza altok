@@ -1,0 +1,69 @@
+El crash ya no aparece — eso confirma que el fix funcionó. Lo que ves ahora es otro problema, más simple: la tabla de descartes es **legítimamente enorme** (normal, porque `df_result()` se llama 30 veces por rama y cada vez captura todos los SBS con peso ≤0 en ese fondo específico — la mayoría de instrumentos no están en todos los fondos). El `to_string()` está tratando de imprimir miles de filas de golpe y Jupyter lo corta.
+
+La solución: no imprimas la tabla completa en consola — guárdala en un Excel/CSV y en consola solo muestra un **resumen corto** (conteos + Weight diluido por etapa).
+
+PASO — Reemplazar `imprimir_descartes()` completa
+
+Busca (Ctrl+F):
+```
+def imprimir_descartes():
+    if not _DESCARTES:
+        print("[DESCARTES] No se descartó ningún instrumento.")
+        return
+    df_desc = pd.DataFrame(_DESCARTES)
+    print("\n================  INSTRUMENTOS DESCARTADOS  ================")
+    print(df_desc.to_string(index=False))
+    print("\n--- Weight/valor diluido por SBS (suma en todas las etapas) ---")
+    resumen = df_desc.groupby('SBS')['Valor'].apply(
+        lambda s: pd.to_numeric(s, errors='coerce').sum())
+    print(resumen.to_string())
+```
+
+Reemplaza por:
+
+```python
+def imprimir_descartes(etiqueta, ruta_salida):
+    if not _DESCARTES:
+        print("[DESCARTES] No se descartó ningún instrumento.")
+        return
+    df_desc = pd.DataFrame(_DESCARTES)
+
+    # --- Guardar el detalle completo en Excel (no en consola) ---
+    ruta = ruta_salida + f'Descartes {etiqueta}.xlsx'
+    try:
+        df_desc.to_excel(ruta, index=False)
+        print(f"[DESCARTES] Detalle completo ({len(df_desc)} filas) -> {ruta}")
+    except Exception as e:
+        print(f"[AVISO] No se pudo guardar el Excel de descartes: {e}")
+
+    # --- Resumen corto en consola: conteo + Weight diluido por Etapa ---
+    print("\n--- Resumen por Etapa (conteo de SBS descartados) ---")
+    print(df_desc.groupby('Etapa').size().to_string())
+
+    print("\n--- Weight/valor diluido total por Etapa ---")
+    df_desc['Valor_num'] = pd.to_numeric(df_desc['Valor'], errors='coerce')
+    print(df_desc.groupby('Etapa')['Valor_num'].sum().to_string())
+
+    print("\n--- Top 15 SBS con más Weight diluido (revisa el Excel para el resto) ---")
+    top = df_desc.groupby('SBS')['Valor_num'].sum().sort_values(ascending=False).head(15)
+    print(top.to_string())
+```
+
+---
+
+Como cambió el nombre de los parámetros de la función, hay que actualizar dónde se llama.
+
+Busca (Ctrl+F):
+```
+    print(f"\n[DESCARTES] Resumen para rama {etiqueta}:")
+    imprimir_descartes()
+    _DESCARTES.clear()
+```
+
+Reemplaza por:
+
+```python
+    print(f"\n[DESCARTES] Resumen para rama {etiqueta}:")
+    imprimir_descartes(etiqueta, D_INTERMEDIO)
+    _DESCARTES.clear()
+```
