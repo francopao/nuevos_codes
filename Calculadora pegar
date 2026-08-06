@@ -1,0 +1,483 @@
+# -*- coding: utf-8 -*-
+"""Genera Calculadora_Auditable_RVL.xlsx: reconstruye, con fórmulas vivas de
+Excel, todo el camino Precio→PxQ→peso rezagado→retorno ponderado→acumulado que
+el pipeline mete en la hoja BD, y lo cuadra contra el BD real del Monitor.
+
+Se enchufa al pipeline: le pasamos los objetos ya limpios (no re-leemos nada),
+así heredamos las 4 correcciones de q_sis/DQ_SIS y jamás re-introducimos el bug
+día/mes. El instrumento del PANEL es 100% interactivo (fórmulas); la AFP se fija
+al generar (default IN, el caso ya validado) y las otras quedan seleccionables
+con aviso del bug pendiente.
+"""
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.formula import ArrayFormula
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter as col
+
+# --- estética mínima ---------------------------------------------------------
+AMAR = PatternFill("solid", fgColor="FFF2CC")   # inputs
+GRIS = PatternFill("solid", fgColor="D9D9D9")   # cabeceras
+VERDE = PatternFill("solid", fgColor="C6EFCE")
+ROJO  = PatternFill("solid", fgColor="FFC7CE")
+AZULH = PatternFill("solid", fgColor="DDEBF7")   # recuadro "qué/de dónde/a dónde"
+BOLD = Font(bold=True)
+TIT  = Font(bold=True, size=13, color="1F4E78")
+_thin = Side(style="thin", color="BFBFBF")
+BORDE = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+FONDOS = ("F1", "F2", "F3")
+
+
+def _recuadro(ws, fila, que, dedonde, adonde):
+    """Recuadro celeste de 3 líneas en lenguaje llano arriba de cada hoja."""
+    for i, (rot, txt) in enumerate((("Qué muestra", que),
+                                    ("De dónde viene", dedonde),
+                                    ("A dónde va", adonde))):
+        c = ws.cell(fila + i, 1, f"{rot}: {txt}")
+        c.fill = AZULH
+        c.font = Font(italic=True, size=9)
+        ws.merge_cells(start_row=fila + i, start_column=1,
+                       end_row=fila + i, end_column=10)
+    return fila + 3
+
+
+def _dump(ws, df, fila0, col0=1, fmt="0.000000", encabezado_fecha="Fecha"):
+    """Vuelca un DataFrame indexado por fecha como bloque crudo (valores)."""
+    ws.cell(fila0, col0, encabezado_fecha).font = BOLD
+    for j, c in enumerate(df.columns):
+        h = ws.cell(fila0, col0 + 1 + j, str(c)); h.font = BOLD; h.fill = GRIS
+    for i, (idx, row) in enumerate(df.iterrows()):
+        r = fila0 + 1 + i
+        cf = ws.cell(r, col0, idx)
+        cf.number_format = "dd/mm/yyyy"
+        for j, v in enumerate(row):
+            cc = ws.cell(r, col0 + 1 + j)
+            cc.value = None if pd.isna(v) else float(v)
+            cc.number_format = fmt
+    return fila0 + 1, fila0 + len(df)   # (primera_fila_dato, ultima_fila_dato)
+
+
+def generar(ruta_salida: Path, *, param, precios_vp, retornos_vp, TC_F, Q,
+            df_final, dicc_parametria, fecha_corte, afp_ancla="IN",
+            sbs_ancla="312039100001", anio=2025):
+    corte = pd.Timestamp(fecha_corte)
+    inicio = pd.Timestamp(anio, 1, 1)
+    # Calendario EXACTO del BD dentro de la ventana (mismas filas → OFFSET calza)
+    fechas = df_final.loc[inicio:corte].index
+    fechas = pd.DatetimeIndex([f for f in fechas])
+    if not len(fechas):
+        raise ValueError("La ventana pedida no tiene filas en df_final.")
+
+    isins = [s for s in param["SBS"].tolist() if s in precios_vp.columns]
+    nombre = {s: dicc_parametria.get(s, s) for s in isins}
+    sector = dict(zip(param["SBS"], param["Sector"].astype(str)))
+    moneda = dict(zip(param["SBS"], param["Moneda"].astype(str)))
+
+    P = precios_vp.reindex(fechas)[isins]           # precio en soles
+    R = retornos_vp.reindex(fechas)[isins].fillna(0)
+    TC = TC_F.reindex(fechas)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ==================== HOJA 0 · PANEL ====================
+    ws = wb.create_sheet("0·PANEL")
+    ws["A1"] = "Calculadora Auditable RVL"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Dos perillas: Instrumento y AFP. Todo lo demás se recalcula solo.",
+        "Instrumento y AFP → alimentan las hojas 1 a 10 por referencia.",
+        "Cambia aquí y observa la cascada; el semáforo confirma que cuadra.")
+    ws.cell(f + 1, 1, "Instrumento (SBS · nombre)").font = BOLD
+    inst = ws.cell(f + 1, 2); inst.fill = AMAR; inst.font = BOLD
+    inst.value = f"{sbs_ancla} · {nombre.get(sbs_ancla, sbs_ancla)}"
+    ws.cell(f + 2, 1, "AFP").font = BOLD
+    cafp = ws.cell(f + 2, 2); cafp.fill = AMAR; cafp.font = BOLD; cafp.value = afp_ancla
+    ws.cell(f + 3, 1, "Fecha de inicio").font = BOLD
+    ci = ws.cell(f + 3, 2, inicio); ci.number_format = "dd/mm/yyyy"; ci.fill = AMAR
+    ws.cell(f + 4, 1, "Fecha de corte").font = BOLD
+    cc = ws.cell(f + 4, 2, corte); cc.number_format = "dd/mm/yyyy"; cc.fill = AMAR
+    # SBS puro del instrumento seleccionado (lo usan todas las hojas)
+    ws.cell(f + 5, 1, "SBS seleccionado").font = BOLD
+    ws.cell(f + 5, 2).value = f'=TRIM(LEFT($B${f+1},FIND(" · ",$B${f+1})-1))'
+
+    # listas para validación de datos
+    ws_l = wb.create_sheet("_listas"); ws_l.sheet_state = "hidden"
+    for i, s in enumerate(isins):
+        ws_l.cell(i + 1, 1, f"{s} · {nombre[s]}")
+    for i, a in enumerate(("IN", "HA", "PF", "RI")):
+        ws_l.cell(i + 1, 2, a)
+    dv_i = DataValidation(type="list",
+                          formula1=f"=_listas!$A$1:$A${len(isins)}", allow_blank=False)
+    dv_a = DataValidation(type="list", formula1="=_listas!$B$1:$B$4", allow_blank=False)
+    ws.add_data_validation(dv_i); ws.add_data_validation(dv_a)
+    dv_i.add(inst); dv_a.add(cafp)
+
+    # aviso automático si la AFP elegida no coincide con la volcada (bug HA/PF/RI)
+    ws.cell(f + 7, 1).value = (
+        f'=IF($B${f+2}<>"{afp_ancla}",'
+        f'"⚠ Volcamos la AFP {afp_ancla}. Para auditar otra AFP re-genera con '
+        f'afp_ancla=esa. Además HA/PF/RI siguen con el bug de pesos cero en '
+        f'q_sis(): úsalas solo cuando esté corregido.","")')
+    ws.cell(f + 7, 1).font = Font(bold=True, color="C00000")
+
+    # diagrama de flujo simple
+    fd = f + 9
+    ws.cell(fd, 1, "Flujo del proceso").font = BOLD
+    cadena = ["SBS (llave)", "→ moneda·TC", "→ Precio en soles", "× Cantidad = PxQ",
+              "→ Peso", "→ Peso rezagado T→T+1", "× Retorno", "→ Retorno ponderado",
+              "→ Acumulado", "→ BD", "→ Resumen"]
+    for i, paso in enumerate(cadena):
+        cc2 = ws.cell(fd + 1, 1 + i, paso)
+        cc2.fill = GRIS; cc2.border = BORDE; cc2.alignment = Alignment(wrap_text=True)
+        ws.column_dimensions[col(1 + i)].width = 12
+
+    # semáforo maestro (se completa tras crear hoja 6)
+    fm = fd + 3
+    ws.cell(fm, 1, "Semáforo maestro (reconstruido = BD real)").font = BOLD
+    celda_master = ws.cell(fm, 2)   # llenamos abajo
+    ws.column_dimensions["A"].width = 34; ws.column_dimensions["B"].width = 26
+    F_SBS = f + 5   # fila del SBS puro; ref =0·PANEL!$B$F_SBS
+    SBS_REF = f"'0·PANEL'!$B${F_SBS}"
+    AFP_REF = f"'0·PANEL'!$B${f+2}"
+    INI_REF = f"'0·PANEL'!$B${f+3}"
+    COR_REF = f"'0·PANEL'!$B${f+4}"
+
+    # ==================== HOJA 1 · PRECIOS_SBS ====================
+    ws = wb.create_sheet("1·PRECIOS_SBS")
+    ws["A1"] = "Precios en soles (materia prima)"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Precio diario de cada instrumento, ya expresado en soles.",
+        "BDat_Act del SBS (regulador); es la fuente autoritativa.",
+        "Alimenta PxQ (hoja 4). Bloomberg es solo informativo.")
+    p1, p1b = _dump(ws, P, f + 1)
+    F_PRE = f + 1  # fila de cabecera de instrumentos en hoja precios
+
+    # ==================== HOJA 2 · RETORNOS_SBS ====================
+    ws = wb.create_sheet("2·RETORNOS_SBS")
+    ws["A1"] = "Retornos diarios (materia prima)"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Retorno diario de cada instrumento (Ret_ del regulador).",
+        "BDat_Act; se ignora el campo Ret1_. Feriados = 0 (no rompen productoria).",
+        "Se multiplica por el peso rezagado (hoja 5) para el retorno del fondo.")
+    r2, r2b = _dump(ws, R, f + 1)
+    F_RET = f + 1
+
+    # ==================== HOJA 3 · TIPO_CAMBIO ====================
+    ws = wb.create_sheet("3·TIPO_CAMBIO")
+    ws["A1"] = "Tipo de cambio"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "TC diario por moneda y la moneda del instrumento del Panel.",
+        "BDTC del SBS (mismas fechas que BDat).",
+        "Recordatorio: la hoja 1 ya trae el precio convertido a soles.")
+    cols_tc = [c for c in ("DOL", "GBP", "CAD", "NSOL") if c in TC.columns]
+    _dump(ws, TC[cols_tc], f + 3)
+    ws.cell(f + 1, 1, "Moneda del instrumento del Panel:").font = BOLD
+    # BUSCARV de la moneda: mapa SBS→moneda en columnas ocultas de _listas
+    for i, s in enumerate(isins):
+        ws_l.cell(i + 1, 4, s); ws_l.cell(i + 1, 5, moneda.get(s, "NSOL"))
+    ws.cell(f + 1, 2).value = (
+        f'=IFERROR(VLOOKUP({SBS_REF},_listas!$D$1:$E${len(isins)},2,0),"NSOL")')
+    ws.cell(f + 2, 1, "Recordatorio (fórmula):").font = BOLD
+    ws.cell(f + 2, 2, "Precio_soles = Precio_original × TC(moneda);  ya aplicado en hoja 1")
+
+    # ==================== HOJA 4 · CANTIDADES ====================
+    # Volcamos Q de la AFP ancla en sus 3 fondos (crudo).
+    ws = wb.create_sheet("4·CANTIDADES")
+    ws["A1"] = f"Cantidades (Q) — AFP {afp_ancla}"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        f"Nº de acciones por instrumento y fecha, fondos F1/F2/F3 de {afp_ancla}.",
+        "DQ_IN (Integra) o DQ_RV (sistema) del QEST.",
+        "Se multiplica por el precio (hoja 1) para obtener PxQ (hoja 4→5).")
+    F_Q = {}
+    fila = f + 1
+    for fo in FONDOS:
+        q = Q[f"{afp_ancla}_{fo}"].reindex(index=fechas, columns=isins).fillna(0)
+        ws.cell(fila, 1, f"{afp_ancla}-{fo}").font = TIT
+        h, hb = _dump(ws, q, fila + 1, fmt="#,##0")
+        F_Q[fo] = h            # primera fila de datos de este fondo
+        fila = hb + 3
+    SH_Q = "4·CANTIDADES"
+
+    # ==================== HOJA 5 · PXQ_Y_PESOS ====================
+    ws = wb.create_sheet("5·PXQ_Y_PESOS")
+    ws["A1"] = "PxQ, peso y peso rezagado"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "PxQ = Precio×Cantidad; Peso = PxQ / PxQ_total del fondo; y el rezago T→T+1.",
+        "Multiplica hoja 1 (precio) por hoja 4 (cantidad), por instrumento y fecha.",
+        "El peso rezagado (peso de hoy aplicado al retorno de mañana) va a la hoja 6.")
+    n = len(fechas); ni = len(isins)
+    nota = ("Rezago: el peso de la fila T se ALINEA al retorno de la fila T+1 "
+            "(por eso el peso rezagado toma el PxQ de la fila anterior). Es el "
+            "detalle que más confunde; acá lo dejamos a la vista con OFFSET.")
+    F_PXQ = {}; F_WLAG = {}
+    fila = f + 1
+    for fo in FONDOS:
+        ws.cell(fila, 1, f"{afp_ancla}-{fo}  ·  {nota if fo=='F1' else ''}").font = TIT
+        # cabecera
+        ws.cell(fila + 1, 1, "Fecha").font = BOLD
+        for j, s in enumerate(isins):
+            hh = ws.cell(fila + 1, 2 + j, s); hh.font = BOLD; hh.fill = GRIS
+        cT = ws.cell(fila + 1, 2 + ni, "PxQ_total_fondo"); cT.font = BOLD; cT.fill = GRIS
+        cW = ws.cell(fila + 1, 3 + ni, "Peso_ancla"); cW.font = BOLD; cW.fill = GRIS
+        cL = ws.cell(fila + 1, 4 + ni, "Peso_ancla_REZAGADO"); cL.font = BOLD; cL.fill = AMAR
+        f0 = fila + 2                         # primera fila de datos PxQ de este fondo
+        F_PXQ[fo] = f0
+        for i in range(n):
+            r = f0 + i
+            rp = F_PRE + i                     # fila espejo en hoja precios
+            rq = F_Q[fo] + i                   # fila espejo en hoja cantidades
+            ws.cell(r, 1, fechas[i]).number_format = "dd/mm/yyyy"
+            for j in range(ni):
+                L = col(2 + j)
+                ws.cell(r, 2 + j).value = (
+                    f"='1·PRECIOS_SBS'!{col(2+j)}{rp}*'{SH_Q}'!{col(2+j)}{rq}")
+                ws.cell(r, 2 + j).number_format = "#,##0"
+            # PxQ_total del fondo (denominador del peso)
+            rng = f"{col(2)}{r}:{col(1+ni)}{r}"
+            ws.cell(r, 2 + ni).value = f"=SUM({rng})"
+            ws.cell(r, 2 + ni).number_format = "#,##0"
+            # peso del instrumento ancla = PxQ_ancla / PxQ_total
+            #   PxQ_ancla se ubica por MATCH del SBS del panel en la cabecera
+            hdr = f"$B${fila+1}:${col(1+ni)}${fila+1}"
+            pxq_ancla = f"INDEX({col(2)}{r}:{col(1+ni)}{r},MATCH({SBS_REF},{hdr},0))"
+            ws.cell(r, 3 + ni).value = f"=IFERROR({pxq_ancla}/{col(2+ni)}{r},0)"
+            ws.cell(r, 3 + ni).number_format = "0.00%"
+            # peso rezagado: peso de la fila anterior (T aplicado a T+1)
+            if i == 0:
+                ws.cell(r, 4 + ni).value = 0
+            else:
+                ws.cell(r, 4 + ni).value = f"={col(3+ni)}{r-1}"
+            ws.cell(r, 4 + ni).number_format = "0.00%"
+        F_WLAG[fo] = (f0, col(4 + ni))         # (fila0, columna del peso rezagado)
+        fila = f0 + n + 2
+
+    # ==================== HOJA 6 · RETORNO_PONDERADO + ACUMULADO + CUADRE ==========
+    ws = wb.create_sheet("6·RETORNO_Y_CUADRE")
+    ws["A1"] = "Retorno ponderado, acumulado y cuadre vs BD"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Retorno diario del fondo = Σ(retorno_i × peso rezagado_i); su acumulado; "
+        "y la resta contra el BD real.",
+        "Retornos de la hoja 2 y pesos rezagados de la hoja 5.",
+        "Si la resta es ~0 (verde) las fórmulas reproducen exactamente el BD.")
+    # Espejo del BD: columnas Ret_<AFP>_<F>_O_Total de df_final en la ventana
+    ws_m = wb.create_sheet("6b·BD_ESPEJO"); ws_m.sheet_state = "visible"
+    ws_m["A1"] = "Espejo del BD real (solo lectura)"; ws_m["A1"].font = TIT
+    cols_bd = []
+    for fo in FONDOS:
+        cols_bd.append(f"Ret_{afp_ancla}_{fo}_O_Total")
+    for extra in ("Ret_EPU_Total", "Ret_ETFPERU_Total"):
+        if extra in df_final.columns:
+            cols_bd.append(extra)
+    cols_bd = [c for c in cols_bd if c in df_final.columns]
+    bd = df_final.reindex(fechas)[cols_bd]
+    fb0, _ = _dump(ws_m, bd, 3)
+    colmap_bd = {c: col(2 + i) for i, c in enumerate(cols_bd)}
+
+    # cuerpo hoja 6: por fondo, retorno reconstruido / acumulado / espejo / dif
+    ws.cell(f + 1, 1, "Fecha").font = BOLD
+    heads = []
+    for fo in FONDOS:
+        heads += [f"Ret_{fo}_recon", f"Acum_{fo}_recon", f"Ret_{fo}_BD", f"Dif_{fo}"]
+    for j, h in enumerate(heads):
+        cc3 = ws.cell(f + 1, 2 + j, h); cc3.font = BOLD
+        cc3.fill = AMAR if h.startswith("Dif") else GRIS
+    d0 = f + 2
+    for i in range(n):
+        r = d0 + i
+        ws.cell(r, 1, fechas[i]).number_format = "dd/mm/yyyy"
+        for k, fo in enumerate(FONDOS):
+            base = 2 + k * 4
+            rr = F_RET + i                       # fila retornos hoja 2
+            fw0, wcol = F_WLAG[fo]
+            rw = fw0 + i                          # fila peso rezagado hoja 5
+            # Σ retorno_i * peso_rezagado_i  → pero el peso rezagado que tenemos
+            # es solo el del ancla. Para el TOTAL del fondo usamos la identidad
+            # exacta del pipeline: Ret_fondo(T)=SUMPRODUCT(ret(T),PxQ(T-1))/ΣPxQ(T-1)
+            fpx = F_PXQ[fo]
+            if i == 0:
+                ws.cell(r, base).value = 0
+            else:
+                rp_prev = fpx + (i - 1)
+                rng_ret = f"'2·RETORNOS_SBS'!{col(2)}{rr}:{col(1+ni)}{rr}"
+                rng_px  = f"'5·PXQ_Y_PESOS'!{col(2)}{rp_prev}:{col(1+ni)}{rp_prev}"
+                tot_px  = f"'5·PXQ_Y_PESOS'!{col(2+ni)}{rp_prev}"
+                ws.cell(r, base).value = (
+                    f"=IFERROR(SUMPRODUCT({rng_ret},{rng_px})/{tot_px},0)")
+            ws.cell(r, base).number_format = "0.0000%"
+            # acumulado encadenado
+            if i == 0:
+                ws.cell(r, base + 1).value = f"=1+{col(base)}{r}"
+            else:
+                ws.cell(r, base + 1).value = f"={col(base+1)}{r-1}*(1+{col(base)}{r})"
+            ws.cell(r, base + 1).number_format = "0.0000"
+            # espejo BD
+            cbd = colmap_bd.get(f"Ret_{afp_ancla}_{fo}_O_Total")
+            ws.cell(r, base + 2).value = (
+                f"=IFERROR('6b·BD_ESPEJO'!{cbd}{fb0+i},0)") if cbd else 0
+            ws.cell(r, base + 2).number_format = "0.0000%"
+            # diferencia + semáforo
+            dd = ws.cell(r, base + 3)
+            dd.value = f"={col(base)}{r}-{col(base+2)}{r}"
+            dd.number_format = "0.000000%"
+    # semáforo por fondo (máx |dif|)
+    fs = d0 + n + 1
+    ws.cell(fs, 1, "Máx |diferencia| por fondo:").font = BOLD
+    for k, fo in enumerate(FONDOS):
+        dcol = col(2 + k * 4 + 3)
+        cc4 = ws.cell(fs, 2 + k)
+        _fx = f"=MAX(ABS({dcol}{d0}:{dcol}{d0+n-1}))"
+        cc4.value = ArrayFormula(cc4.coordinate, _fx)   # abs sobre rango = matricial
+        cc4.number_format = "0.000000%"
+    # regla condicional verde/rojo
+    from openpyxl.formatting.rule import CellIsRule
+    rng_sem = f"{col(2)}{fs}:{col(1+len(FONDOS))}{fs}"
+    ws.conditional_formatting.add(rng_sem, CellIsRule(
+        operator="lessThan", formula=["0.0001"], fill=VERDE))
+    ws.conditional_formatting.add(rng_sem, CellIsRule(
+        operator="greaterThanOrEqual", formula=["0.0001"], fill=ROJO))
+    F_ACUM = {fo: (d0, col(2 + k * 4 + 1)) for k, fo in enumerate(FONDOS)}
+    F_RECON = {fo: (d0, col(2 + k * 4)) for k, fo in enumerate(FONDOS)}
+
+    # semáforo maestro en PANEL = máx de los 3 fondos
+    celda_master.value = (
+        f"=IF(MAX('6·RETORNO_Y_CUADRE'!{rng_sem})<0.0001,"
+        f'"✔ CUADRA","X - revisar")')
+    ws0 = wb["0·PANEL"]
+    ws0.conditional_formatting.add(f"B{fm}", CellIsRule(
+        operator="containsText", formula=['"CUADRA"'], fill=VERDE))
+
+    # ==================== HOJA 7 · CALC_RENDIMIENTO ====================
+    ws = wb.create_sheet("7·CALC_RENDIMIENTO")
+    ws["A1"] = "Rendimiento (Day/WTD/MTD/Aggr) + Alpha"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Reproduce las filas Retorno/Alpha del Resumen para la AFP del Panel.",
+        "Aplica las mismas ventanas (PRODUCT+OFFSET+NETWORKDAYS) del Monitor "
+        "sobre el retorno reconstruido de la hoja 6.",
+        "Debe calzar celda a celda con el PDF 31/12/25 para Integra.")
+    # anclas de ventana (idénticas al Resumen)
+    ws.cell(f + 1, 1, "Inicio (Aggr)").font = BOLD
+    ws.cell(f + 1, 2).value = f"={INI_REF}"; ws.cell(f+1,2).number_format="dd/mm/yyyy"
+    ws.cell(f + 2, 1, "Corte").font = BOLD
+    ws.cell(f + 2, 2).value = f"={COR_REF}"; ws.cell(f+2,2).number_format="dd/mm/yyyy"
+    ws.cell(f + 3, 1, "Lunes de la semana (WTD)").font = BOLD
+    ws.cell(f + 3, 2).value = f"=$B${f+2}-WEEKDAY($B${f+2},2)+1"
+    ws.cell(f + 3, 2).number_format = "dd/mm/yyyy"
+    ws.cell(f + 4, 1, "1er día hábil del mes (MTD)").font = BOLD
+    ws.cell(f + 4, 2).value = f"=WORKDAY(EOMONTH($B${f+2},-1),1)"
+    ws.cell(f + 4, 2).number_format = "dd/mm/yyyy"
+    W9 = f"$B${f+3}"; X9 = f"$B${f+4}"; Y9 = f"$B${f+1}"; I4 = f"$B${f+2}"
+
+    # tabla Day/WTD/MTD/Aggr por fondo, reconstruido y (control) desde BD
+    ft = f + 6
+    ws.cell(ft, 1, f"Retorno AFP {afp_ancla}").font = TIT
+    encab = ["", "Day", "WTD", "MTD", "Aggr."]
+    for j, e in enumerate(encab):
+        ws.cell(ft + 1, 1 + j, e).font = BOLD
+
+    def _ventanas(dcol_letter, dfila0, datecol_letter="A", datefila0=None):
+        """Devuelve las 4 fórmulas Day/WTD/MTD/Aggr para una serie diaria que
+        vive en la hoja 6 (columna dcol_letter, primera fila dfila0), usando la
+        columna de fechas A de esa misma hoja."""
+        sh = "'6·RETORNO_Y_CUADRE'"
+        dc = f"{sh}!${dcol_letter}${dfila0}:${dcol_letter}${dfila0+n-1}"
+        da = f"{sh}!$A${dfila0}:$A${dfila0+n-1}"
+        anchor = f"{sh}!${dcol_letter}${dfila0}"
+        day = f"=IFERROR(INDEX({dc},MATCH({I4},{da},0)),0)"
+        wtd = (f"=PRODUCT(1+OFFSET({anchor},MATCH({W9},{da},0)-1,0,{I4}-{W9}+1))-1")
+        mtd = (f"=PRODUCT(1+OFFSET({anchor},MATCH({X9},{da},0)-1,0,"
+               f"NETWORKDAYS({X9},{I4})))-1")
+        agg = (f"=PRODUCT(1+OFFSET({anchor},MATCH({Y9},{da},0)-1,0,"
+               f"NETWORKDAYS({Y9},{I4})))-1")
+        return day, wtd, mtd, agg
+
+    fila = ft + 2
+    filas_fondo_recon = {}
+    for k, fo in enumerate(FONDOS):
+        ws.cell(fila, 1, fo).font = BOLD
+        d0f, dcol = F_RECON[fo]
+        forms = _ventanas(dcol, d0f)
+        for j, fx in enumerate(forms):
+            c = ws.cell(fila, 2 + j)
+            c.value = ArrayFormula(c.coordinate, fx) if j > 0 else fx
+            c.number_format = "0.00%"
+        filas_fondo_recon[fo] = fila
+        fila += 1
+
+    # benchmark (EPU / ETFPER) con la misma mecánica desde el espejo
+    fb = fila + 1
+    ws.cell(fb, 1, "Benchmark").font = TIT
+    bench_row = {}
+    for nb, key in (("ETFPER", "Ret_ETFPERU_Total"), ("EPU", "Ret_EPU_Total")):
+        if key not in colmap_bd:
+            continue
+        fila += 1
+        ws.cell(fila, 1, nb).font = BOLD
+        # el espejo vive en 6b; lo referenciamos vía una col puente en hoja6? Para
+        # no complicar, aplicamos las ventanas directo sobre 6b·BD_ESPEJO.
+        sh = "'6b·BD_ESPEJO'"; cbd = colmap_bd[key]
+        dc = f"{sh}!${cbd}${fb0}:${cbd}${fb0+n-1}"
+        da = f"{sh}!$A${fb0}:$A${fb0+n-1}"; anchor = f"{sh}!${cbd}${fb0}"
+        forms = (
+            f"=IFERROR(INDEX({dc},MATCH({I4},{da},0)),0)",
+            f"=PRODUCT(1+OFFSET({anchor},MATCH({W9},{da},0)-1,0,{I4}-{W9}+1))-1",
+            f"=PRODUCT(1+OFFSET({anchor},MATCH({X9},{da},0)-1,0,NETWORKDAYS({X9},{I4})))-1",
+            f"=PRODUCT(1+OFFSET({anchor},MATCH({Y9},{da},0)-1,0,NETWORKDAYS({Y9},{I4})))-1")
+        for j, fx in enumerate(forms):
+            c = ws.cell(fila, 2 + j)
+            c.value = ArrayFormula(c.coordinate, fx) if j > 0 else fx
+            c.number_format = "0.00%"
+        bench_row[nb] = fila
+
+    # Alpha del fondo vs cada benchmark (= retorno fondo − retorno benchmark)
+    fa = fila + 2
+    ws.cell(fa, 1, "Alpha (fondo − benchmark)").font = TIT
+    fila = fa
+    for fo in FONDOS:
+        for nb in bench_row:
+            fila += 1
+            ws.cell(fila, 1, f"{fo} vs {nb}").font = BOLD
+            for j in range(4):
+                L = col(2 + j)
+                ws.cell(fila, 2 + j).value = (
+                    f"={L}{filas_fondo_recon[fo]}-{L}{bench_row[nb]}")
+                ws.cell(fila, 2 + j).number_format = "0.00%"
+
+    # ==================== HOJA 8 · CALC_POSICIONAMIENTO ====================
+    ws = wb.create_sheet("8·CALC_POSICIONAMIENTO")
+    ws["A1"] = "Posicionamiento (peso puntual y promedio)"; ws["A1"].font = TIT
+    f = _recuadro(ws, 3,
+        "Peso del instrumento del Panel: a la fecha de corte y promedio del periodo.",
+        "Pesos de la hoja 5; el sector sale de Parametria (col D) por BUSCARV.",
+        "Contrastable contra Posicionamiento Promedio/Absoluto del PDF.")
+    for i, s in enumerate(isins):
+        ws_l.cell(i + 1, 7, s); ws_l.cell(i + 1, 8, sector.get(s, ""))
+    ws.cell(f + 1, 1, "Instrumento").font = BOLD
+    ws.cell(f + 1, 2).value = f"={SBS_REF}"
+    ws.cell(f + 2, 1, "Sector").font = BOLD
+    ws.cell(f + 2, 2).value = (
+        f'=IFERROR(VLOOKUP({SBS_REF},_listas!$G$1:$H${len(isins)},2,0),"")')
+    ws.cell(f + 4, 1, "").font = BOLD
+    for j, e in enumerate(("Fondo", "Peso a corte", "Peso promedio")):
+        ws.cell(f + 4, 1 + j, e).font = BOLD
+    for k, fo in enumerate(FONDOS):
+        r = f + 5 + k
+        ws.cell(r, 1, fo).font = BOLD
+        f0 = F_PXQ[fo]
+        # columna del peso (no rezagado) del ancla en hoja 5 = 3+ni
+        wc = col(3 + ni)
+        rng = f"'5·PXQ_Y_PESOS'!${wc}${f0}:${wc}${f0+n-1}"
+        da  = f"'5·PXQ_Y_PESOS'!$A${f0}:$A${f0+n-1}"
+        ws.cell(r, 2).value = f"=IFERROR(INDEX({rng},MATCH({COR_REF},{da},0)),0)"
+        ws.cell(r, 2).number_format = "0.00%"
+        ws.cell(r, 3).value = f"=AVERAGE({rng})"
+        ws.cell(r, 3).number_format = "0.00%"
+
+    # anchos base
+    for sh in wb.worksheets:
+        sh.column_dimensions["A"].width = max(sh.column_dimensions["A"].width or 8, 16)
+
+    wb.save(ruta_salida)
+    return ruta_salida
