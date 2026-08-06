@@ -1,0 +1,60 @@
+Encontré el bug con evidencia dura: en tu Monitor, la fila 0 de `DQ_SIS` trae los códigos SBS como **enteros** (`300009100001` tipo `int64`), y `actualizar_DQ_SIS` los usa tal cual como nombres de columna. Luego `q_sis()` hace `reindex(columns=lista_isins)` con SBS **string** → no cruza nada → todo el histórico HA/PF/RI queda en cero. Los `nuevos` del QEST sí quedan como string (por eso IN funciona y el sistema no). Además, `hist = base_h.iloc[2:]` y `final_hist = base_h.iloc[:ubi]` amputan historia. Tres ediciones:
+
+**Edición 1 — pega este helper justo antes de `def actualizar_DQ_IN(`:**
+
+```python
+def _cols_a_str(cols) -> list[str]:
+    out = []
+    for c in cols:
+        s = str(c).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        out.append(s)
+    return out
+```
+
+**Edición 2 — en `actualizar_DQ_SIS`, busca (Ctrl+F):**
+
+```python
+    base = DQ_SIS_BD.copy()
+    base.columns = base.iloc[0].to_list()
+    base_h = base.drop(0)
+    hist = base_h.iloc[2:]
+```
+
+reemplaza por:
+
+```python
+    base = DQ_SIS_BD.copy()
+    base.columns = _cols_a_str(base.iloc[0].to_list())
+    base_h = base.drop(0)
+    hist = base_h
+```
+
+**Edición 3 — misma función, busca:**
+
+```python
+    final_hist = base_h.iloc[:ubi]
+```
+
+reemplaza por:
+
+```python
+    final_hist = base_h   # historia completa del Monitor; nuevos = QEST post-última
+```
+
+**Edición 4 (blindaje, mismo bug latente en IN) — en `actualizar_DQ_IN`, busca:**
+
+```python
+    filtrada.columns = filtrada.iloc[0].to_list()
+```
+
+reemplaza por:
+
+```python
+    filtrada.columns = _cols_a_str(filtrada.iloc[0].to_list())
+```
+
+y en `actualizar_DQ_SIS` haz lo mismo con su línea `filtrada.columns = filtrada.iloc[0].to_list()   # fila 0 = encabezado detectado`.
+
+Test rápido de validación (los pesos promedio 2025 deben dejar de ser cero): después de construir `W`, imprime `W["HA_F1"].loc["2025"].mean().sort_values(ascending=False).head(5)` — BAP debería salir ~13%, y en `PF_F1` Minsur ~20%, como en la tabla Posicionamiento Promedio del PDF.
