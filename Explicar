@@ -1,0 +1,33 @@
+## Tipo de cambio (TC)
+
+El TC se lee de la hoja **BDTC** de `BDPrecios_VB_IN.xlsx` (bloque con campo que contiene "P", filas DOL/GBP/CAD) y arma `TC_F`, una serie diaria por moneda. Cumple dos funciones distintas:
+
+1. **AUM → USD**: `df_aum` (en soles, desde `DataValorCuota_IN.xlsm`) se divide entre `TC_F["DOL"]` para expresarlo en dólares.
+2. **Precios de instrumentos → PEN**: para cada moneda en Parametria (columna F) que no sea "NSOL", los precios de `precios_vp` (de `BDat_Act`) se multiplican por `TC_F[moneda]`. Así todo PxQ y todo weight queda en soles, moneda base del portafolio, sin importar en qué divisa cotice el instrumento.
+
+Los instrumentos "NSOL" (sin moneda declarada) simplemente no pasan por esta conversión — se asume que ya están en soles.
+
+## Cómo se construyen los retornos
+
+Hay dos fuentes de retorno diario por instrumento (columna SBS):
+- **BDat_Act** (`retornos_vp`): retorno ya calculado en la BD de precios.
+- **Hoja RVL/Bloomberg** (`precios_cdiv_var`): se deriva como `pct_change()` del índice `TOT_RETURN_INDEX_GROSS_DVDS` (retorno total con dividendos reinvertidos).
+
+Donde BDat tiene huecos, se parchan con el retorno diario de Bloomberg instrumento por instrumento (para que el acumulado no "salte" al reanudar). El flujo de ponderación es:
+
+- **PxQ** = precio (ya en PEN) × cantidad, por AFP-Fondo.
+- **Weight** = PxQ del instrumento / PxQ total de esa cartera ese día.
+- **Rezago (`_rezagar`)**: el weight del día T se aplica al retorno del día T+1 — así el retorno de hoy usa la composición de cartera de ayer (evita look-ahead bias).
+- **Retorno ponderado** = retorno del instrumento × weight rezagado, sumado entre instrumentos = retorno diario de la cartera.
+- **Acumulado (`_acumular`)** = producto compuesto de (1 + retorno diario), no suma simple.
+
+Esto se repite por AFP (IN/HA/PF/RI), por fondo (F1/F2/F3/Multifondo), por cartera (total/líquida/ilíquida), y también para EPU y ETFPERU como benchmarks.
+
+## Cómo se identifican las cantidades (Q)
+
+Dos fuentes según el tipo de AFP:
+
+- **Integra (IN)**: viene de `DQ_IN` (que a su vez se nutre de `QEST_BD.xlsm`, hoja `DQ_IN`), filtrando filas donde `Dato == "Q"` (cantidad, no precio) y columna `Fondo` contiene "IN-FONDOn".
+- **HA/PF/RI (sistema)**: vienen de `DQ_SIS`, donde la columna `Fondo_Fecha` trae el identificador compuesto AFP-Fondo y la fecha separados por "_" (ej. `HA-FONDO1_15/01/2026`). El código separa eso en `AFP-Fondo` y `Fecha_Dia`, parsea la fecha con formato explícito `dd/mm/aaaa` (para no voltear día/mes), y filtra por AFP-Fondo con `.str.contains(tag)`.
+
+Cada Q queda indexado por fecha, con una columna por SBS. Luego se reindexa a calendario de días hábiles y se arrastra la última cartera conocida (máximo 15 días hábiles) para que no queden huecos en PxQ/weights aunque falte un reporte puntual.
