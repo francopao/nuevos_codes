@@ -1,0 +1,28 @@
+Sí — para eso solo necesitas **2 toques**, sin tocar weights, TC ni el parche Bloomberg. La idea: capturar las fechas de BDat_Act **antes** de que el parche le cambie el índice, y usarlas como calendario final.
+
+**EDIT A — capturar las fechas de BDat_Act.** Ctrl+F:
+
+```python
+    retornos_vp = _bloque(campo.str.contains("Ret", case=False)
+                          & ~campo.str.contains("Ret1", case=False))
+```
+
+Justo **debajo** de esas dos líneas agrega:
+
+```python
+    # Calendario oficial = col B de BDat_Act (días hábiles reales, sin feriados).
+    fechas_bdat = retornos_vp.index[~retornos_vp.index.duplicated()].sort_values()
+    fechas_bdat = fechas_bdat[fechas_bdat <= fecha_corte]
+```
+
+**EDIT B — usar ese calendario en la exportación.** Ctrl+F: `calendario = pd.bdate_range(inicio_bd, fecha_corte)` y reemplaza esa línea por:
+
+```python
+    calendario = fechas_bdat
+```
+
+---
+
+Con eso la hoja BD sale con exactamente las fechas de BDat_Act. Todo lo demás (weights vía PxQ, retornos, TC, parche) queda intacto: las filas hábiles-de-más que arma `pd.bdate_range` río arriba simplemente se descartan al reindexar contra `calendario` al final.
+
+**Un solo ojo:** el `_rezagar` sigue corriéndose sobre el `bdate_range` interno (que incluye feriados), y esos feriados recién se botan al final. Si un feriado cae entre T y T+1, el peso puede quedar corrido una fila respecto al calendario BDat. Si quieres que el rezago también respete solo las fechas BDat, ahí sí hay que tocar el parche (te lo paso si lo necesitas).
