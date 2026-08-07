@@ -1,0 +1,95 @@
+Voy a verificar la estructura real de las hojas antes de darte los cambios, para que los índices de fila/columna calcen exacto.
+
+Verifiqué la estructura real: en `QEST_BD!DQ_IN` los `%Fondo` viven en las filas con `col B == "%Fondo"`, la **fila 11** trae los SBS desde la **col E** en adelante, y la fecha está en **col C**. En `DQ_RV` (HA/PF/RI) **solo hay cantidades, no hay `%Fondo`** — así que este método aplica únicamente a IN. Ojo con eso más abajo.
+
+Aquí van los 4 ajustes, cada uno con su ancla de Ctrl+F.
+
+---
+
+**EDIT 1 — Nueva función lectora de weights.** Ctrl+F: `# 4. LIMPIEZA HOJA RVL` y pega este bloque **justo encima** de esa línea (queda a nivel de módulo):
+
+```python
+def leer_weights_in(path: Path, sbs_validos: list[str]) -> dict[str, pd.DataFrame]:
+    """Weights YA CALCULADOS de QEST_BD!DQ_IN: filas con Dato='%Fondo',
+    SBS en la fila 11 (col E+), Fecha en col C. Sin precios, cantidades ni TC."""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    filas = list(wb["DQ_IN"].iter_rows(values_only=True))
+    wb.close()
+    cab = [str(v).strip() if v is not None else "" for v in filas[10]]  # fila 11 = SBS
+    disponibles = set(cab[4:])
+    faltan_w = [s for s in sbs_validos if s not in disponibles]
+    if faltan_w:
+        print(f"[AVISO] {len(faltan_w)} instrumento(s) de Parametria SIN weight en "
+              f"DQ_IN (van con peso 0): {faltan_w[:8]}{'…' if len(faltan_w) > 8 else ''}")
+    out = {}
+    for f in FONDOS:
+        reg = [r for r in filas if str(r[0]).strip() == f"IN-FONDO{f}"
+               and str(r[1]).strip() == "%Fondo"]
+        if not reg:
+            fallar(f"DQ_IN: sin filas '%Fondo' para IN-FONDO{f}.")
+        df = pd.DataFrame(reg)
+        df.columns = cab
+        df.index = pd.to_datetime([r[2] for r in reg], errors="coerce")
+        df = df.iloc[:, 4:]                       # de la col E = instrumentos
+        df = df.loc[df.index.notna()]
+        df = df.loc[:, ~df.index.duplicated(keep="last")] if False else df  # (no-op)
+        df = df[~df.index.duplicated(keep="last")]
+        keep = [c for c in sbs_validos if c in df.columns]
+        df = df.loc[:, keep]
+        df = df.loc[:, ~df.columns.duplicated()]
+        out[f"IN_F{f}"] = df.apply(pd.to_numeric, errors="coerce").fillna(0.0).sort_index()
+    return out
+```
+
+---
+
+**EDIT 2 — Universo de fechas = SOLO las de BDat_Act (col B), y matar el parche Bloomberg.** Ctrl+F: `cal_bdat = pd.bdate_range(retornos_vp.index.min(), fecha_corte)`. Selecciona **desde esa línea hasta** `precios_vp = precios_vp.reindex(cal_bdat).ffill().fillna(0.0)` (todo el bloque del parche) y **reemplázalo** por:
+
+```python
+    # Fuente única de fechas: la col B de BDat_Act (ya son días hábiles).
+    # No inventamos fechas: fuera de aquí no hay retorno posible.
+    fechas_bdat = retornos_vp.index[~retornos_vp.index.duplicated()].sort_values()
+    retornos_vp = retornos_vp.loc[fechas_bdat].fillna(0.0)
+    precios_vp  = precios_vp.reindex(fechas_bdat).ffill().fillna(0.0)
+
+    faltan_ret = [s for s in lista_isins if s not in retornos_vp.columns]
+    if faltan_ret:
+        print(f"[AVISO] {len(faltan_ret)} instrumento(s) de Parametria SIN retorno en "
+              f"BDat_Act (van con 0): {faltan_ret[:8]}{'…' if len(faltan_ret) > 8 else ''}")
+```
+
+---
+
+**EDIT 3 — Pisar el weight de IN con los `%Fondo`.** Ctrl+F: `# ------------------------- Weights sectoriales -------------------------` e inserta **justo antes** de esa línea:
+
+```python
+    # IN: reemplazamos el weight vía PxQ por el %Fondo listo de DQ_IN.
+    W_IN = leer_weights_in(QEST_PATH, lista_isins)
+    for f in FONDOS:
+        clave = f"IN_F{f}"
+        w = (W_IN[clave].reindex(fechas_bdat).ffill().fillna(0.0)
+             .reindex(columns=retornos_vp.columns).fillna(0.0))
+        W[clave] = _rezagar(w)
+        liq = [c for c in L_pres if c in w.columns]
+        ilq = [c for c in IL if c in w.columns]
+        W_L[clave]  = _rezagar(_weight(w[liq]))
+        W_IL[clave] = _rezagar(_weight(w[ilq]))
+```
+
+---
+
+**EDIT 4 — Que la exportación use esas mismas fechas.** Ctrl+F: `calendario = pd.bdate_range(inicio_bd, fecha_corte)` y reemplaza esa única línea por:
+
+```python
+    calendario = fechas_bdat
+```
+
+---
+
+**Decide tú (donde el método no alcanza, no lo tapo en silencio):**
+
+- **HA/PF/RI**: `DQ_RV` no tiene `%Fondo`, solo cantidades → siguen por la ruta vieja (PxQ). Si esas AFP importan para el output, ahí sí se necesita precio+TC; si no, ignóralas.
+- **IN_M (Multifondo)**: los `%Fondo` son por fondo; sumarlos no da el weight del MF sin AUM. Lo dejé como estaba (vía Q/PxQ). Para hacerlo bien: promedio de `W_F1/F2/F3` ponderado por `df_aum[IN_F1/F2/F3]` (el ratio cancela moneda, no requiere TC).
+- **Normalización**: el `%Fondo` es share **del fondo entero** (incluye caja/otros), no suma 1 dentro del universo RVL. Es lo que pediste; solo tenlo presente al leer el retorno ponderado.
+- **TC**: sigue vivo solo para `df_aum → USD` (output aparte). Si tampoco lo quieres ahí, dilo y te paso ese corte.
