@@ -1,0 +1,24 @@
+El weight se calcula en 4 pasos, todos dentro del bloque de "PxQ y Weights" (línea ~936). Te los explico con el orden exacto en que ocurren:
+
+**1) Cantidades a calendario completo**
+Cada `Q[clave]` (ej. `IN_F1`, `HA_F2`) se reindexa a un calendario de días hábiles y se arrastra la última cartera conocida hasta 15 días hábiles (`ffill(limit=15)`). Esto es solo para tapar huecos de reporte, no afecta el cálculo del weight en sí.
+
+**2) PxQ = valor de mercado por instrumento**
+`_pxq(precios_vp, q)` multiplica, celda por celda, precio (ya en PEN) × cantidad, alineando por fecha y por código SBS. El resultado: para cada AFP-Fondo y cada fecha, cuánto vale en soles cada posición individual.
+
+**3) Weight = participación dentro de esa cartera**
+`_weight(pxq)` suma el PxQ de todos los instrumentos de esa fila (`tot = pxq.sum(axis=1)`) — eso es el valor total de la cartera ese día — y divide cada instrumento entre ese total. Así, el weight de un instrumento es simplemente: *su valor de mercado / valor de mercado de toda la cartera*, día por día.
+
+Esto se hace tres veces por cada AFP-Fondo:
+- `W[clave]` → weight sobre el 100% del portafolio.
+- `W_L[clave]` → **mismo cálculo pero solo con las columnas de `LIQUIDOS`** (`pxq[L_pres]`). Ojo: el total contra el que divide aquí es la suma *solo* de los líquidos, no del portafolio completo. O sea, no es "% que representa lo líquido del total", sino "cómo se reparte el 100% dentro de lo líquido".
+- `W_IL[clave]` → igual, pero con `IL` (todo lo que no está en `LIQUIDOS`).
+
+**4) Rezago (T → T+1)**
+`_rezagar` toma el weight calculado con la cartera/precios de la fecha T y le cambia la etiqueta de fecha a T+1 (corre el índice una posición hacia adelante y bota la última fila). Es decir: el weight que ves fechado el 15 de enero en realidad se calculó con el cierre del 14. Esto es a propósito: cuando luego se multiplica `weight × retorno` para sacar el retorno ponderado, el retorno del 15 se pondera con la composición que tenía la cartera *al cierre del día anterior*, no con la composición del mismo día (que en la práctica no se conoce hasta el cierre).
+
+**Un caso aparte — weights sectoriales:**
+`sect_w` no recalcula PxQ; toma el `W[clave]` ya rezagado, filtra solo las columnas del sector, y **renormaliza** dividiendo entre la suma de esos weights filtrados (mismo truco que en L/IL): así el weight sectorial suma 100% dentro del sector, no representa "% que pesa el sector en el total".
+
+**Y los benchmarks (EPU/ETFPERU):**
+No usan Q real de cartera — el weight base viene de la hoja `Benchmark` del Monitor (vía `limpiar_benchmark`), se multiplica por `precios_sdiv` para armar un PxQ sintético, y pasa por el mismo `_weight` + `_rezagar` que todo lo demás.
