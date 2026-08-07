@@ -1,0 +1,153 @@
+Aplica estos 6 cambios en `1. Huella Code`. Cada uno indica la línea exacta a buscar con Ctrl+F.
+
+---
+
+**EDIT 1 — `CajaLoader`: réplica de `D18`**
+
+Busca esta línea (aparece una sola vez):
+```
+        return self.patrimonio_multifondos() / float(usd_rate) / 1_000_000
+```
+Pega **justo debajo** (deja la línea en blanco que ya existe después):
+```python
+    def caja_neta_multifondos_mm(self, usd_rate: float) -> float:
+        """Réplica de 'Cálculo Caja'!D18 (puente de caja de la Cobertura).
+        D15:D17 = (-CXP + CXC + CAJA) por IN-FONDO1/2/3 ; D18 = SUM/TC/1e6."""
+        if not usd_rate:
+            return 0.0
+        df = self.df
+        if not {"PORTAFOLIO", "CAJA", "CXC", "CXP"}.issubset(set(df.columns)):
+            return 0.0
+        port = df["PORTAFOLIO"].map(lambda p: (_to_string(p) or "").upper())
+        m = port.isin([p.upper() for p in self.PORTAFOLIOS_MULTIFONDO])
+        caja = pd.to_numeric(df.loc[m, "CAJA"], errors="coerce").fillna(0.0)
+        cxc = pd.to_numeric(df.loc[m, "CXC"], errors="coerce").fillna(0.0)
+        cxp = pd.to_numeric(df.loc[m, "CXP"], errors="coerce").fillna(0.0)
+        return float((caja + cxc - cxp).sum()) / float(usd_rate) / 1_000_000
+```
+
+---
+
+**EDIT 2 — `PresentacionBuilder.__init__`: 2 parámetros nuevos**
+
+Busca (aparece una sola vez):
+```
+                 aum_comp: dict | None = None):
+```
+Reemplázala por:
+```python
+                 aum_comp: dict | None = None,
+                 caja_neta_mm: float = 0.0,
+                 aum_total_mm: float | None = None):
+```
+
+Luego busca:
+```
+        self.aum_comp = aum_comp or {}
+```
+Pega **justo debajo**:
+```python
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+```
+
+---
+
+**EDIT 3 — `PresentacionBuilder`: método `cobertura`**
+
+Busca (aparece una sola vez):
+```
+    def build_all(self) -> dict[str, pd.DataFrame]:
+```
+Pega **justo encima** de esa línea:
+```python
+    def cobertura(self) -> pd.DataFrame:
+        """Réplica exacta de Final!G5:G7. AUM Cubierto = Inv MM$ de
+        Plus∈{Portafolio,ETF,SOV,Proxies} (sin filtrar Huella) + caja neta
+        multifondos (D18). Denominador = AUM total (K10)."""
+        buckets = ["Portafolio", "ETF", "SOV", "Proxies"]
+        m = self.df[COL["plus"]].isin(buckets)
+        aum_cubierto = float(pd.to_numeric(self.df.loc[m, COL["inv"]],
+                                           errors="coerce").fillna(0.0).sum())
+        aum_cubierto += float(self.caja_neta_mm)
+        aum_total = self.aum_total_mm
+        pct = (aum_cubierto / aum_total) if aum_total else 0.0
+        return pd.DataFrame([{
+            "Indicador": "TOTAL",
+            "Cobertura": pct,
+            "AUM Cubierto": aum_cubierto,
+            "AUM Total": float(aum_total or 0.0),
+        }])
+
+```
+
+---
+
+**EDIT 4 — `build_all`: registrar el objeto**
+
+Busca (aparece una sola vez):
+```
+            "AUM_por_Rank": self.aum_por_rank(),
+```
+Pega **justo encima**:
+```python
+            "Cobertura": self.cobertura(),
+```
+
+---
+
+**EDIT 5 — `_procesar_corte`: calcular y pasar**
+
+Busca (aparece una sola vez):
+```
+        aum_comp=(mkt.aum if mkt is not None else {}),
+```
+Reemplázala por:
+```python
+        aum_comp=(mkt.aum if mkt is not None else {}),
+        caja_neta_mm=ctx["caja"].caja_neta_multifondos_mm(ctx["tipo_cambio"].usd_rate()),
+        aum_total_mm=ctx.get("aum_multifondos_mm"),
+```
+
+---
+
+**EDIT 6 — Tarjeta KPI "Cobertura" en el JS**
+
+6a) Busca (aparece una sola vez):
+```
+  const items = [
+    ['Huella de Carbono', 'Huella (miles Tn)', 'miles Tn CO2'],
+```
+Pega **justo encima** de `  const items = [`:
+```javascript
+  const cob = (corte) => {
+    for(const r of HIST){
+      if(r.OBJETO==='Cobertura' && r.METRICA==='Cobertura' &&
+         String(r.FECHA_CORTE)===String(corte) && r.DIM_1==='TOTAL') return +r.VALOR||0;
+    }
+    return null;
+  };
+```
+
+6b) Busca (aparece una sola vez):
+```
+  document.getElementById('kpis').innerHTML = html;
+```
+Reemplázala por:
+```javascript
+  const ca = cob(cAct), cb = cob(cCmp);
+  let htmlCob = '';
+  if(ca!==null){
+    const dpp = (cb!==null) ? (ca - cb)*100 : null;
+    const colr = dpp===null ? '#5A6B7B' : (dpp>=0 ? '#1B8F5A' : '#C0392B');
+    const flc = dpp===null ? '' : (dpp>=0 ? '▲' : '▼');
+    htmlCob = '<div class="kpi"><span class="kpi-t">Cobertura</span>'+
+      '<span class="kpi-v">'+(ca*100).toFixed(1)+'%</span>'+
+      '<span class="kpi-u">del AUM total</span>'+
+      '<span class="kpi-d" style="color:'+colr+'">'+flc+' '+
+      (dpp===null?'s/d':((dpp>=0?'+':'')+dpp.toFixed(1)+' pp vs '+cCmp))+'</span></div>';
+  }
+  document.getElementById('kpis').innerHTML = html + htmlCob;
+```
+
+La tarjeta "Cobertura" saldrá a la derecha de "AUM", en `%`, con variación en puntos porcentuales vs el corte de comparación.
