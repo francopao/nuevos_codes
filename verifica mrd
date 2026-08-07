@@ -1,0 +1,16 @@
+El `self.aum_comp = aum_comp or {}` se perdió al hacer el EDIT 2 (lo reemplazaste en vez de insertar debajo). Corrige así:
+
+Busca en `PresentacionBuilder.__init__`:
+```
+        self.intensidades_comp = intensidades_comp or {}
+```
+Verifica que las **tres** líneas siguientes queden exactamente así (si falta la de `aum_comp`, agrégala):
+```python
+        self.intensidades_comp = intensidades_comp or {}
+        self.aum_comp = aum_comp or {}
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+        self.objetos: dict[str, pd.DataFrame] = {}
+```
+
+La clave es que `self.aum_comp = aum_comp or {}` **no debe haber desaparecido**; las dos líneas nuevas van **debajo** de ella, no en su lugar.
