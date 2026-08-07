@@ -1,0 +1,211 @@
+Voy a leer los dos scripts para entender la estructura exacta y darte instrucciones quirúrgicas correctas.Voy a leer las secciones intermedias, en particular `construir_base()`, la asignación de ISIN, y las lecturas de archivos externos.Aquí está el bloque clave: líneas 414-420 donde se asigna el ISIN y se registran los descartes. Veo el punto exacto de inserción. Sigo leyendo para entender qué sigue.Ahora veo cómo se propaga el ISIN por las ramas. Sigo leyendo `procesar_rama` y la generación de BD1.xlsx para ubicar dónde va la columna de trazabilidad.Ahora leo el script 4 para reutilizar únicamente su forma de **identificar y leer** el archivo de proxies (sin tocar su lógica ESG).Ahora leo la parte central de script 4 donde están las funciones que **leen/identifican** el archivo de proxies (`cargar_mapa_proxies`, `calcular_periodo_proxy`).Leí ambos scripts completos y tengo el mapa exacto del pipeline. Antes del código, **una decisión que necesito que verifiques** (pushback honesto, como prefieres), porque cambia si esto funciona o no:
+
+**El script 4 NO matchea por SBS, matchea por ISIN.** Su `cargar_mapa_proxies()` arma `ISIN_original (col B) → ISIN_proxy (col H)` de la hoja `'Reporte ASG Mensual'`. Eso sirve en el script 4 porque ahí el instrumento *sí tiene* ISIN (solo le falta cobertura MSCI). Pero en `BD_G&P` los instrumentos a rescatar **no tienen ISIN todavía** (por eso quedaron NaN), así que la única llave posible del cruce es **SBS**. Conclusión: el archivo de proxies **tiene que** exponer una columna con el SBS; el código de abajo la busca por nombre de encabezado (`'SBS'`) y, si no la encuentra, cae a una posición configurable. Al correr, imprime qué columnas usó para que lo confirmes de un vistazo. Si esa hoja no tuviera columna SBS, avísame y replanteamos (no habría forma de cruzar sin ISIN).
+
+Con eso claro, aquí van los **5 bloques**. Solo lo nuevo/modificado.
+
+---
+
+### Bloque 1 — Constantes de proxies
+
+**Ctrl+F** (buscar esta línea):
+```
+                r'\1.Data Histórica\Dataset\Para{suf}.xlsx')  # _S para soberanos (evita clobber en la misma corrida)
+```
+**Pegar INMEDIATAMENTE DESPUÉS:**
+```python
+
+# ------------------------------------------------ PROXIES (ISIN de respaldo) ----
+# Archivo externo de proxies (el MISMO que usa "4. Linkeado con MSCI con proxies").
+# SOLO se reutiliza su UBICACIÓN/lectura; NADA de su lógica de negocio ESG.
+R_PROXIES = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+             r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+             r'\2. Reportes\Reporte Mensual ASG'
+             r'\Lista Proxies - Huella y Comite mensual ASG.xlsx')
+R_PROXIES_HOJA = 'Reporte ASG Mensual'
+# Posiciones de columna (0-based, A=0,B=1,...) usadas SOLO como fallback si no se
+# detecta el encabezado por nombre. VERIFICAR contra el Excel real:
+#   - PROXY_COL_SBS : columna con el CÓDIGO SBS (llave del cruce en este script).
+#   - PROXY_COL_ISIN: columna con el ISIN proxy/benchmark (col. H en el script 4).
+PROXY_COL_SBS  = 0    # <-- VERIFICAR posición del SBS
+PROXY_COL_ISIN = 7    # col. H (misma que ISIN_proxy en el script 4)
+```
+
+---
+
+### Bloque 2 — Lector de proxies + reporte separado
+
+**Ctrl+F** (buscar este encabezado):
+```
+# ============================================================================
+#  xlwings (COM) — App única + espera activa + G&P + RIESGO
+# ============================================================================
+```
+**Pegar INMEDIATAMENTE ANTES de ese encabezado:**
+```python
+# ============================================================================
+#  PROXIES: ISIN de respaldo para SBS sin ISIN en VP  (SOLO identidad, sin ESG)
+# ============================================================================
+_PROXY_STATS = {}   # se llena una vez en construir_base(); se imprime aparte
+
+def _proxy_col(header, candidatos, fallback):
+    """Ubica una columna por encabezado (case-insensitive, admite parcial).
+    Si no la encuentra, usa la posición 'fallback'."""
+    up = [str(h).strip().upper() for h in header]
+    for cand in candidatos:                       # match exacto
+        if cand.upper() in up:
+            return up.index(cand.upper())
+    for cand in candidatos:                       # match parcial
+        c = cand.upper()
+        for i, h in enumerate(up):
+            if c in h:
+                return i
+    return fallback
+
+def cargar_mapa_proxies():
+    """dict {SBS -> ISIN_proxy} desde el archivo externo de proxies. Reutiliza
+    SOLO la ubicación/lectura (no la lógica ESG). Lectura cacheada vía leer_xlsx
+    (no se relee aunque el script corra ambas ramas en una sola ejecución)."""
+    try:
+        dfp = leer_xlsx(R_PROXIES, R_PROXIES_HOJA)
+    except ProcesoError as e:
+        print(f"[AVISO] No se pudo leer el archivo de proxies -> se OMITE el "
+              f"rescate por proxy (los SBS sin ISIN quedan sin ISIN).\n  {e}")
+        return {}
+    if dfp is None or dfp.shape[0] < 2:
+        print("[AVISO] La hoja de proxies está vacía -> se omite el rescate.")
+        return {}
+    header = list(dfp.iloc[0])
+    col_sbs  = _proxy_col(header, ['SBS'], PROXY_COL_SBS)
+    col_isin = _proxy_col(header, ['ISIN_proxy', 'ISIN proxy', 'Proxy'], PROXY_COL_ISIN)
+    ncols = dfp.shape[1]
+    if col_sbs >= ncols or col_isin >= ncols:
+        print(f"[AVISO] Columnas de proxy fuera de rango (hoja con {ncols} cols; "
+              f"SBS={col_sbs}, ISIN={col_isin}) -> se omite el rescate.")
+        return {}
+    print(f"[OK] Proxies: SBS=col {col_sbs}, ISIN_proxy=col {col_isin} "
+          f"en '{R_PROXIES_HOJA}'. (verifica que sean las correctas)")
+    dm = dfp.iloc[1:, [col_sbs, col_isin]].copy()
+    dm.columns = ['SBS', 'ISIN_proxy']
+    dm['SBS'] = dm['SBS'].astype(str).str.strip()
+    dm['ISIN_proxy'] = dm['ISIN_proxy'].astype(str).str.strip().str.upper()
+    # No forzar ni inventar: descartar filas sin llave o sin proxy real.
+    dm = dm[(dm['SBS'] != '') & (dm['SBS'].str.lower() != 'none') &
+            (~dm['ISIN_proxy'].str.lower().isin(['', 'none', 'nan']))]
+    dm = dm.drop_duplicates(subset=['SBS'])
+    return dm.set_index('SBS')['ISIN_proxy'].to_dict()
+
+def imprimir_proxies():
+    """Reporte SEPARADO del de descartes: reales (VP) vs resueltos por proxy vs
+    sin ISIN tras intentarlo, más colisiones de ISIN proxy compartido."""
+    if not _PROXY_STATS:
+        return
+    s = _PROXY_STATS
+    print("\n--- ISIN: rescate por proxy (VP.xlsm -> proxies) ---")
+    print(f"  Reales (VP)            : {s.get('reales', 0)}")
+    print(f"  Resueltos por proxy    : {s.get('proxy', 0)}")
+    print(f"  Sin ISIN tras intentar : {s.get('sin_isin', 0)}")
+    col = s.get('colisiones') or {}
+    if col:
+        print(f"  ISIN proxy compartidos por >1 SBS distinto: {len(col)} caso(s)")
+        print("    (afecta el cruce EPU/ETF SOLO si además coinciden en "
+              "Fondo/AFP/AssetClass/Strategy)")
+        for isin_p, n in col.items():
+            print(f"      {isin_p}: {n} SBS")
+
+```
+
+---
+
+### Bloque 3 — Asignación del proxy dentro de `construir_base()`
+
+Esto va **después** del bloque de descartes existente (que se deja **intacto**), justo antes de `b.df = dfg`.
+
+**Ctrl+F** (buscar esta línea exacta):
+```
+    b.df = dfg
+```
+**Pegar INMEDIATAMENTE ANTES de esa línea:**
+```python
+    # ---- Rescate por PROXY: completar ISIN faltantes (identidad, NO ESG) -----
+    # Reglas: solo se completan ISIN vacíos; NUNCA se sobrescribe un ISIN de VP;
+    # no se toca SBS ni Nombre; si no hay proxy, el ISIN queda NaN (no se inventa).
+    dfg['ISIN_Origen'] = pd.Series(np.nan, index=dfg.index, dtype=object)
+    dfg.loc[dfg['ISIN'].notna(), 'ISIN_Origen'] = 'VP'
+    _mask_sin = dfg['ISIN'].isna()
+    _n_reales = int((~_mask_sin).sum())
+    _mapa_proxy = cargar_mapa_proxies()
+    if _mapa_proxy and _mask_sin.any():
+        _isin_proxy = (dfg.loc[_mask_sin, 'SBS']
+                          .astype(str).str.strip().map(_mapa_proxy))
+        dfg.loc[_mask_sin, 'ISIN'] = _isin_proxy
+        _recien = _mask_sin & dfg['ISIN'].notna()
+        dfg.loc[_recien, 'ISIN_Origen'] = 'PROXY'
+    _n_proxy = int((dfg['ISIN_Origen'] == 'PROXY').sum())
+    _n_sin   = int(dfg['ISIN'].isna().sum())
+    # Colisiones: mismo ISIN proxy asignado a >1 SBS distinto (visibilidad EPU/ETF)
+    _dfp_asig = dfg[dfg['ISIN_Origen'] == 'PROXY']
+    _col = _dfp_asig.groupby('ISIN')['SBS'].nunique()
+    _col = _col[_col > 1].sort_values(ascending=False).to_dict()
+    _PROXY_STATS.clear()
+    _PROXY_STATS.update({'reales': _n_reales, 'proxy': _n_proxy,
+                         'sin_isin': _n_sin, 'colisiones': _col})
+    # Diccionario de trazabilidad SBS -> origen ('VP'/'PROXY') para etiquetar salidas.
+    b.isin_origen = (dfg.dropna(subset=['ISIN_Origen'])
+                        .drop_duplicates(subset=['SBS'])
+                        .set_index('SBS')['ISIN_Origen'].to_dict())
+    # La columna auxiliar NO se arrastra por el pipeline (se re-deriva por SBS en
+    # los outputs); se elimina para no alterar columnas intermedias existentes.
+    dfg = dfg.drop(columns=['ISIN_Origen'])
+```
+
+---
+
+### Bloque 4 — Columna de trazabilidad en las salidas (siempre al final)
+
+**4a. BD1.xlsx** — **Ctrl+F**:
+```
+    # ---- escribir BD1 (deliverable) y re-leer (round-trip preservado) -------
+```
+**Pegar INMEDIATAMENTE ANTES de esa línea de comentario:**
+```python
+    # Trazabilidad de origen del ISIN (VP real vs PROXY) como ÚLTIMA columna.
+    # No altera el orden ni los nombres de las columnas existentes de BD1.
+    df_p_m['ISIN_Origen'] = df_p_m['SBS'].map(base.isin_origen).fillna('N/D')
+```
+
+**4b. Portafolio.xlsx** — **Ctrl+F** (esta línea es única):
+```
+    dic_p1 = dic_p1[column_order]
+```
+**Pegar INMEDIATAMENTE DESPUÉS de esa línea:**
+```python
+    # Trazabilidad de origen del ISIN como ÚLTIMA columna (tras el reorder, para
+    # no romper column_order). Se re-deriva por SBS (llave estable, nunca tocada).
+    dic_p1['ISIN_Origen'] = dic_p1['SBS'].map(base.isin_origen).fillna('N/D')
+```
+
+---
+
+### Bloque 5 — Imprimir el reporte de proxies una sola vez
+
+**Ctrl+F** (línea única):
+```
+        base = construir_base(fecha_dt)
+```
+**Pegar INMEDIATAMENTE DESPUÉS de esa línea:**
+```python
+        imprimir_proxies()   # reporte de proxies, separado del de descartes
+```
+
+---
+
+### Tres notas importantes
+
+**Reconciliación con tus descartes actuales.** No toqué el bloque `"Mapeo ISIN (VP.xlsm)"`, así que sigue registrando *todos* los SBS sin ISIN en VP (comportamiento idéntico). El nuevo reporte de proxies te dice, de esos, cuántos rescataste. Es decir: `descartes "Mapeo ISIN" == reales-faltantes`, y de ahí `Resueltos por proxy + Sin ISIN tras intentar` cuadra. Son reportes separados a propósito; no se mezclan.
+
+**BD1 ahora lleva una columna extra al final (`ISIN_Origen`).** El script 4 (`traer_BD`) lee BD1 por nombre de columna, así que una columna nueva al final no lo rompe. Solo tenlo presente porque BD1 es consumido aguas abajo.
+
+**Valor `'N/D'` en la trazabilidad.** Aparece en filas cuyo SBS no pasó por el mapeo VP/proxy (p. ej. los sintéticos EPU/ETF en Portafolio, que traen ISIN propio del archivo de comparables) o que quedaron sin ISIN. Es honesto: no afirma VP ni PROXY donde no corresponde.
+
+¿Confirmas la columna SBS del archivo de proxies (mensaje `[OK] Proxies: SBS=col X...` en consola) o prefieres que fije `PROXY_COL_SBS` a una posición concreta?
