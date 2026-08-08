@@ -1,0 +1,161 @@
+Voy a revisar la estructura exacta de las funciones que toco, para que las instrucciones sean quirúrgicas.Ahora reviso `imprimir_descartes` y `main` para el archivo unificado de descartes.Ya tengo todo el mapa. Cinco cambios. Los dos de negocio, el print de nombres, y el archivo unificado de descartes limpio.
+
+---
+
+### Cambio 1 — Alternativos (53, 51) viven en BU
+
+Su freno real es el filtro de `AC Dir` (traen `ALT`, que no estaba permitido). Se agrega `ALT` a la lista permitida.
+
+**Ctrl+F:**
+```python
+    d = d.loc[d['AC Dir'].isin(["PE", "PEC", "EMC", "INTER"])]
+```
+**Reemplazar por:**
+```python
+    d = d.loc[d['AC Dir'].isin(["PE", "PEC", "EMC", "INTER", "ALT"])]
+```
+
+---
+
+### Cambio 2 — 64, 04, 56, 77 como soberanos
+
+**Ctrl+F:**
+```python
+    return d.loc[d['SBS2'].isin(['08', '01', '43'])].sort_index(ignore_index=True)
+```
+**Reemplazar por:**
+```python
+    return d.loc[d['SBS2'].isin(['08', '01', '43', '64', '04', '56', '77'])].sort_index(ignore_index=True)
+```
+
+---
+
+### Cambio 3 — Imprimir nombres de 04/56/77 (antes de que se clasifiquen)
+
+Como el Cambio 2 los saca de "sin clasificar", el print debe leer de `df_temporal` (universo completo), no del set sin clasificar.
+
+**Ctrl+F:**
+```python
+    _no_clasificados = df_temporal.loc[~df_temporal.index.isin(_idx_validos)]
+```
+**Pegar INMEDIATAMENTE ANTES:**
+```python
+    for _c in ['04', '56', '77']:
+        _chk = df_temporal[df_temporal['SBS2'] == _c]
+        if len(_chk):
+            print(f"\n[VERIFICAR SBS2={_c}] {len(_chk)} instrumento(s):")
+            print(_chk[['SBS', 'Nombre']].drop_duplicates().to_string(index=False))
+```
+
+---
+
+### Cambio 4 — Un solo archivo de descartes, dos hojas, solo lo descartado
+
+Primero, que `imprimir_descartes` **no escriba** su propio Excel por rama (solo consola) y que **devuelva** el detalle limpio para consolidarlo después.
+
+**Ctrl+F:**
+```python
+    df_desc = pd.DataFrame(_DESCARTES)
+
+    # --- Guardar el detalle completo en Excel (no en consola) ---
+    ruta = ruta_salida + f'Descartes {etiqueta}.xlsx'
+    try:
+        df_desc.to_excel(ruta, index=False)
+        print(f"[DESCARTES] Detalle completo ({len(df_desc)} filas) -> {ruta}")
+    except Exception as e:
+        print(f"[AVISO] No se pudo guardar el Excel de descartes: {e}")
+```
+**Reemplazar por:**
+```python
+    df_desc = pd.DataFrame(_DESCARTES)
+    # (Ya NO se escribe un Excel por rama; se consolida en un único archivo de
+    #  2 hojas al final de main(). Aquí solo se deja el resumen en consola.)
+```
+
+Segundo, que devuelva el dataframe. **Ctrl+F** (dentro de la misma función, la línea del top 15):
+```python
+    top = df_desc.groupby('SBS')['Valor_num'].sum().sort_values(ascending=False).head(15)
+    print(top.to_string())
+```
+**Reemplazar por:**
+```python
+    top = df_desc.groupby('SBS')['Valor_num'].sum().sort_values(ascending=False).head(15)
+    print(top.to_string())
+    return df_desc[['SBS', 'ISIN', 'Nombre', 'Etapa', 'Motivo']].copy()
+```
+
+> Nota: `_DESCARTES` no incluye la columna `Nombre` hoy. El siguiente sub-cambio la añade en el registrador, para que el archivo tenga nombre cuando exista.
+
+**Ctrl+F:**
+```python
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Etapa': etapa,
+                            'Motivo': motivo, 'Valor': valor})
+```
+**Reemplazar por:**
+```python
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        nombre = fila.get('Nombre', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Nombre': nombre,
+                            'Etapa': etapa, 'Motivo': motivo, 'Valor': valor})
+```
+
+---
+
+### Cambio 5 — Consolidar y escribir el archivo único en `main()`
+
+`procesar_rama` ya llama a `imprimir_descartes` internamente pero no usa su retorno. Hay que capturarlo. **Ctrl+F:**
+```python
+    print(f"\n[DESCARTES] Resumen para rama {etiqueta}:")
+    imprimir_descartes(etiqueta, D_INTERMEDIO)
+    _DESCARTES.clear()
+    return {'BD1': ruta_bd1, 'Portafolio': ruta_port}
+```
+**Reemplazar por:**
+```python
+    print(f"\n[DESCARTES] Resumen para rama {etiqueta}:")
+    _desc_rama = imprimir_descartes(etiqueta, D_INTERMEDIO)
+    _DESCARTES.clear()
+    return {'BD1': ruta_bd1, 'Portafolio': ruta_port, 'descartes': _desc_rama}
+```
+
+Y en `main()`, escribir el Excel de dos hojas. **Ctrl+F:**
+```python
+        res_n = procesar_rama(base, soberanos=False)
+        res_s = procesar_rama(base, soberanos=True)
+        print("\n================  LISTO  ================")
+```
+**Reemplazar por:**
+```python
+        res_n = procesar_rama(base, soberanos=False)
+        res_s = procesar_rama(base, soberanos=True)
+
+        # --- Un solo archivo de descartes: hoja NORMAL + hoja SOBERANOS -------
+        ruta_desc = D_INTERMEDIO + 'Descartes.xlsx'
+        try:
+            with pd.ExcelWriter(ruta_desc, engine='openpyxl') as _w:
+                for _tag, _res in [('NORMAL', res_n), ('SOBERANOS', res_s)]:
+                    _d = _res.get('descartes')
+                    if _d is None or not len(_d):
+                        _d = pd.DataFrame(columns=['SBS', 'ISIN', 'Nombre', 'Etapa', 'Motivo'])
+                    _d.to_excel(_w, sheet_name=_tag, index=False)
+            print(f"\n[DESCARTES] Archivo único (2 hojas) -> {ruta_desc}")
+        except Exception as e:
+            print(f"[AVISO] No se pudo escribir el archivo único de descartes: {e}")
+
+        print("\n================  LISTO  ================")
+```
+
+---
+
+Qué obtienes tras estos cambios:
+
+- **53 y 51** entran a BU (vía `AC Dir='ALT'`). En la próxima corrida, el bloque `[SIN CLASIFICAR]` debería dejar de listarlos; si alguno queda, será por la regla de Categoría "borrar" (decisión aparte).
+- **64/04/56/77** entran a SOB; en consola verás `[VERIFICAR SBS2=04/56/77]` con SBS + Nombre.
+- **`Descartes.xlsx`** con hojas `NORMAL` y `SOBERANOS`, solo instrumentos descartados, columnas `SBS, ISIN, Nombre, Etapa, Motivo`. Ya no se generan `Descartes NORMAL.xlsx` ni `Descartes SOBERANOS.xlsx` por separado.
+
+Una cosa a tener en cuenta: ese archivo único incluye **todas** las etapas de descarte, y las de `df_result` siguen siendo ruido estructural (peso ≤ 0 por fondo, un mismo SBS repetido). Si quieres el archivo enfocado solo en pérdidas reales (Asset Class + Clasificación), dímelo y filtro por `Etapa` antes de escribir — pero eso ya lo tienes limpio y con Weight en los `Dejados de lado {rama}.xlsx`, así que quizás prefieras dejar este como el registro completo de auditoría.
