@@ -1,0 +1,61 @@
+Dos cambios independientes. Ambos van dentro de `procesar_rama()`, y ninguno toca el orden de columnas ni el resto del pipeline.
+
+### 1) Asset Class: agregar "Alternativos"
+
+**Ctrl+F:**
+```python
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable'])]
+    _registrar_descarte(df_antes, df, 'operaciones() - Asset Class',
+                        'Asset Class distinto de Renta Fija/Renta Variable')
+```
+**Reemplazar por:**
+```python
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable', 'Alternativos'])]
+    _registrar_descarte(df_antes, df, 'operaciones() - Asset Class',
+                        'Asset Class distinto de Renta Fija/Renta Variable/Alternativos')
+```
+
+---
+
+### 2) Diagnóstico de instrumentos que no calzan en BU/TD/SOB
+
+**Ctrl+F** (esta línea ya existe, es única):
+```python
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+```
+**Pegar INMEDIATAMENTE DESPUÉS:**
+```python
+    # ---- Diagnóstico: instrumentos que no calzan en BU, TD ni SOB -----------
+    # Identidad CORRECTA (no se resetea índice), a diferencia de _DESCARTES que
+    # hereda el bug de identidad ya identificado. SBS/Nombre/Asset Class aquí sí
+    # corresponden realmente a la fila que quedó fuera.
+    _no_clasificados = df_temporal.loc[~df_temporal.index.isin(_idx_validos)]
+    if len(_no_clasificados):
+        print(f"\n[SIN CLASIFICAR] {len(_no_clasificados)} instrumento(s) no calzan en BU/TD/SOB ({etiqueta}):")
+        _resumen_sbs2 = (_no_clasificados.groupby('SBS2')
+                          .agg(N=('SBS', 'size'),
+                               AC_Dir=('AC Dir', lambda s: sorted(s.dropna().unique().tolist())),
+                               Categoria=('Categoría', lambda s: sorted(s.dropna().unique().tolist())))
+                          .sort_values('N', ascending=False))
+        print(_resumen_sbs2.to_string())
+        print("\n[SIN CLASIFICAR] Detalle (SBS, SBS2, Asset Class, Nombre):")
+        print(_no_clasificados[['SBS', 'SBS2', 'Asset Class', 'Nombre']].to_string(index=False))
+    else:
+        print(f"\n[SIN CLASIFICAR] Ningún instrumento quedó fuera de BU/TD/SOB ({etiqueta}).")
+```
+
+---
+
+### Por qué esto sí es confiable (a diferencia del Excel de descartes)
+
+`df_temporal` y `_idx_validos` comparten el índice original sin ningún `reset_index` de por medio, así que `~df_temporal.index.isin(_idx_validos)` apunta exactamente a las filas correctas — no hereda el bug de identidad que vimos antes. Por eso el SBS, Asset Class y Nombre que imprime son los reales, en el estado en que estaban justo antes de la clasificación (el "Nombre" de G&P, no el nombre re-etiquetado por Parametría que viene después).
+
+### Qué te va a decir el print
+
+- El resumen por SBS2 te muestra **qué códigos concretos** están cayendo fuera de las tres listas de exclusión/inclusión (BU: `52,54,50,48,PR,08,01,(43),FT,PT` / TD: `52,54,50,48,49` / SOB: `08,01,43`), junto con qué valores de `AC Dir` y `Categoría` traen esas filas — eso te da la razón real sin que tengas que adivinarla (por ejemplo, si ves SBS2 que sí está en el rango esperado pero con `AC Dir` fuera de `PE/PEC/EMC/INTER`, sabes que no es un tema de SBS2 sino de esa otra columna).
+- El detalle te lista instrumento por instrumento para que puedas ir directo a revisar los que importan.
+
+Corre así primero antes de decidir si quieres que la lista de exclusión de BU se amplíe/reduzca — con este print vas a ver de inmediato si lo que sobra es un puñado de SBS2 recurrentes (fácil de resolver ajustando la lista) o instrumentos dispersos y variados (más probablemente datos sucios que requieren revisión caso a caso).
