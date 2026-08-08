@@ -1,0 +1,44 @@
+No aplicaste el chequeo de nombres que dejamos pendiente para el 64. Lo saco directo del Excel que adjuntaste.## Dos cosas confirmadas y una pendiente
+
+**1) El fix de la Clasificación funcionó exactamente como se predijo.** Compara: NORMAL sigue en 569 "sin clasificar" (correcto, ahí no corre SOB), SOBERANOS bajó de 742 a **221** — y el detalle por SBS2 lo prueba: en SOBERANOS ya no aparecen 08(113), 01(53) ni 43(9), porque ahora sí los captura `SOB()`. El 64 (56) sigue fuera en ambas ramas, tal como se esperaba, porque todavía no lo agregamos a ninguna lista — sigue pendiente de tu confirmación por nombre.
+
+**2) El archivo `Descartes_SOBERANOS.xlsx` que adjuntaste todavía tiene el bug de identidad — no confíes en su columna SBS para la etapa de Clasificación.** Lo comprobé directamente en tu Excel: la etapa "Clasificación BU/TD/SOB" ahí muestra SBS2 = `52, 34, 30, 33, 40, 31, 39, 32, 45...` — códigos que **no tiene sentido que fallen la clasificación** (30/34/33/40/31/39/32/45 ni siquiera están en ninguna lista de exclusión de BU). Eso confirma que **solo arreglamos el diagnóstico** (`_idx_validos`, que alimenta la consola y "Dejados de lado") pero **nunca se aplicó el fix correspondiente dentro de `_registrar_descarte`**, que es la función que escribe esta columna al Excel. Por eso el conteo (221) ya es correcto, pero el detalle SBS de esa etapa específica en el Excel de Descartes sigue siendo ruido. Fix pendiente:
+
+**Ctrl+F:**
+```python
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    df_antes = df_antes.reset_index(drop=True)
+    df_despues = df_despues.reset_index(drop=True) if len(df_despues) else df_despues
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.iloc[i]
+```
+**Reemplazar por:**
+```python
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    # NO resetear índices: df_despues es subconjunto de df_antes con las mismas
+    # etiquetas de índice. El reset previo hacía que .difference() marcara la
+    # COLA del dataframe en vez de las filas realmente eliminadas (confirmado
+    # con SBS2=30/33/34/40 apareciendo como "sin clasificar" sin sentido).
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.loc[i]
+```
+Con esto, la próxima corrida deja `Descartes_SOBERANOS.xlsx` / `Descartes_NORMAL.xlsx` confiables también para las demás etapas (Asset Class, `df_result`, EPU/ETF), no solo para Clasificación.
+
+## Sobre el 64: sigue sin nombre en lo que me pasaste
+
+El Excel de Descartes no trae columna `Nombre`, y el print de consola solo mostró `head(30)` — que en ambas ramas cayó todo en SBS2='53', nunca llegó a mostrarte los del 64. El chequeo que te dejé la vez pasada (`[VERIFICAR SBS2=64]`) no aparece en tu log — no llegó a aplicarse. Vuelve a ubicarlo:
+
+**Ctrl+F:**
+```python
+        print("\n[SIN CLASIFICAR] Detalle (SBS, SBS2, Asset Class, Nombre):")
+```
+**Pegar INMEDIATAMENTE ANTES** (si ya lo intentaste antes y no compiló, revisa que quedara exactamente así, con la misma indentación de 8 espacios que la línea de abajo):
+```python
+        _chk64 = _no_clasificados[_no_clasificados['SBS2'] == '64']
+        if len(_chk64):
+            print(f"\n[VERIFICAR SBS2=64] {len(_chk64)} instrumento(s) — nombres únicos:")
+            print(sorted(_chk64['Nombre'].dropna().unique().tolist()))
+```
+Corre de nuevo y pásame esa línea `[VERIFICAR SBS2=64] ...` — con eso cerramos la decisión del 64 (y de paso, ya que estás ahí, podrías correr el mismo chequeo para 04/56/77, que en tu breakdown de SOBERANOS comparten el mismo perfil `AC Dir=[PEG]`/`Categoría=PEN_NOM_GOB_*` que 64 — podrían ser la misma familia de instrumentos gubernamentales quedando fuera por el mismo motivo).
