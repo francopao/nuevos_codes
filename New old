@@ -1,0 +1,134 @@
+Dos inserciones. Ninguna toca el pipeline de cálculo.
+
+### Inserción 1 — helpers + función de reporte (se añade una sola vez)
+
+**Ctrl+F** (línea única):
+```python
+def procesar_rama(base, soberanos):
+```
+**Pegar INMEDIATAMENTE ANTES de esa línea:**
+```python
+# ============================================================================
+#  REPORTE "DEJADOS DE LADO"  (solo pérdidas reales: Asset Class + Clasificación)
+# ============================================================================
+_PARES_W = [('HAF1','INF1'),('RIF1','INF1'),('PFF1','INF1'),('SIF1','INF1'),
+            ('HAF2','INF2'),('RIF2','INF2'),('PFF2','INF2'),('SIF2','INF2'),
+            ('HAF3','INF3'),('RIF3','INF3'),('PFF3','INF3'),('SIF3','INF3')]
+_AFP_COLS = {'Integra':['INF1','INF2','INF3'], 'Habitat':['HAF1','HAF2','HAF3'],
+             'Profuturo':['PFF1','PFF2','PFF3'], 'Prima':['RIF1','RIF2','RIF3']}
+_SIS_COLS = {'Sistema (Ex_Integra)':['SIF1','SIF2','SIF3']}
+_ALLOWED_AC = ['Renta Fija', 'Renta Variable', 'Alternativos']
+
+def _weights_full_universe(base_df):
+    w = base_df.copy(deep=True)
+    for a, b in _PARES_W:
+        w[a] = w[b] - w[a + 'GAP']
+    return w
+
+def _melt_pesos(df, afp_map, id_cols):
+    filas = []
+    for afp, cols in afp_map.items():
+        for c in cols:
+            sub = df[id_cols + [c]].copy().rename(columns={c: 'Weight'})
+            sub['AFP'] = afp
+            sub['Fondo'] = 'F' + str(c)[-1]
+            filas.append(sub)
+    return pd.concat(filas, ignore_index=True) if filas else pd.DataFrame()
+
+def reporte_dejados_de_lado(base, df_temporal, df_BU, df_TD, df_SOB, soberanos, etiqueta, ruta):
+    # --- Confirmación del bug del 52: índice vs SBS -------------------------
+    valid_idx = set(df_BU.index) | set(df_TD.index)
+    sbs_validos = set(df_BU['SBS']) | set(df_TD['SBS'])
+    if soberanos and df_SOB is not None:
+        valid_idx |= set(df_SOB.index)
+        sbs_validos |= set(df_SOB['SBS'])
+    no_clasif_idx = df_temporal[~df_temporal.index.isin(valid_idx)]
+    no_clasif = df_temporal[~df_temporal['SBS'].isin(sbs_validos)].copy()
+    rescatados = df_temporal[(~df_temporal.index.isin(valid_idx)) &
+                             (df_temporal['SBS'].isin(sbs_validos))]
+    print(f"\n[52-CHECK {etiqueta}] sin clasificar por ÍNDICE={len(no_clasif_idx)} | "
+          f"por SBS={len(no_clasif)} | rescatados por SBS={len(rescatados)}")
+    if len(rescatados):
+        print("  Rescatados (estaban en TD/SOB, el índice reseteado los marcaba fuera):",
+              rescatados['SBS2'].value_counts().to_dict())
+
+    # --- Conjuntos de pérdida REAL -----------------------------------------
+    full_w = _weights_full_universe(base.df)
+    dropped_ac = full_w[~full_w['Asset Class'].isin(_ALLOWED_AC)].copy()
+    dropped_ac['Motivo'] = 'Asset Class no admitido: ' + dropped_ac['Asset Class'].astype(str)
+    no_clasif['Motivo'] = ('SBS2 no clasifica (SBS2=' + no_clasif['SBS2'].astype(str)
+                           + ', AC Dir=' + no_clasif['AC Dir'].astype(str) + ')')
+
+    id_cols = ['SBS', 'SBS2', 'Nombre', 'Asset Class', 'Motivo']
+    mapa_det = {**_AFP_COLS, **_SIS_COLS}
+    detalle = pd.concat([_melt_pesos(dropped_ac, mapa_det, id_cols),
+                         _melt_pesos(no_clasif,  mapa_det, id_cols)], ignore_index=True)
+    detalle = detalle[detalle['Weight'].notna() & (detalle['Weight'] != 0)]
+    detalle = detalle[['SBS','SBS2','Nombre','Asset Class','Motivo','AFP','Fondo','Weight']]
+
+    perdidos = set(dropped_ac['SBS']) | set(no_clasif['SBS'])
+    sin_peso = perdidos - set(detalle['SBS'])
+
+    # --- Resumen % por AFP×Fondo (4 AFP reales) + Sistema aparte -----------
+    filas_res = []
+    real = detalle[detalle['AFP'].isin(_AFP_COLS.keys())]
+    for afp, cols in _AFP_COLS.items():
+        for c in cols:
+            fondo = 'F' + c[-1]
+            den = full_w[c].sum()
+            excl = real[(real['AFP']==afp) & (real['Fondo']==fondo)]['Weight'].sum()
+            filas_res.append({'Ambito':'AFP','AFP':afp,'Fondo':fondo,
+                              'Weight_excluido':excl,'Weight_universo':den,
+                              'Pct_excluido': (excl/den if den else float('nan'))})
+    sis = detalle[detalle['AFP'].isin(_SIS_COLS.keys())]
+    for c in _SIS_COLS['Sistema (Ex_Integra)']:
+        fondo = 'F' + c[-1]
+        den = full_w[c].sum()
+        excl = sis[sis['Fondo']==fondo]['Weight'].sum()
+        filas_res.append({'Ambito':'Sistema','AFP':'Ex_Integra','Fondo':fondo,
+                          'Weight_excluido':excl,'Weight_universo':den,
+                          'Pct_excluido': (excl/den if den else float('nan'))})
+    resumen_df = pd.DataFrame(filas_res)
+
+    print(f"[DEJADOS DE LADO {etiqueta}] instrumentos únicos perdidos={len(perdidos)} "
+          f"(con peso={len(perdidos)-len(sin_peso)}, sin peso={len(sin_peso)})")
+    print(resumen_df[resumen_df['Ambito']=='AFP']
+          .pivot(index='AFP', columns='Fondo', values='Pct_excluido').to_string())
+
+    arch = ruta + f'Dejados de lado {etiqueta}.xlsx'
+    try:
+        with pd.ExcelWriter(arch, engine='openpyxl') as w:
+            detalle.to_excel(w, sheet_name='Detalle', index=False)
+            resumen_df.to_excel(w, sheet_name='Resumen', index=False)
+        print(f"[DEJADOS DE LADO {etiqueta}] -> {arch}")
+    except Exception as e:
+        print(f"[AVISO] No se pudo escribir el reporte 'dejados de lado': {e}")
+
+
+```
+
+### Inserción 2 — llamada dentro de `procesar_rama()`
+
+**Ctrl+F** (línea única):
+```python
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+```
+**Pegar INMEDIATAMENTE DESPUÉS:**
+```python
+    _df_sob = df_SOB if soberanos else None
+    try:
+        reporte_dejados_de_lado(base, df_temporal, df_BU, df_TD, _df_sob,
+                                soberanos, etiqueta, D_INTERMEDIO)
+    except Exception as e:
+        print(f"[AVISO] reporte_dejados_de_lado falló (no crítico): {e}")
+```
+
+---
+
+Qué obtienes al correr:
+
+- `[52-CHECK ...]`: si `rescatados > 0` con `52` (y `01/08` en soberanos), queda **probado** que el 742 era artefacto del índice reseteado — y como el reporte mide por SBS, ya no los cuenta como perdidos.
+- `Dejados de lado {rama}.xlsx` con hoja **Detalle** (largo: SBS, SBS2, Nombre crudo de G&P, Asset Class, Motivo, AFP, Fondo, Weight — solo peso ≠ 0) y hoja **Resumen** (% excluido por AFP×Fondo sobre el universo; Sistema/Ex_Integra en filas aparte, nunca sumado a las 4 AFP).
+- En consola, el pivote de % excluido por AFP×Fondo para lectura rápida.
+
+Si `Pct_excluido` te sale con magnitudes raras, revisa que `Weight_universo` por columna dé ≈1; si no, los pesos de G&P no vienen normalizados y el % hay que leerlo como fracción del total crudo, no de 100%.
