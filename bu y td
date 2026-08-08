@@ -1,0 +1,131 @@
+Voy a revisar el output y los dos Excel para confirmar los patrones antes de proponer cambios.Confirmado todo. Los datos me dan una imagen muy clara, y hay un matiz importante sobre el 08/01 que quiero señalarte antes de los cambios.
+
+## Lo que confirman los archivos
+
+**FIBPRIME (SBS2=37)** aparece en ambas ramas con `AC Dir=PE`, Renta Variable — un vehículo inmobiliario que efectivamente debería ir a BU. Su freno es que `37` no está en ninguna lista, pero pasa todos los demás filtros de BU. Se resuelve.
+
+**El 08 y 01 en "Dejados de lado NORMAL":** ojo con esto — no es lo mismo que lo que arreglamos antes. En NORMAL, el 08/01 caen fuera **por diseño** (la rama normal no cubre soberanos, `SOB()` no corre). Eso es correcto y esperado; no es un instrumento "perdido por error", es que su rama es la de soberanos. Por eso, una vez que filtremos a solo RF/RV en el reporte, verás 08/01 en NORMAL y quizá te confunda — pero es legítimo. Su cobertura real ocurre en la rama SOBERANOS. Lo mismo el 43 (1 caso en NORMAL). No hay nada que corregir ahí; solo tenlo presente al leer el reporte.
+
+**Derivados y Monedas:** confirmado que inflan el reporte con ~54 filas de Monedas (una por divisa: DO, CN, AR, AE...) y 16 de Derivados (PT, FT) — puro ruido para tu objetivo, que es ver qué RF/RV se queda fuera. Tras los cambios, en NORMAL solo te quedará FIBPRIME como RF/RV genuinamente accionable (más 08/01/43 que son "de la otra rama").
+
+---
+
+### Cambio 1 — FIBPRIME (SBS2=37) a BU
+
+Igual que hicimos con "ALT": el freno del 37 es que su `AC Dir=PE`... que **ya está permitido**. Entonces el 37 no cae por AC Dir — cae solo porque no está en TD ni SOB y BU lo excluye vía algún otro filtro. Reviso: el 37 no está en la lista de exclusión de SBS2 de BU, su AC Dir=PE está permitido, no es Gobierno. Debería entrar a BU solo. El único motivo por el que no entra es que **sí está siendo excluido en algún paso** — y mirando el detalle, la causa más probable es el filtro de `Categoría` (FM → "borrar"). Para forzarlo a BU de manera explícita y segura, lo mejor es un rescate por SBS2 al final de BU:
+
+**Ctrl+F:**
+```python
+    d = d.drop(d.loc[d['SBS2'].isin(excl)].index)
+    _registrar_descarte(df, d, 'BU() - filtros Bottom-Up',
+                        'No calificó para BU (Gobierno/Categoría/AC Dir/SBS2)')
+    return d
+```
+**Reemplazar por:**
+```python
+    d = d.drop(d.loc[d['SBS2'].isin(excl)].index)
+    # Rescate explícito: vehículos que deben vivir en BU aunque no pasen los
+    # filtros estándar (p. ej. FIBPRIME SBS2='37', real estate). Se reincorpora
+    # desde el df original, sin duplicar los que ya están en d.
+    _rescate_bu = ['37']
+    _extra = df.loc[df['SBS2'].isin(_rescate_bu) & ~df.index.isin(d.index)]
+    d = pd.concat([d, _extra])
+    _registrar_descarte(df, d, 'BU() - filtros Bottom-Up',
+                        'No calificó para BU (Gobierno/Categoría/AC Dir/SBS2)')
+    return d
+```
+
+Si más adelante quieres meter otro vehículo a la fuerza en BU, solo agregas su SBS2 a la lista `_rescate_bu`.
+
+---
+
+### Cambio 2 — Excluir Derivados y Monedas del reporte, con conteo breve en consola
+
+`operaciones()` es donde se filtra Asset Class. Ahí mismo cuento Derivados/Monedas y lo dejo en un contador global para imprimirlo breve, sin que entren al detalle.
+
+**Ctrl+F:**
+```python
+    df_antes = df.copy()
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable', 'Alternativos'])]
+    _registrar_descarte(df_antes, df, 'operaciones() - Asset Class',
+                        'Asset Class distinto de Renta Fija/Renta Variable/Alternativos')
+    return df
+```
+**Reemplazar por:**
+```python
+    df_antes = df.copy()
+    df = df.loc[df['Asset Class'].isin(['Renta Fija', 'Renta Variable', 'Alternativos'])]
+    # Conteo breve de ruido conocido (Derivados/Monedas): NO entra al reporte de
+    # descartes ni a "Dejados de lado"; solo un dato informativo en consola.
+    _ac_fuera = df_antes.loc[~df_antes['Asset Class'].isin(
+        ['Renta Fija', 'Renta Variable', 'Alternativos'])]
+    global _AC_RUIDO
+    _AC_RUIDO = {'Derivados': int((_ac_fuera['Asset Class'] == 'Derivados').sum()),
+                 'Monedas':   int((_ac_fuera['Asset Class'] == 'Monedas').sum())}
+    # Solo se registran como descarte los Asset Class NO-ruido (para trazabilidad
+    # de casos raros distintos de Derivados/Monedas).
+    _ac_reportable = df_antes.loc[
+        ~df_antes['Asset Class'].isin(['Renta Fija', 'Renta Variable', 'Alternativos',
+                                       'Derivados', 'Monedas'])]
+    _registrar_descarte(pd.concat([df, _ac_reportable]), df,
+                        'operaciones() - Asset Class',
+                        'Asset Class no admitido (excl. Derivados/Monedas)')
+    return df
+```
+
+Y declara el contador global una vez. **Ctrl+F:**
+```python
+_DESCARTES = []  # lista de dicts: {SBS, ISIN, Etapa, Motivo, Valor}
+```
+**Pegar INMEDIATAMENTE DESPUÉS:**
+```python
+_AC_RUIDO = {'Derivados': 0, 'Monedas': 0}  # conteo informativo (no va al reporte)
+```
+
+---
+
+### Cambio 3 — Que "Dejados de lado" excluya Derivados/Monedas y muestre el conteo breve
+
+En `reporte_dejados_de_lado`, el conjunto de Asset Class descartado se arma con todo lo no admitido. Hay que excluir Derivados/Monedas de ese conjunto.
+
+**Ctrl+F:**
+```python
+    dropped_ac = full_w[~full_w['Asset Class'].isin(_ALLOWED_AC)].copy()
+    dropped_ac['Motivo'] = 'Asset Class no admitido: ' + dropped_ac['Asset Class'].astype(str)
+```
+**Reemplazar por:**
+```python
+    _AC_IGNORAR = _ALLOWED_AC + ['Derivados', 'Monedas']
+    dropped_ac = full_w[~full_w['Asset Class'].isin(_AC_IGNORAR)].copy()
+    dropped_ac['Motivo'] = 'Asset Class no admitido: ' + dropped_ac['Asset Class'].astype(str)
+    print(f"  [Asset Class ruido excluido del reporte] "
+          f"Derivados={_AC_RUIDO.get('Derivados', 0)}, Monedas={_AC_RUIDO.get('Monedas', 0)}")
+```
+
+---
+
+### Cambio 4 — Mismo filtro en el print `[SIN CLASIFICAR]` de consola
+
+Ese bloque imprime desde `_no_clasificados`, que puede incluir Monedas/Derivados. Los excluyo del print (no de la lógica).
+
+**Ctrl+F:**
+```python
+    _no_clasificados = df_temporal.loc[~df_temporal.index.isin(_idx_validos)]
+```
+**Reemplazar por:**
+```python
+    _no_clasificados = df_temporal.loc[~df_temporal.index.isin(_idx_validos)]
+    _no_clasificados = _no_clasificados.loc[
+        ~_no_clasificados['Asset Class'].isin(['Derivados', 'Monedas'])]
+```
+
+---
+
+Tras estos cambios, el panorama de tu reporte queda así:
+
+- **FIBPRIME** entra a BU en ambas ramas.
+- **Derivados/Monedas** desaparecen del detalle de "Dejados de lado" y del `[SIN CLASIFICAR]`; solo verás una línea tipo `[Asset Class ruido excluido del reporte] Derivados=16, Monedas=54`.
+- En **NORMAL** te quedará como RF/RV accionable prácticamente nada nuevo (FIBPRIME ya rescatado); el 08/01/43 que veas ahí es "de la rama soberanos", no un error.
+- El **Nombre** ya viene poblado (FIBPRIME lo confirma); si algún instrumento saliera sin nombre, sería porque G&P lo trae vacío en esa fila puntual.
+
+Una nota sobre el "nombre bonito": el reporte usa el `Nombre` crudo de G&P (columna C/D), que es justo lo que pediste. Ese nombre existe siempre que G&P lo traiga; el pipeline no lo inventa ni lo pierde en estas etapas tempranas, así que el reporte lo refleja fielmente.
