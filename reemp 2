@@ -1,0 +1,64 @@
+## Con el bug del 52: se cierra, no se "arregla el índice" — se cambia la pregunta
+
+Tu instinto de antes era correcto: **el pipeline de negocio nunca estuvo mal.** BU/TD/SOB, Weight, BD1, Portafolio — todo correcto. Lo único roto era la *pregunta* que le hacíamos al diagnóstico ("¿qué índice quedó fuera?" en vez de "¿qué SBS quedó fuera?"). Con eso demostrado, la acción es simple: **reescribir el diagnóstico para que pregunte por SBS de una vez**, no solo en el chequeo aislado (`reporte_dejados_de_lado`) sino en la fuente original (`_idx_validos`), porque esa misma variable alimenta tanto el Excel de descartes como el bloque `[SIN CLASIFICAR]` que imprimes en consola. Si no se corrige ahí, seguirás viendo falsos "sin clasificar" cada corrida.
+
+**Ctrl+F:**
+```python
+    _idx_validos = set(df_BU.index) | set(df_TD.index)
+    if soberanos:
+        _idx_validos |= set(df_SOB.index)
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+```
+**Reemplazar por:**
+```python
+    # Identidad por SBS (no por índice): TD()/SOB() resetean su índice internamente
+    # con sort_index(ignore_index=True), lo que contaminaba este diagnóstico
+    # (confirmado: 493 SBS2='52/49/48/54/50' figuraban "fuera" sin estarlo).
+    _sbs_validos = set(df_BU['SBS']) | set(df_TD['SBS'])
+    if soberanos:
+        _sbs_validos |= set(df_SOB['SBS'])
+    _idx_validos = set(df_temporal.loc[df_temporal['SBS'].isin(_sbs_validos)].index)
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+```
+No toco nada más: `_idx_validos` sigue existiendo con el mismo nombre y tipo (un `set` de índices), así que el bloque `[SIN CLASIFICAR]` que viene después y `reporte_dejados_de_lado` (que ya la recibe como parámetro) quedan corregidos automáticamente sin tocarlos. Con esto, el 52/49/48/54/50 desaparecen del reporte para siempre — ya no hay nada más que decidir ahí.
+
+---
+
+## Con el 64: coincido con tu lectura, pero antes de moverlo pide una confirmación barata
+
+El perfil encaja: `AC Dir='PEG'` y `Categoría='PEN_NOM_GOB_CD'` es exactamente la misma familia que ves en 01/08/43 (Gobierno). Es razonable que sea soberano. Pero antes de tocar la lista de negocio, vale la pena una verificación de 10 segundos que ya tienes a la mano: **el Nombre** de esos 56 instrumentos (ya lo capturas en el detalle). Si dicen algo como "Bonos Soberanos", "BTP", "Letra del Tesoro", etc., queda confirmado sin ambigüedad.
+
+**Ctrl+F** (línea única, para aislar rápido esos 56 antes de decidir):
+```python
+        print("\n[SIN CLASIFICAR] Detalle (SBS, SBS2, Asset Class, Nombre):")
+```
+**Pegar INMEDIATAMENTE ANTES:**
+```python
+        _chk64 = _no_clasificados[_no_clasificados['SBS2'] == '64']
+        if len(_chk64):
+            print(f"\n[VERIFICAR SBS2=64] {len(_chk64)} instrumento(s) — nombres únicos:")
+            print(sorted(_chk64['Nombre'].dropna().unique().tolist()))
+```
+
+Si los nombres confirman que es soberano, el cambio de negocio es de una sola línea, y **solo en la rama soberanos** (igual que 08/01/43 — en NORMAL debe seguir cayendo fuera por diseño, ya que esa rama no cubre soberanos):
+
+**Ctrl+F:**
+```python
+def SOB(df):   # solo soberanos
+    d = df.copy(deep=True)
+    return d.loc[d['SBS2'].isin(['08', '01', '43'])].sort_index(ignore_index=True)
+```
+**Reemplazar por:**
+```python
+def SOB(df):   # solo soberanos
+    d = df.copy(deep=True)
+    return d.loc[d['SBS2'].isin(['08', '01', '43', '64'])].sort_index(ignore_index=True)
+```
+
+No lo apliques todavía a ciegas — corre primero el chequeo de nombres. Si el 64 resulta ser otra cosa (por ejemplo, algún vehículo local no soberano que comparte casualmente `AC Dir='PEG'`), el fix sería distinto (no entraría a SOB). Pásame los nombres que salgan y confirmamos juntos antes de tocar la lista.
