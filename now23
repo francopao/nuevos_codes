@@ -1,0 +1,41 @@
+El fix de identidad de `_registrar_descarte` funcionó perfectamente — ahora hay evidencia clara en el propio output.
+
+## Prueba de que el fix quedó bien aplicado
+
+Fíjate en el "Top 15 SBS con más Weight diluido": ahora muestra `ZMW`, `PTCMEF0-II259C-CALL`, `...258C-CALL`... Esos son los instrumentos **realmente** eliminados (opciones/calls y una divisa ZMW — cosas que legítimamente no son RF/RV clasificable), no el ruido de antes (`5460042E8427` con 5.8 que era artefacto). Y el "Weight diluido" por etapa ahora da valores del orden de `-1e-4` a `-1e-20`: negativos y microscópicos, que es exactamente lo correcto — `df_result` solo bota pesos ≤ 0, así que su suma **debe** ser ≈0 o levemente negativa. Antes veías `0.56, 0.76...` positivos, que era imposible y confirmaba el bug. Los tres fixes (Clasificación por SBS, `_registrar_descarte` sin reset, y `_par_bu` en memoria) están funcionando.
+
+## El 64 quedó confirmado: es soberano
+
+`[VERIFICAR SBS2=64] 56 instrumento(s) — nombres únicos: ['Gobierno Central']`
+
+Sin ambigüedad. Los 56 son "Gobierno Central" — deuda soberana peruana. Aplica el cambio que dejamos preparado (solo en `SOB`, para que en NORMAL siga cayendo fuera por diseño):
+
+**Ctrl+F:**
+```python
+    return d.loc[d['SBS2'].isin(['08', '01', '43'])].sort_index(ignore_index=True)
+```
+**Reemplazar por:**
+```python
+    return d.loc[d['SBS2'].isin(['08', '01', '43', '64'])].sort_index(ignore_index=True)
+```
+
+## Qué queda genuinamente fuera después de esto (el mapa final)
+
+Con el 64 dentro, revisando lo que sobra en la rama **SOBERANOS** (que es la exhaustiva, ya captura todo lo gubernamental):
+
+| SBS2 | N | Perfil | ¿Qué es? | Acción sugerida |
+|---|---|---|---|---|
+| **53** | 118 | `AC Dir=ALT`, Categoría `ALT_*` | Private Equity / Infra / Private Debt (Antin, EQT, Oaktree, Apollo...) | **Decisión de negocio** |
+| **51** | 29 | `AC Dir=ALT`, Categoría `ALT_L_*` | Alternativos "L" (locales?) | **Decisión de negocio** (misma familia que 53) |
+| **64** | 56 | Gobierno Central | Soberano | ✅ Ya resuelto arriba |
+| 04 | 11 | `PEG` / `PEN_NOM_GOB_LC` | Gobierno (mismo perfil que 01/43) | Ver nota abajo |
+| 56, 77 | 2+1 | `PEG` / `PEN_NOM_GOB_CD` | Gobierno | Ver nota abajo |
+| PR, 4A, 37 | 2+1+1 | INTER / PE | Casos sueltos (proxies, FIB) | Ruido, revisar manual |
+
+**Dos decisiones reales que te quedan (ninguna es un bug, son política de negocio):**
+
+**1) Los Alternativos (53 y 51 → 147 instrumentos).** Ya admitiste "Alternativos" en el filtro de Asset Class, así que estos **entran al pipeline** con su Asset Class válido, pero luego se caen en la clasificación BU/TD/SOB porque su SBS2 (53, 51) no está en ninguna lista. Es incoherente: los dejaste entrar por Asset Class pero no tienen balde donde vivir. Tienes que decidir **a qué categoría pertenecen los alternativos** — si a BU, a una categoría nueva, o si en realidad no deberían estar en este portafolio. Antes de tocar código aquí necesito que me digas cuál es el tratamiento de negocio correcto para PE/Infra/Private Debt en tu proceso.
+
+**2) El 04/56/77 (14 instrumentos gubernamentales).** Comparten el perfil `PEG`/`PEN_NOM_GOB_*` de los soberanos que sí capturas. Muy probablemente son soberano también, pero antes de meterlos a `SOB` confírmalo con el mismo chequeo de nombres — cambia el `'64'` por `'04'` (y luego `'56'`, `'77'`) en el bloque `[VERIFICAR SBS2=...]` y mira si dicen "Gobierno Central". Si sí, se agregan a `SOB` igual que el 64.
+
+Dime el criterio de negocio para los Alternativos (punto 1) y, si quieres, corre el chequeo de nombres del 04/56/77, y cerramos la lista completa para que no quede ni un instrumento con peso fuera sin una razón explícita y decidida por ti.
