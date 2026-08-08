@@ -1,0 +1,106 @@
+## 1) Sí, el output parcial ya es revelador — no necesitas esperar más para NORMAL
+
+Con lo que alcanzó a imprimir tienes la respuesta completa a lo que veníamos investigando:
+
+- **El bug del 52 queda probado con números reales**: de 744 "sin clasificar" por índice, solo 569 lo son por SBS real — es decir, **493 estaban rescatados** (`52: 474, 49: 14, 48: 2, 54: 2, 50: 1`). Confirma que el `ignore_index=True` de TD/SOB contaminaba el diagnóstico, tal como sospechábamos.
+- **08, 01 en NORMAL: esperado**, por diseño (SOB solo corre en soberanos).
+- **Hallazgo nuevo real**: `SBS2='64'` (56 instrumentos, `AC Dir=[PEG]`, `Categoría=[PEN_NOM_GOB_CD]`) no está en ninguna lista (ni exclusión BU, ni inclusión TD, ni SOB). Este sí es genuino y no lo teníamos mapeado — vale la pena decidir a qué balde debería ir.
+- El resto (`04, 43, 56, 54, 53, 4A, 37, 50, 77, PR`) son colas pequeñas (1-11 instrumentos), probablemente casos puntuales a revisar manualmente desde el Excel, no patrones sistémicos.
+
+Con esto **ya puedes decidir la política de clasificación sin esperar el resto de la corrida.**
+
+## 2) Dónde se congeló (evidencia, no suposición)
+
+La última línea es `[OK] Portafolio -> ...`. El código, justo después de eso, hace tres cosas en orden: `_par_bu()` → imprime `[OK] BD1 -> ...` → `imprimir_descartes()`. **Ninguna de esas dos líneas de print llegó a aparecer**, ni tampoco el `[AVISO] par_bu falló` (que sí se imprimiría si hubiera lanzado excepción). Eso aísla el punto de estancamiento con precisión: **quedó colgado dentro de `_par_bu()`**, y el paso más frágil ahí es que **reabre por red el archivo Portafolio.xlsx que acaba de escribir un instante antes** (`leer_xlsx(ruta_port, 'Sheet1')`). Reabrir sobre Z: un archivo recién escrito es una condición clásica de bloqueo/latencia SMB (el archivo puede seguir "flushing" o bajo lock del propio Excel/antivirus de red).
+
+Este patrón ya existía en el script original (no es algo que yo haya introducido), pero antes probablemente tenías suerte de red. La forma correcta de eliminarlo es no volver a tocar el disco: usar el dataframe que ya tienes en memoria (`dic_p1`) en vez de releerlo.
+
+## 3) Fix — evita el round-trip de red en `_par_bu`
+
+**Ctrl+F:**
+```python
+    dpbu = _leer_bd1_local  # reutilizamos lector; el Portafolio tiene hoja 'Sheet1'
+    df_pbu = leer_xlsx(ruta_port, 'Sheet1')
+    df_pbu.columns = df_pbu.iloc[0, ::]
+    df_pbu = df_pbu.drop([0], axis=0)
+    df_pbu = df_pbu.loc[df_pbu['Strategy'].isin(['BU'])]
+```
+**Reemplazar por:**
+```python
+    df_pbu = df_portafolio_mem.copy(deep=True)
+    df_pbu = df_pbu.loc[df_pbu['Strategy'].isin(['BU'])]
+```
+
+**Ctrl+F** (la firma de la función):
+```python
+def _par_bu(param_bu, ruta_port, suf):
+```
+**Reemplazar por:**
+```python
+def _par_bu(param_bu, ruta_port, suf, df_portafolio_mem):
+```
+
+**Ctrl+F** (la llamada):
+```python
+        _par_bu(base.param_bu, ruta_port, suf)
+```
+**Reemplazar por:**
+```python
+        _par_bu(base.param_bu, ruta_port, suf, dic_p1)
+```
+
+## 4) Instrumentación mínima para tu próxima corrida (20 min de presupuesto)
+
+Así, si algo vuelve a demorar, sabrás el punto exacto sin adivinar.
+
+**Ctrl+F:**
+```python
+def procesar_rama(base, soberanos):
+    suf = "_S" if soberanos else ""
+    etiqueta = "SOBERANOS" if soberanos else "NORMAL"
+    print(f"\n================  RAMA {etiqueta}  ================")
+```
+**Reemplazar por:**
+```python
+def procesar_rama(base, soberanos):
+    suf = "_S" if soberanos else ""
+    etiqueta = "SOBERANOS" if soberanos else "NORMAL"
+    _t0 = time.time()
+    def _tic(msg):
+        print(f"[{time.time()-_t0:6.1f}s] {msg}")
+    print(f"\n================  RAMA {etiqueta}  ================")
+```
+**Ctrl+F:**
+```python
+    print(f"[OK] Portafolio{suf} -> {ruta_port}")
+```
+**Reemplazar por:**
+```python
+    print(f"[OK] Portafolio{suf} -> {ruta_port}")
+    _tic("Portafolio escrito, entrando a par_bu")
+```
+**Ctrl+F:**
+```python
+    print(f"[OK] BD1{suf} -> {ruta_bd1}")
+```
+**Reemplazar por:**
+```python
+    _tic("par_bu terminado")
+    print(f"[OK] BD1{suf} -> {ruta_bd1}")
+```
+
+## 5) Recorte opcional de ruido en consola (ganancia menor, pero gratis)
+
+El bloque `[SIN CLASIFICAR] Detalle` imprime cientos de filas completas vía `to_string`, y en Spyder/IPython eso puede tardar bastante en renderizarse solo. Como ya lo tienes exportado con Nombre/Weight en `Dejados de lado {rama}.xlsx`, puedes recortar la consola sin perder nada:
+
+**Ctrl+F:**
+```python
+        print(_no_clasificados[['SBS', 'SBS2', 'Asset Class', 'Nombre']].to_string(index=False))
+```
+**Reemplazar por:**
+```python
+        print(_no_clasificados[['SBS', 'SBS2', 'Asset Class', 'Nombre']].head(30).to_string(index=False))
+        print(f"  (mostrando 30 de {len(_no_clasificados)}; detalle completo en el Excel de 'Dejados de lado')")
+```
+
+Con el fix del punto 3 debería resolverse el cuelgue de fondo. Si en la próxima corrida vuelve a demorar, los `_tic()` te dirán en segundos exactos dónde, y me pasas ese log.
