@@ -1,0 +1,44 @@
+El sandbox se reinició, pero tengo la lógica clara. El punto crítico es la función `agregar` (sección 3), donde se construye la matriz del gráfico de barras. Reviso cómo quedó en la versión 12, que es tu base actual.
+
+Ya está claro. El problema es un solo punto: en `validar`, `if not r["decision"]:` frena todo el proceso cuando la decisión está en blanco. Esa es la línea a cambiar, y hay que asegurar que las filas en blanco no ensucien el resto. Te doy dos reemplazos exactos.
+
+---
+
+**REEMPLAZO 1 — que las filas en blanco no detengan el proceso**
+
+Con **Ctrl+F** busca esta línea dentro de la función `validar`:
+
+```python
+        if not r["decision"]:
+            errores.append(f"Fila {f}: sin Decision ({r['empresa']} {r['punto']})")
+        elif r["decision"] not in decis:
+```
+
+Reemplaza esas **tres líneas** por estas:
+
+```python
+        if r["decision"] and r["decision"] not in decis:
+```
+
+Qué hace: antes, una decisión vacía se contaba como error y frenaba todo con `sys.exit`. Ahora, si está en blanco simplemente se ignora en el gráfico de barras; solo se marca error si tiene un texto que no existe en Catálogos. Si algún día decides no dejar ninguna en blanco, no necesitas revertir nada: seguirá funcionando igual.
+
+---
+
+**REEMPLAZO 2 — que la fila en blanco no genere una barra fantasma**
+
+Con **Ctrl+F** busca esta línea dentro de la función `agregar` (aparece una sola vez):
+
+```python
+    for r in comp:
+        matriz[r["tema"]][r["decision"]] += 1
+```
+
+Reemplaza esas **dos líneas** por estas:
+
+```python
+    for r in comp:
+        if r["decision"]:
+            matriz[r["tema"]][r["decision"]] += 1
+```
+
+Qué hace: solo suma al gráfico de barras las filas que tienen decisión escrita. Las que dejaste en blanco (los "Informativo" que ya no quieres capturar) no aparecen como categoría vacía en el eje. El resto de gráficos y la base de datos no se tocan, porque ya filtran por su decisión concreta ("En Contra", "A Favor", etc.), y un blanco nunca coincide con esas.
