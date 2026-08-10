@@ -1,0 +1,52 @@
+Voy a leer el script 4 para comparar con precisión cómo cada uno define filas y Weight.
+
+Ya tengo la imagen completa. La divergencia **no es un error**: los dos scripts miden cosas distintas por diseño. Te explico exactamente de dónde salen las dos diferencias (filas y Weight), y luego dónde sí hay un riesgo real que vale la pena revisar.
+
+## Por qué difieren las filas: 3638 (BD1) vs 3288 (Análisis BD)
+
+Son universos distintos a propósito. Script 4 **no lee las 3638 filas de BD1 y las procesa todas** — hace tres cortes que reducen:
+
+1. **Solo toma BU y TD, descarta SOB.** En `traer_BD` (líneas 97-98) se queda únicamente con `Strategy ∈ {BU, TD}`. Todo lo clasificado como SOB (soberano) de BD1 se cae aquí. Como BD1 (rama NORMAL) puede traer instrumentos que no son ni BU ni TD puros, esos no pasan.
+
+2. **Filtra BU a los que tienen cobertura MSCI.** En `Base_BU`, `df_p_m = df_p_m.dropna(subset=['Cod. OriginadorMSCI'])` y luego `drop_duplicates(subset=['Cod. OriginadorMSCI'])` (líneas 128-129). Ese `dropna` **elimina instrumentos BU cuyo emisor no está en el Dashboard MSCI**, y el `drop_duplicates` colapsa el diccionario de mapeo. Nota importante: ese drop opera sobre `df_p_m` (el diccionario MSCI), no directamente sobre `df_BU` — pero limita a qué emisores se les puede pegar data.
+
+3. La diferencia de 350 filas (3638 − 3288) es, casi con certeza, la suma de esos SOB/no-cubiertos que script 4 excluye por diseño. **BD1 es el universo completo del portafolio; Análisis BD es el subconjunto BU+TD con emisor identificable en MSCI.**
+
+Esto explica por qué **los 84 PROXY sí coinciden en ambos**: los proxy son un conjunto acotado que sobrevive los dos filtros igual en ambos scripts.
+
+## Por qué difiere el Weight: se calculan en momentos distintos del mismo dato
+
+Aquí está el punto que te confunde, y es clave: **script 4 NO recalcula Weight. Lo hereda de BD1 tal cual.** Fíjate que en todo script 4 nunca hay una fórmula `Weight = ...`; solo lee la columna `Weight` que ya venía en BD1 (vía `traer_BD`). Todos sus cálculos (`Weight_N`, `Weight_Cubierto`, `Weight_Ingresado`) son **derivados** del Weight de BD1, no una redefinición.
+
+Entonces, ¿por qué verías Weight distinto? Por dos operaciones de script 4 que **reagrupan** el Weight:
+
+- **`Weight_N = Weight / Weight_Cubierto`** (línea 463): esto **renormaliza** el peso. Ya no es "peso en el fondo", sino "peso *relativo dentro de la porción cubierta* del fondo×AFP". Por eso un mismo instrumento tiene un número distinto en la columna `Weight_N` que en la columna `Weight` de BD1 — miden cosas diferentes a propósito. El `Weight` crudo debería ser idéntico entre ambos; el que diverge es el normalizado.
+
+- **`Contribuyentes` colapsa por emisor** (línea 501): `groupby([Fecha, Afp, Fondo, Nombre])['Weight'].transform('sum')` — ahí varios instrumentos del mismo emisor se **suman en una sola fila**. Si comparaste contra esa hoja, el Weight por fila es la suma del emisor, no del instrumento.
+
+**En resumen:** el `Weight` base es el mismo dato heredado de BD1; lo que ves distinto es el Weight *renormalizado* o *agregado por emisor* que script 4 crea para el análisis ESG. No hay doble cálculo de Weight; hay un cálculo (script 2) y varias reponderaciones (script 4).
+
+## ¿Estás duplicando el paso de proxies? No, pero comparten archivo y conviene entender la diferencia
+
+Tu sospecha sobre "el benchmarking con proxies contaminando" es razonable, pero **no se están pisando** — hacen cosas distintas con el mismo archivo de proxies:
+
+- **Script 2** usa el archivo de proxies para dar **ISIN de identidad** a SBS sin ISIN (para no perder Weight en el cruce EPU/ETF). Solo toca la columna ISIN.
+- **Script 4** usa el mismo archivo para dar **datos ESG** a instrumentos sin cobertura MSCI (`aplicar_proxies_esg`, línea 352, match por SBS). Solo toca columnas ESG (RATING, E, S, G...).
+
+Son capas independientes sobre el mismo insumo. **No hay contaminación**, siempre que el ISIN-proxy que asignó script 2 no altere la clasificación BU/TD/SOB — y no lo hace, porque la clasificación usa SBS2, no ISIN. Confirmado en el análisis previo.
+
+## Dónde SÍ hay un riesgo real que revisar
+
+Una cosa que quiero marcarte con honestidad, porque puede afectar tus números aunque no sea la causa de la divergencia de filas:
+
+**El proxy-ISIN de script 2 puede crear ISINs duplicados, y script 4 mapea por ISIN en la rama BU.** En `Base_BU`, `df_BU` mapea data MSCI usando `Cod. OriginadorBU = df_BU["ISIN"].map(...)` (línea 131). Si script 2 asignó el **mismo ISIN-proxy a varios SBS distintos** (lo cual tu propio output confirma: "US4642873339: 213 SBS", etc.), entonces en script 4 esos 213 instrumentos comparten ISIN y **todos reciben el mismo Cod. Originador y la misma data MSCI del proxy**. Para fines de *benchmarking ESG* eso es exactamente lo que quieres (es el propósito del proxy). Pero si en algún punto se hace un `drop_duplicates` por ISIN o un merge que asuma ISIN único, podrías perder filas silenciosamente. No vi un `drop_duplicates(subset=['ISIN'])` sobre `df_BU` en script 4, así que probablemente estás bien — pero es el punto que yo auditaría si los números siguen sin cuadrar.
+
+## Qué te propongo para confirmarlo sin adivinar
+
+Un chequeo de 2 minutos, y sabes exactamente dónde se van las 350 filas: en script 4, justo después de `traer_BD`, imprime cuántas filas hay en BD1 antes y después de cada filtro —
+
+- filas totales leídas de BD1,
+- filas tras `Strategy ∈ {BU,TD}` (aquí caen los SOB),
+- filas tras el `dropna(Cod. OriginadorMSCI)` en BU (aquí caen los no-cubiertos),
+
+y compara la suma con 3288. Casi seguro el desglose te da exactamente las 350. Si quieres, te preparo ese bloque de prints de reconciliación (sin tocar la lógica) para que lo corras una vez y cierres el tema con números en la mano. ¿Lo armo?
