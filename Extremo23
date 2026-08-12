@@ -1,0 +1,40 @@
+Sí, lo veo exactamente igual. Dos entregas:
+
+**Entrega 1 — `BD_G&P_total.py`**: agregar bloques de código (sin modificar nada existente) para que después de generar `202607 BD1_S.xlsx` también genere `202607 BD1_S_Huella.xlsx` con las 16 columnas originales + 6 nuevas.
+
+**Entrega 2 — `Huella_BD_Franco_5.py`**: modificar el pipeline para que lea `BD1_S_Huella.xlsx` como input de cartera en lugar de la hoja "Valorización de Instrumentos" del workbook. Concretamente esto implica reemplazar los Módulos 1 (QueryReader), 2 (CajaLoader), 3 (TipoCambioLoader) y 5 (ParametriaBuilder.leer_parametria_directa) por una lectura del nuevo archivo, adaptando el ValorizacionBuilder para que consuma las columnas ya pre-calculadas. Todo lo demás — BDMSCIBuilder, ProxyEngine, PerdieronHuellaLoader, PresentacionBuilder, HistoricoExporter, Dashboard — se mantiene funcionando igual, produciendo el mismo Excel histórico con sus hojas por corte y el mismo Dashboard HTML con sus charts y selectores.
+
+Una precisión importante: el `apply_inheritance()` del ProxyEngine seguirá funcionando porque GRUPO_ECONOMICO ahora viene como columna del nuevo archivo. Y los pivots del PresentacionBuilder que dependen de TIPO_RENTA, Estrategia, Sector, etc. también seguirán funcionando porque esas columnas ya vienen pre-calculadas.
+
+¿Procedo con la Entrega 1?
+
+
+
+No tengo más dudas. Tengo todo lo necesario para escribir el código. Resumo el planteamiento cerrado:
+
+**Archivo de salida**: `202607 BD1_S_Huella.xlsx` (16 columnas originales + 6 nuevas al final).
+
+**Columnas nuevas** (en orden):
+
+1. `TIPO_RENTA` — RF*/RV* directo del prefijo de `assetclass`; para ALT, `"RENTA FIJA"` si Cat = "Private Debt", `"RENTA VARIABLE"` para cualquier otro Cat. Fuente en memoria: `base.df`.
+
+2. `Categoria` — `SBS[:2] + assetclass`. Calculada en el bloque nuevo.
+
+3. `RANKEST` — si assetclass = "ALT" → `"ALT"`, si no → `assetclass[:3] + Strategy`. Calculada en el bloque nuevo.
+
+4. `Sector_GICS` — de `base.param_bu` por ISIN. Print con conteo de instrumentos sin match agrupado por Strategy/assetclass, indicando que se edita `Parametria.xlsx` hoja BU.
+
+5. `GRUPO_ECONOMICO` — de `Reporte de Huella con Proxies.xlsm` hoja "Valorización de Instrumentos", mapeando CODIGO_SBS → GRUPO_ECONOMICO. Ruta fija sin semestre en el nombre. Prints: resumen de cobertura, top SBS sin match con peso significativo, y advertencia por AFP.
+
+6. `Inv_MM_USD` — `Inversión / base.valor / 1e6`.
+
+**Scope**: solo rama soberanos (BD1_S). Sin tocar código existente. Bloque nuevo después de `procesar_rama(soberanos=True)`.
+
+Cuando me digas, genero el código.
+
+
+
+
+
+
+
