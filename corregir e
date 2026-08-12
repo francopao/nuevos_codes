@@ -1,0 +1,53 @@
+Un solo cambio con Ctrl+F. Hay 3 ramas que cubren 1, 2, y 3+ directores:
+
+---
+
+**Ctrl+F →**
+
+```
+        if n_ind == nd:
+            frase = "todos ellos calificaban como independientes"
+        elif n_ind == 0:
+            frase = "ninguno de ellos calificaba como independiente"
+        else:
+            frase = (f"{n_ind} de ellos {_plural(n_ind,'calificaba','calificaban')} "
+                     f"como {_plural(n_ind,'independiente','independientes')} ({_pct(n_ind/nd)})")
+```
+
+**Reemplazar por →**
+
+```python
+        if n_ind == nd:
+            if nd == 1:
+                frase = "el director calificaba como independiente"
+            elif nd == 2:
+                frase = "ambos calificaban como independientes"
+            else:
+                frase = "todos ellos calificaban como independientes"
+        elif n_ind == 0:
+            if nd == 1:
+                frase = "el director no calificaba como independiente"
+            elif nd == 2:
+                frase = "ninguno de ambos calificaba como independiente"
+            else:
+                frase = "ninguno de ellos calificaba como independiente"
+        else:
+            if nd == 2:
+                frase = ("uno de ellos calificaba como independiente "
+                         f"({_pct(n_ind/nd)})")
+            else:
+                frase = (f"{n_ind} de ellos {_plural(n_ind,'calificaba','calificaban')} "
+                         f"como {_plural(n_ind,'independiente','independientes')} ({_pct(n_ind/nd)})")
+```
+
+---
+
+La lógica es un `if/elif/else` dentro de cada rama original, ramificando por `nd` (1, 2, 3+):
+
+| Caso | nd=1 | nd=2 | nd=3+ |
+|---|---|---|---|
+| Todos independientes | "el director calificaba como independiente" | "ambos calificaban como independientes" | "todos ellos calificaban..." |
+| Ninguno independiente | "el director no calificaba como independiente" | "ninguno de ambos calificaba..." | "ninguno de ellos calificaba..." |
+| Parcial | *(imposible: 1 de 1 = todos)* | "uno de ellos calificaba... (50%)" | "{n} de ellos calificaban..." |
+
+**Nota aparte:** La plantilla del Excel (`T["independencia"]`) probablemente dice algo como *"Votamos a favor de {n_dir} directores, {frase_indep}."* — cuando `nd == 1` eso produciría *"de 1 directores"*. Si querés corregir esa concordancia también, avisame y te armo el bloque para parchear el string resultante (como ya hiciste con `"de 1 empresas"` → `"de 1 empresa"` en la línea 391).
