@@ -1,0 +1,121 @@
+---
+
+## MEJORA 1 — Validación de duplicados y puntos saltados
+
+**Ctrl+F →**
+
+```
+    print(f"[OK] Validacion: {len(registros)} filas, sin errores bloqueantes.")
+```
+
+**Pegar DESPUÉS de esa línea (sin borrarla):**
+
+```python
+
+    # --- Filas duplicadas (misma empresa + tipo_junta + fecha + punto)
+    _visto = {}
+    _dup = []
+    for r in registros:
+        fch = r["fecha"].strftime("%Y-%m-%d") if isinstance(r["fecha"], (datetime, date)) else str(r["fecha"])
+        clave = (r["empresa"], r["tipo_junta"], fch, r["punto"])
+        if clave in _visto:
+            _dup.append(f"  Fila {r['_fila']} duplica fila {_visto[clave]}: "
+                        f"{r['empresa']} | {r['tipo_junta']} | {fch} | pto {r['punto']}")
+        else:
+            _visto[clave] = r["_fila"]
+    if _dup:
+        print(f"\n[AVISO] {len(_dup)} fila(s) duplicada(s) en Registro:")
+        for d in _dup[:25]:
+            print(d)
+        if len(_dup) > 25:
+            print(f"  ... y {len(_dup)-25} más")
+
+    # --- Puntos faltantes / saltados por junta
+    _juntas_pts = defaultdict(list)
+    for r in registros:
+        fch = r["fecha"].strftime("%Y-%m-%d") if isinstance(r["fecha"], (datetime, date)) else str(r["fecha"])
+        _juntas_pts[(r["empresa"], r["tipo_junta"], fch)].append(r["punto"])
+
+    _av_pts = []
+    for (emp, tj, fch), pts in _juntas_pts.items():
+        etiq = f"{emp} | {tj} | {fch}"
+        unicos = sorted(set(pts))
+        principales, subs_por_padre = [], defaultdict(list)
+        for p in unicos:
+            if "." in str(p):
+                padre = str(p).rsplit(".", 1)[0]
+                subs_por_padre[padre].append(p)
+            else:
+                principales.append(str(p))
+        # padre faltante
+        for padre, hijos in subs_por_padre.items():
+            if padre not in principales:
+                _av_pts.append(f"  {etiq} -> falta punto padre '{padre}' "
+                               f"(existen {', '.join(hijos)})")
+        # saltos en puntos principales
+        nums = []
+        for p in principales:
+            try:
+                nums.append(int(p))
+            except ValueError:
+                pass
+        if nums:
+            nums.sort()
+            for i in range(len(nums) - 1):
+                if nums[i + 1] != nums[i] + 1:
+                    falt = [f"{x:02d}" for x in range(nums[i] + 1, nums[i + 1])]
+                    _av_pts.append(f"  {etiq} -> falta(n): {', '.join(falt)}")
+    if _av_pts:
+        print(f"\n[AVISO] {len(_av_pts)} inconsistencia(s) en puntos de agenda:")
+        for a in _av_pts[:30]:
+            print(a)
+        if len(_av_pts) > 30:
+            print(f"  ... y {len(_av_pts)-30} más")
+    elif not _dup:
+        print("[OK] Sin duplicados ni saltos en puntos de agenda.")
+```
+
+---
+
+## MEJORA 2 — Wording de experiencia para 1 y 2 directores
+
+### Paso A — Qué agregar en el Excel
+
+En la hoja **Textos**, agregar **2 filas nuevas** debajo de la fila de `experiencia`:
+
+| Clave (col A) | Plantilla (col B) | Variables disponibles (col C) |
+|---|---|---|
+| `experiencia_1` | `Votamos a favor de un director que presentó experiencia en {esp_top} ({pct_esp_top}).` | `{n_dir} {esp_top} {pct_esp_top}` |
+| `experiencia_2` | `Votamos a favor de {n_dir} directores y ambos presentaban experiencia en {esp_top} ({pct_esp_top}).` | `{n_dir} {esp_top} {pct_esp_top}` |
+
+### Paso B — Cambio en el código
+
+**Ctrl+F →**
+
+```python
+        if bloque["experiencia"]:
+            tot_e = sum(e["n"] for e in bloque["experiencia"])
+            e0 = bloque["experiencia"][0]
+            out["experiencia"] = T["experiencia"].format(
+                n_dir=nd, esp_top=e0["esp"], pct_esp_top=_pct(e0["n"] / tot_e))
+```
+
+**Reemplazar por →**
+
+```python
+        if bloque["experiencia"]:
+            tot_e = sum(e["n"] for e in bloque["experiencia"])
+            e0 = bloque["experiencia"][0]
+            if nd == 1 and "experiencia_1" in T:
+                clave_exp = "experiencia_1"
+            elif nd == 2 and "experiencia_2" in T:
+                clave_exp = "experiencia_2"
+            else:
+                clave_exp = "experiencia"
+            out["experiencia"] = T[clave_exp].format(
+                n_dir=nd, esp_top=e0["esp"], pct_esp_top=_pct(e0["n"] / tot_e))
+```
+
+---
+
+La gracia de esta solución es que todo el wording vive en el Excel. Si mañana quieres cambiar la redacción para 1 o 2 directores, solo editas la celda en la hoja Textos sin tocar el código. Y si las claves `experiencia_1` o `experiencia_2` no existen en el Excel (por ejemplo si alguien usa una BD vieja), el código cae automáticamente al template original `experiencia` — no se rompe nada.
