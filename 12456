@@ -1,0 +1,242 @@
+# Bloques de Código — Mejoras al Script "2. Dashboard Juntas de Accionistas"
+
+Hay **3 mejoras** con **19 cambios puntuales**. Cada cambio tiene un texto exacto para buscar con **Ctrl+F** y el texto que lo reemplaza.
+
+---
+
+## MEJORA 1 — Treemap de sectores (legibilidad + contraste)
+
+### Cambio 1.1 — Reemplazar la función `_png_sectores` completa
+
+**Ctrl+F →** `def _png_sectores(bloque, param, navy="#1E2E6E"):`
+
+Selecciona desde esa línea hasta (e incluyendo) `return _guardar(fig)` de esa misma función (son las líneas 796–817 aprox.).
+
+**Reemplazar TODO ese bloque por:**
+
+```python
+def _png_sectores(bloque, param, navy="#1E2E6E"):
+    """Rectángulos proporcionales por sector, como el mosaico del reporte.
+    Mejora: ancho mínimo mayor, fuente adaptativa, contraste automático."""
+    plt = _mpl()
+    import matplotlib.colors as mcolors
+
+    secs = sorted(bloque["sectores"], key=lambda s: -s["pct"])
+    fig, ax = plt.subplots(figsize=(9.4, 2.9))
+
+    # -- ancho mínimo de 8 % para que el texto siempre quepa
+    MIN_W = 0.08
+    pcts_adj = [max(s["pct"], MIN_W) for s in secs]
+    suma_adj = sum(pcts_adj)
+    pcts_adj = [p / suma_adj for p in pcts_adj]   # re-escalar a 1.0
+
+    def _texto_contraste(hex_color):
+        """Devuelve 'white' o navy según el brillo del fondo."""
+        try:
+            rgb = mcolors.to_rgb(hex_color)
+            luminancia = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+            return "white" if luminancia < 0.55 else navy
+        except Exception:
+            return "white"
+
+    x = 0.0
+    for s, w in zip(secs, pcts_adj):
+        ax.add_patch(plt.Rectangle((x, 0), w * .99, 1, color=s["color"]))
+        cx = x + w * .495
+        color_txt = _texto_contraste(s["color"])
+
+        # fuente adaptativa según ancho del rectángulo
+        fs_label = 8 if w >= 0.12 else 7
+        fs_pct   = 8 if w >= 0.12 else 7
+        fs_emp   = 7.5 if w >= 0.12 else 6.5
+        corte    = 18 if w >= 0.10 else 12
+
+        ax.text(cx, .90, f"Empresas: {s['empresas']}", ha="center",
+                va="center", color=color_txt, fontsize=fs_emp)
+        ax.text(cx, .17, _corta(s["sector"], corte), ha="center",
+                va="center", color=color_txt, fontsize=fs_label,
+                fontweight="bold")
+        ax.text(cx, .05, f"{s['pct']*100:.2f}%", ha="center", va="center",
+                color=color_txt, fontsize=fs_pct, fontweight="bold")
+        x += w
+    ax.set_xlim(0, max(x, 1))
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    fig.tight_layout()
+    return _guardar(fig)
+```
+
+---
+
+## MEJORA 2 — Fecha "último día hábil del trimestre anterior"
+
+### Cambio 2.1 — Agregar `timedelta` al import
+
+**Ctrl+F →** `from datetime import datetime, date`
+
+**Reemplazar por:**
+
+```python
+from datetime import datetime, date, timedelta
+```
+
+### Cambio 2.2 — Agregar la función auxiliar (pégala justo ANTES de la función `redactar`)
+
+**Ctrl+F →** `def redactar(bloque, param, periodo):`
+
+**Pegar ANTES (es decir, arriba) de esa línea:**
+
+```python
+def _ultimo_dia_habil_trim_anterior(hoy=None):
+    """Devuelve el último día hábil (lun-vie) del último trimestre culminado."""
+    if hoy is None:
+        hoy = date.today()
+    q_actual = (hoy.month - 1) // 3 + 1
+    if q_actual == 1:
+        anio_q, mes_fin = hoy.year - 1, 12
+    else:
+        anio_q, mes_fin = hoy.year, (q_actual - 1) * 3
+    # último día del mes
+    if mes_fin == 12:
+        ultimo = date(anio_q, 12, 31)
+    else:
+        ultimo = date(anio_q, mes_fin + 1, 1) - timedelta(days=1)
+    # retroceder si cae en fin de semana
+    while ultimo.weekday() >= 5:
+        ultimo -= timedelta(days=1)
+    return ultimo
+
+
+```
+
+### Cambio 2.3 — Reemplazar las líneas 985-986 (el texto de la fecha en la portada)
+
+**Ctrl+F →** `"*El reporte ha sido elaborado con la informacion disponible al "`
+
+**Reemplazar las 2 líneas completas:**
+
+```python
+    rn = pn.add_run("*El reporte ha sido elaborado con la informacion disponible al "
+                    + _fecha_es(datetime.now()) + ".")
+```
+
+**por:**
+
+```python
+    rn = pn.add_run("*El reporte ha sido elaborado con la información disponible al "
+                    + _fecha_es(_ultimo_dia_habil_trim_anterior()) + ".")
+```
+
+---
+
+## MEJORA 3 — Correcciones ortográficas (tildes en texto visible del documento)
+
+Cada cambio es un **Ctrl+F → Reemplazar** directo. El orden no importa.
+
+### 3.1
+
+**Ctrl+F →** `"El voto en contra se emitio"`
+
+**Reemplazar por →** `"El voto en contra se emitió"`
+
+### 3.2
+
+**Ctrl+F →** `subtitulo(f"Total de {tj}s y Distribucion por Sector")`
+
+**Reemplazar por →** `subtitulo(f"Total de {tj}s y Distribución por Sector")`
+
+### 3.3
+
+**Ctrl+F →** `subtitulo(f"Votacion por Tema de Agenda en {tj}s")`
+
+**Reemplazar por →** `subtitulo(f"Votación por Tema de Agenda en {tj}s")`
+
+### 3.4
+
+**Ctrl+F →** `subtitulo(f"Votacion respecto a directores en {tj}s:")`
+
+**Reemplazar por →** `subtitulo(f"Votación respecto a directores en {tj}s:")`
+
+### 3.5
+
+**Ctrl+F →** `subtitulo(f"Votacion por empresa en {tj}s {periodo}", size=13)`
+
+**Reemplazar por →** `subtitulo(f"Votación por empresa en {tj}s {periodo}", size=13)`
+
+### 3.6
+
+**Ctrl+F →** `("Temas de Agenda", "Votacion"),`
+
+**Reemplazar por →** `("Temas de Agenda", "Votación"),`
+
+### 3.7
+
+**Ctrl+F →** `"RESPALDO DE LOS GRAFICOS DEL REPORTE DE JUNTAS DE ACCIONISTAS"`
+
+**Reemplazar por →** `"RESPALDO DE LOS GRÁFICOS DEL REPORTE DE JUNTAS DE ACCIONISTAS"`
+
+### 3.8
+
+**Ctrl+F →** `"Cada hoja contiene la base de datos exacta que alimenta un grafico del Word,"`
+
+**Reemplazar por →** `"Cada hoja contiene la base de datos exacta que alimenta un gráfico del Word,"`
+
+### 3.9
+
+**Ctrl+F →** `"y el grafico ya construido sobre esa data."`
+
+**Reemplazar por →** `"y el gráfico ya construido sobre esa data."`
+
+### 3.10
+
+**Ctrl+F →** `"Los graficos son nativos de Excel: se pueden editar, cambiar de tipo, copiar"`
+
+**Reemplazar por →** `"Los gráficos son nativos de Excel: se pueden editar, cambiar de tipo, copiar"`
+
+### 3.11
+
+**Ctrl+F →** `"Si se modifica una celda de la tabla, el grafico de esa hoja se actualiza solo."`
+
+**Reemplazar por →** `"Si se modifica una celda de la tabla, el gráfico de esa hoja se actualiza solo."`
+
+### 3.12
+
+**Ctrl+F →** `f"{tj} - Distribucion por sector"`
+
+**Reemplazar por →** `f"{tj} - Distribución por sector"`
+
+### 3.13 (hay 2 ocurrencias — reemplazar AMBAS)
+
+**Ctrl+F →** `f"{tj} - Votacion por tema de agenda"`
+
+**Reemplazar por →** `f"{tj} - Votación por tema de agenda"`
+
+*(Aparece en la línea del `hoja(...)` y en la línea del `ch.title = ...`. Reemplazar las dos.)*
+
+### 3.14
+
+**Ctrl+F →** `["Empresa", "Fecha", "Punto", "Tema de agenda", "Votacion",`
+
+**Reemplazar por →** `["Empresa", "Fecha", "Punto", "Tema de agenda", "Votación",`
+
+### 3.15
+
+**Ctrl+F →** `"Motivo", "Justificacion"],`
+
+**Reemplazar por →** `"Motivo", "Justificación"],`
+
+### 3.16
+
+**Ctrl+F →** `f"{tj} - Indicadores del periodo"`
+
+**Reemplazar por →** `f"{tj} - Indicadores del período"`
+
+---
+
+## Checklist final
+
+- [ ] Cambio 1.1 — función `_png_sectores` reemplazada
+- [ ] Cambio 2.1 — `timedelta` agregado al import
+- [ ] Cambio 2.2 — función `_ultimo_dia_habil_trim_anterior` pegada antes de `redactar`
+- [ ] Cambio 2.3 — líneas 985-986 reemplazadas (fecha + tilde "información")
+- [ ] Cambios 3.1 a 3.16 — tildes corregidas (16 reemplazos)
