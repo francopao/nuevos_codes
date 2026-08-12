@@ -1,0 +1,128 @@
+# ENTREGA 1 — Instrucciones de inserción en BD_G_P_total.py
+
+## Archivo a modificar
+`BD_G_P_total.py` (tu versión actual de 1337 líneas)
+
+## Archivo de referencia
+`entrega1_bloque_huella.py` (el código que te entrego)
+
+---
+
+## PASO 1 — Agregar la constante de ruta
+
+**Buscar** (Ctrl+F):
+```
+R_PARA_OUT   =
+```
+
+**Después** de esa línea (que termina con `...{suf}.xlsx')`), pegar:
+
+```python
+R_HUELLA_WB  = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\2. Reportes\Medición Huella de Carbono\Python\Inputs'
+                r'\Reporte de Huella con Proxies.xlsm')
+HUELLA_SHEET = 'Valorización de Instrumentos'
+```
+
+---
+
+## PASO 2 — Agregar la función `enriquecer_para_huella()`
+
+**Buscar**:
+```
+# ============================================================================
+#  MAIN
+```
+
+**Inmediatamente ANTES** de esa línea, pegar todo el bloque marcado como `[INSERCIÓN B]` del archivo `entrega1_bloque_huella.py` (desde la línea `# ============================================================================` con título `ENRIQUECIMIENTO PARA HUELLA` hasta `FIN [INSERCIÓN B]`).
+
+---
+
+## PASO 3 — Llamar la función desde main()
+
+**Buscar** dentro de `main()`:
+```python
+        print("\n================  LISTO  ================")
+```
+
+**Inmediatamente ANTES** de esa línea, pegar:
+
+```python
+        # --- Huella: enriquecimiento de BD1_S con columnas para Huella ----
+        try:
+            res_h = enriquecer_para_huella(base, res_s['BD1'], base.anio, base.mes)
+        except Exception as e:
+            print(f"\n[HUELLA] [AVISO] Enriquecimiento falló (no crítico): {e}")
+            import traceback; traceback.print_exc()
+            res_h = {'BD1_S_Huella': None}
+```
+
+---
+
+## PASO 4 — Agregar el print de resultado
+
+**Buscar**:
+```python
+        print("SOBERANOS:", res_s)
+```
+
+**Inmediatamente DESPUÉS**, agregar:
+```python
+        print("HUELLA   :", res_h)
+```
+
+---
+
+## Resultado esperado
+
+Al correr `BD_G_P_total.py`, después de generar los outputs normales, verás en consola:
+
+```
+================  HUELLA: ENRIQUECIMIENTO  ================
+[HUELLA] BD1_S leído: 3637 filas, 16 columnas.
+[HUELLA] TIPO_RENTA asignado:
+         RENTA FIJA: 2100
+         RENTA VARIABLE: 1537
+[HUELLA] Sector_GICS: 890/3637 instrumentos con sector asignado.
+[HUELLA]   Sin Sector_GICS por Strategy/assetclass:
+           TD/RFIG: 800
+           SOB/RFLG: 500
+           ...
+         → Para agregar: editar Parametria.xlsx hoja 'BU' (columna 'Sector')
+[HUELLA] Valorización leída: 450 SBS con GRUPO_ECONOMICO, 800 registros con VVL.
+[HUELLA] GRUPO_ECONOMICO: 320/650 SBS únicos matchearon (49.2%). 330 sin match.
+[HUELLA]   Top SBS sin GRUPO_ECONOMICO (por Weight máximo):
+           ...
+[HUELLA]   Cobertura GRUPO_ECONOMICO por AFP:
+           Integra: 85.0% (400/470)
+           Prima: 30.0% (100/330)
+           ...
+         → Fuente: Valorización de Instrumentos (solo Integra).
+[HUELLA] VVL (informativo): 800/3637 filas con valor de Valorización
+[HUELLA] Inv_MM_USD calculado con TC = 3.4005
+[HUELLA] ✓ Output -> Z:\...\202607 BD1_S_Huella.xlsx
+================  HUELLA: FIN  ================
+```
+
+## Columnas del archivo BD1_S_Huella.xlsx
+
+Las 16 originales + 9 nuevas:
+
+| # | Columna | Origen | Tipo |
+|---|---------|--------|------|
+| 1-16 | SBS, ISIN, Weight, Fondo, assetclass, Strategy, Afp, AUM, Tipo, Q, Nombre, Fecha, codEmisor, Precio, Inversión, ISIN_Origen | BD1_S original | Intactas |
+| 17 | TIPO_RENTA | assetclass + Cat de G&P | "RENTA FIJA" / "RENTA VARIABLE" |
+| 18 | Categoria | SBS[:2] + assetclass | Ej: "01RFLG" |
+| 19 | RANKEST | assetclass + Strategy | Ej: "RFLBU", "ALT" |
+| 20 | Sector_GICS | Parametria.xlsx por ISIN | Ej: "Financials" |
+| 21 | GRUPO_ECONOMICO | Valorización por SBS | Ej: "CREDICORP" |
+| 22 | VVL | Valorización por SBS+Fondo | Solo Integra, informativo |
+| 23 | Inv_MM_USD | Inversión / TC / 1e6 | USD millones |
+| 24 | TC_USD | RIESGO (base.valor) | Constante, ej: 3.4005 |
+
+## Notas importantes
+
+- Si el workbook de Huella no existe en la ruta configurada, el script NO falla; simplemente GRUPO_ECONOMICO y VVL quedan vacíos y se imprime un aviso.
+- La función `enriquecer_para_huella()` usa `leer_xlsx()` y `openpyxl` que ya están importados en el script.
+- No se modifica ninguna función existente ni se altera ningún output previo del pipeline.
