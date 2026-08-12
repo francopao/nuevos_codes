@@ -1,0 +1,333 @@
+# =============================================================================
+#  ENTREGA 1 — BLOQUE HUELLA: genera BD1_S_Huella.xlsx
+# =============================================================================
+#
+#  INSTRUCCIONES DE INSERCIÓN EN BD_G_P_total.py:
+#
+#  PASO 1 — Buscar la línea que contiene:
+#      R_PARA_OUT   = (r'Z:\Mesa de Inversiones\...
+#  Inmediatamente DESPUÉS de esa línea (que termina con ...{suf}.xlsx')
+#  pegar el bloque marcado como [INSERCIÓN A].
+#
+#  PASO 2 — Buscar la línea que contiene:
+#      # ============================================================================
+#      #  MAIN
+#  Inmediatamente ANTES de esa línea, pegar el bloque marcado como [INSERCIÓN B].
+#
+#  PASO 3 — Dentro de la función main(), buscar las líneas:
+#      print("\n================  LISTO  ================")
+#      print("NORMAL   :", res_n)
+#      print("SOBERANOS:", res_s)
+#  Inmediatamente ANTES de esas 3 líneas, pegar el bloque marcado como [INSERCIÓN C].
+#  Y DESPUÉS de "print("SOBERANOS:", res_s)" agregar:
+#      print("HUELLA   :", res_h)
+#
+# =============================================================================
+
+
+# ========================== [INSERCIÓN A] ====================================
+# Pegar DESPUÉS de la línea R_PARA_OUT = ...
+# -----------------------------------------------------------------------------
+
+R_HUELLA_WB  = (r'Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija'
+                r'\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI'
+                r'\2. Reportes\Medición Huella de Carbono\Python\Inputs'
+                r'\Reporte de Huella con Proxies.xlsm')
+HUELLA_SHEET = 'Valorización de Instrumentos'
+
+# ======================== FIN [INSERCIÓN A] ==================================
+
+
+# ========================== [INSERCIÓN B] ====================================
+# Pegar ANTES del bloque "# MAIN"
+# -----------------------------------------------------------------------------
+
+# ============================================================================
+#  ENRIQUECIMIENTO PARA HUELLA — BD1_S_Huella.xlsx
+# ============================================================================
+
+def enriquecer_para_huella(base, ruta_bd1s, anio, mes):
+    """Lee BD1_S recién escrito, lo enriquece con columnas para el pipeline
+    de Huella de Carbono y escribe BD1_S_Huella.xlsx.
+
+    NO modifica BD1_S ni ningún output existente del pipeline.
+    """
+    print("\n================  HUELLA: ENRIQUECIMIENTO  ================")
+
+    # -----------------------------------------------------------------
+    # 1. Leer BD1_S
+    # -----------------------------------------------------------------
+    df = leer_xlsx(ruta_bd1s, 'Sheet1')
+    df.columns = df.iloc[0, ::]
+    df = df.drop([0], axis=0).reset_index(drop=True)
+    n_total = len(df)
+    print(f"[HUELLA] BD1_S leído: {n_total} filas, {len(df.columns)} columnas.")
+
+    # -----------------------------------------------------------------
+    # 2. TIPO_RENTA
+    #    RF* → RENTA FIJA | RV* → RENTA VARIABLE
+    #    ALT + Cat='Private Debt' → RENTA FIJA | ALT + otro Cat → RENTA VARIABLE
+    # -----------------------------------------------------------------
+    # Mapeo SBS → Cat desde base.df (G&P Detallado, ya en memoria)
+    _sbs_cat = {}
+    if hasattr(base, 'df') and 'Cat' in base.df.columns:
+        for _, _r in (base.df[['SBS', 'Cat']]
+                      .dropna(subset=['SBS'])
+                      .drop_duplicates(subset=['SBS'])
+                      .iterrows()):
+            _sbs_cat[str(_r['SBS']).strip()] = str(_r['Cat']).strip()
+
+    def _tipo_renta(row):
+        ac = str(row.get('assetclass', '')).strip().upper()
+        if ac.startswith('RF'):
+            return 'RENTA FIJA'
+        if ac.startswith('RV'):
+            return 'RENTA VARIABLE'
+        if ac == 'ALT':
+            cat = _sbs_cat.get(str(row.get('SBS', '')).strip(), '')
+            return 'RENTA FIJA' if cat == 'Private Debt' else 'RENTA VARIABLE'
+        return 'OTROS'
+
+    df['TIPO_RENTA'] = df.apply(_tipo_renta, axis=1)
+
+    _tr_counts = df['TIPO_RENTA'].value_counts()
+    print(f"[HUELLA] TIPO_RENTA asignado:")
+    for _v, _c in _tr_counts.items():
+        print(f"         {_v}: {_c}")
+
+    # -----------------------------------------------------------------
+    # 3. Categoria = SBS[:2] + assetclass
+    # -----------------------------------------------------------------
+    df['Categoria'] = df['SBS'].astype(str).str[:2] + df['assetclass'].astype(str)
+
+    # -----------------------------------------------------------------
+    # 4. RANKEST
+    #    ALT → 'ALT' | otro → assetclass[:3] + Strategy
+    # -----------------------------------------------------------------
+    def _rankest(row):
+        ac = str(row.get('assetclass', '')).strip()
+        st = str(row.get('Strategy', '')).strip()
+        if ac.upper() == 'ALT':
+            return 'ALT'
+        return ac[:3] + st
+
+    df['RANKEST'] = df.apply(_rankest, axis=1)
+
+    # -----------------------------------------------------------------
+    # 5. Sector_GICS  (Parametria.xlsx hoja BU, por ISIN)
+    # -----------------------------------------------------------------
+    _sector_map = {}
+    try:
+        _pb = base.param_bu.copy(deep=True)
+        _pb.columns = _pb.iloc[0, ::]
+        _pb = _pb.drop([0], axis=0)
+        _pb = _pb.dropna(subset=['ISIN'])
+        for _, _r in _pb.iterrows():
+            _isin = str(_r.get('ISIN', '')).strip()
+            _sect = _r.get('Sector')
+            if _isin and _sect is not None and str(_sect).strip():
+                _sector_map[_isin] = str(_sect).strip()
+    except Exception as _e:
+        print(f"[HUELLA] [AVISO] No se pudo leer Sector_GICS de Parametria.xlsx: {_e}")
+
+    df['Sector_GICS'] = df['ISIN'].astype(str).str.strip().map(_sector_map)
+
+    _con_sector = df['Sector_GICS'].notna().sum()
+    _sin_sector = n_total - _con_sector
+    print(f"[HUELLA] Sector_GICS: {_con_sector}/{n_total} instrumentos con sector asignado.")
+    if _sin_sector > 0:
+        _sin = df[df['Sector_GICS'].isna()]
+        _resumen = (_sin.groupby(['Strategy', 'assetclass'])
+                    .size().reset_index(name='N')
+                    .sort_values('N', ascending=False))
+        print(f"[HUELLA]   Sin Sector_GICS por Strategy/assetclass:")
+        for _, _r in _resumen.iterrows():
+            print(f"           {_r['Strategy']}/{_r['assetclass']}: {_r['N']}")
+        print(f"         → Para agregar: editar Parametria.xlsx hoja 'BU', columna 'Sector' (indexado por ISIN).")
+
+    # -----------------------------------------------------------------
+    # 6. GRUPO_ECONOMICO  (de 'Valorización de Instrumentos' del workbook Huella)
+    # -----------------------------------------------------------------
+    _ge_map = {}    # SBS → GRUPO_ECONOMICO
+    _vvl_map = {}   # SBS+PORTAFOLIO → VVL
+
+    try:
+        if not os.path.exists(R_HUELLA_WB):
+            print(f"[HUELLA] [AVISO] No se encontró el workbook de Huella:")
+            print(f"         {R_HUELLA_WB}")
+            print(f"         GRUPO_ECONOMICO y VVL quedarán vacíos.")
+        else:
+            _wb = openpyxl.load_workbook(R_HUELLA_WB, read_only=True, data_only=True)
+            if HUELLA_SHEET not in _wb.sheetnames:
+                print(f"[HUELLA] [AVISO] No existe la hoja '{HUELLA_SHEET}' en el workbook.")
+                _wb.close()
+            else:
+                _ws = _wb[HUELLA_SHEET]
+                _rows = list(_ws.iter_rows(values_only=True))
+                _wb.close()
+
+                # Buscar fila de headers (la que contiene 'CODIGO_SBS')
+                _h_idx = None
+                for _i, _row in enumerate(_rows):
+                    if _row and any(str(c).strip() == 'CODIGO_SBS'
+                                    for c in _row if c is not None):
+                        _h_idx = _i
+                        break
+
+                if _h_idx is None:
+                    print("[HUELLA] [AVISO] No se encontró header 'CODIGO_SBS' en Valorización.")
+                else:
+                    _headers = [str(c).strip() if c else '' for c in _rows[_h_idx]]
+                    _ix = {h: j for j, h in enumerate(_headers) if h}
+
+                    _col_sbs  = _ix.get('CODIGO_SBS')
+                    _col_ge   = _ix.get('GRUPO_ECONOMICO')
+                    _col_vvl  = _ix.get('VALOR_VECTOR_LOCAL')
+                    _col_port = _ix.get('PORTAFOLIO')
+
+                    if _col_sbs is None:
+                        print("[HUELLA] [AVISO] Columna CODIGO_SBS no encontrada en Valorización.")
+                    else:
+                        for _row in _rows[_h_idx + 1:]:
+                            if not _row or _col_sbs >= len(_row):
+                                continue
+                            _sbs = (str(_row[_col_sbs]).strip()
+                                    if _row[_col_sbs] is not None else '')
+                            if not _sbs:
+                                continue
+
+                            # GRUPO_ECONOMICO (uno por SBS, tomar el primero)
+                            if (_col_ge is not None and _col_ge < len(_row)
+                                    and _row[_col_ge] is not None):
+                                _ge_val = str(_row[_col_ge]).strip()
+                                if _ge_val:
+                                    _ge_map.setdefault(_sbs, _ge_val)
+
+                            # VVL por SBS+PORTAFOLIO (para reconciliación)
+                            if (_col_vvl is not None and _col_vvl < len(_row)
+                                    and _col_port is not None and _col_port < len(_row)):
+                                _port = (str(_row[_col_port]).strip()
+                                         if _row[_col_port] else '')
+                                try:
+                                    _vvl_val = float(_row[_col_vvl])
+                                    # Mapear PORTAFOLIO → Fondo de BD1_S
+                                    _fondo_map_inv = {
+                                        'IN-FONDO1': 'F1', 'IN-FONDO2': 'F2',
+                                        'IN-FONDO3': 'F3',
+                                    }
+                                    _fondo = _fondo_map_inv.get(_port)
+                                    if _fondo:
+                                        _vvl_map[_sbs + '|' + _fondo] = _vvl_val
+                                except (ValueError, TypeError):
+                                    pass
+
+                    print(f"[HUELLA] Valorización leída: {len(_ge_map)} SBS con "
+                          f"GRUPO_ECONOMICO, {len(_vvl_map)} registros con VVL.")
+
+    except Exception as _e:
+        print(f"[HUELLA] [AVISO] Error leyendo workbook Huella: {_e}")
+
+    # Mapear GRUPO_ECONOMICO
+    df['GRUPO_ECONOMICO'] = df['SBS'].astype(str).str.strip().map(_ge_map)
+
+    # Diagnósticos GRUPO_ECONOMICO
+    _sbs_unicos = df['SBS'].nunique()
+    _sbs_con_ge = df.loc[df['GRUPO_ECONOMICO'].notna(), 'SBS'].nunique()
+    _sbs_sin_ge = _sbs_unicos - _sbs_con_ge
+    _pct = 100 * _sbs_con_ge / max(_sbs_unicos, 1)
+    print(f"[HUELLA] GRUPO_ECONOMICO: {_sbs_con_ge}/{_sbs_unicos} SBS únicos "
+          f"matchearon ({_pct:.1f}%). {_sbs_sin_ge} sin match.")
+
+    if _sbs_sin_ge > 0:
+        _sin_ge = df[df['GRUPO_ECONOMICO'].isna()].copy()
+        _sin_ge['_w'] = pd.to_numeric(_sin_ge['Weight'], errors='coerce').abs()
+
+        # Top 15 por peso
+        _top = (_sin_ge.groupby(['SBS', 'ISIN', 'Nombre'])['_w']
+                .max().reset_index()
+                .sort_values('_w', ascending=False)
+                .head(15))
+        if not _top.empty:
+            print(f"[HUELLA]   Top SBS sin GRUPO_ECONOMICO (por Weight máximo):")
+            for _, _r in _top.iterrows():
+                _nm = str(_r['Nombre'])[:40] if _r['Nombre'] else '—'
+                print(f"           SBS={_r['SBS']}  ISIN={_r['ISIN']}  "
+                      f"Weight={_r['_w']:.6f}  {_nm}")
+
+        # Cobertura por AFP
+        _cob = (df.groupby('Afp')
+                .apply(lambda g: pd.Series({
+                    'con_GE': g['GRUPO_ECONOMICO'].notna().sum(),
+                    'total': len(g),
+                    'pct': 100 * g['GRUPO_ECONOMICO'].notna().sum() / max(len(g), 1),
+                }))
+                .reset_index())
+        print(f"[HUELLA]   Cobertura GRUPO_ECONOMICO por AFP:")
+        for _, _r in _cob.iterrows():
+            print(f"           {_r['Afp']}: {_r['pct']:.1f}% "
+                  f"({int(_r['con_GE'])}/{int(_r['total'])})")
+        print(f"         → Fuente: Valorización de Instrumentos (solo Integra).")
+        print(f"           Instrumentos exclusivos de otras AFPs quedan sin match.")
+
+    # -----------------------------------------------------------------
+    # 7. VVL (informativo — Opción B, solo para reconciliación)
+    # -----------------------------------------------------------------
+    def _map_vvl(row):
+        _key = str(row.get('SBS', '')).strip() + '|' + str(row.get('Fondo', '')).strip()
+        return _vvl_map.get(_key)
+
+    df['VVL'] = df.apply(_map_vvl, axis=1)
+
+    _con_vvl = df['VVL'].notna().sum()
+    print(f"[HUELLA] VVL (informativo): {_con_vvl}/{n_total} filas con valor de "
+          f"Valorización (solo Integra F1/F2/F3).")
+
+    # -----------------------------------------------------------------
+    # 8. Inv_MM_USD = Inversión / TC / 1e6
+    # -----------------------------------------------------------------
+    _tc = base.valor
+    df['Inv_MM_USD'] = pd.to_numeric(df['Inversión'], errors='coerce') / _tc / 1e6
+    print(f"[HUELLA] Inv_MM_USD calculado con TC = {_tc}")
+
+    # -----------------------------------------------------------------
+    # 9. TC_USD (constante, para que el pipeline de Huella la lea)
+    # -----------------------------------------------------------------
+    df['TC_USD'] = _tc
+
+    # -----------------------------------------------------------------
+    # 10. Escribir output
+    # -----------------------------------------------------------------
+    ruta_salida = D_INTERMEDIO + f'{anio}{mes} BD1_S_Huella.xlsx'
+    try:
+        df.to_excel(ruta_salida, index=False)
+        print(f"\n[HUELLA] ✓ Output -> {ruta_salida}")
+        print(f"[HUELLA]   Columnas: {list(df.columns)}")
+        print(f"[HUELLA]   Filas: {len(df)}")
+    except Exception as _e:
+        print(f"[HUELLA] [ERROR] No se pudo escribir: {_e}")
+        ruta_salida = None
+
+    print("================  HUELLA: FIN  ================\n")
+    return {'BD1_S_Huella': ruta_salida}
+
+# ======================== FIN [INSERCIÓN B] ==================================
+
+
+# ========================== [INSERCIÓN C] ====================================
+# Pegar ANTES de: print("\n================  LISTO  ================")
+# dentro de la función main(), después de res_s = procesar_rama(...)
+# -----------------------------------------------------------------------------
+
+        # --- Huella: enriquecimiento de BD1_S con columnas para Huella ----
+        try:
+            res_h = enriquecer_para_huella(base, res_s['BD1'], base.anio, base.mes)
+        except Exception as e:
+            print(f"\n[HUELLA] [AVISO] Enriquecimiento falló (no crítico): {e}")
+            import traceback; traceback.print_exc()
+            res_h = {'BD1_S_Huella': None}
+
+# ======================== FIN [INSERCIÓN C] ==================================
+
+# Y agregar esta línea DESPUÉS de: print("SOBERANOS:", res_s)
+#
+#         print("HUELLA   :", res_h)
