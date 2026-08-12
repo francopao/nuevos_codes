@@ -1,0 +1,94 @@
+Perfecto, lo tengo claro. Son dos piezas: una función auxiliar y un ajuste quirúrgico en el loop del Word.
+
+---
+
+## Pieza 1 — Función auxiliar `_filtrar_y_renumerar`
+
+**Ctrl+F →** `def _sin_bordes(tabla):`
+
+**Pegar ANTES (arriba) de esa línea:**
+
+```python
+def _filtrar_y_renumerar(puntos):
+    """Quita puntos sin decisión y renumera principales y sub-puntos."""
+    import copy
+    vivos = [copy.copy(p) for p in puntos if (p.get("decision") or "").strip()]
+    if not vivos:
+        return vivos
+    # principales únicos en orden de aparición
+    vistos = []
+    for p in vivos:
+        pto_str = str(p["punto"])
+        main = pto_str.split(".")[0] if "." in pto_str else pto_str
+        if main not in vistos:
+            vistos.append(main)
+    mapa = {m: f"{i:02d}" for i, m in enumerate(vistos, 1)}
+    sub_cnt = defaultdict(int)
+    for p in vivos:
+        pto_str = str(p["punto"])
+        if "." in pto_str:
+            main_v = pto_str.split(".")[0]
+            main_n = mapa[main_v]
+            sub_cnt[main_n] += 1
+            p["punto"] = f"{main_n}.{sub_cnt[main_n]:02d}"
+        else:
+            p["punto"] = mapa[pto_str]
+    return vivos
+
+
+```
+
+---
+
+## Pieza 2 — Ajuste en el loop de la tabla Word
+
+**Ctrl+F →**
+
+```
+        alterna = False
+        for e in bloque["tabla"]:
+            fe = tb.add_row().cells
+            fe[0].width, fe[1].width = Cm(11.2), Cm(5.6)
+            for c in fe:
+                _sombrear(c, AMA)
+            rr = fe[0].paragraphs[0].add_run(e["empresa"])
+            rr.bold = True
+            rr.font.size = Pt(9)
+            rr.font.color.rgb = NAV
+            for f in e["fechas"]:
+```
+
+**Reemplazar por →**
+
+```python
+        alterna = False
+        for e in bloque["tabla"]:
+            fechas_ok = []
+            for f in e["fechas"]:
+                pts = _filtrar_y_renumerar(f["puntos"])
+                if pts:
+                    fechas_ok.append({"fecha": f["fecha"], "puntos": pts})
+            if not fechas_ok:
+                continue
+            fe = tb.add_row().cells
+            fe[0].width, fe[1].width = Cm(11.2), Cm(5.6)
+            for c in fe:
+                _sombrear(c, AMA)
+            rr = fe[0].paragraphs[0].add_run(e["empresa"])
+            rr.bold = True
+            rr.font.size = Pt(9)
+            rr.font.color.rgb = NAV
+            for f in fechas_ok:
+```
+
+---
+
+Los cambios son exactamente **3 líneas nuevas** + **1 línea modificada** respecto al original:
+
+| Lo nuevo | Qué hace |
+|---|---|
+| `fechas_ok = []` + loop interno | Pre-filtra los puntos sin decisión y renumera los sobrevivientes |
+| `if not fechas_ok: continue` | Si una empresa se queda con cero puntos tras filtrar, no pinta ni la fila de empresa |
+| `for f in fechas_ok:` | Itera sobre las fechas filtradas en vez de las originales |
+
+La función `_filtrar_y_renumerar` trabaja sobre copias (`copy.copy`), así que los datos originales en `bloque["tabla"]` quedan intactos para el Excel — el Excel sigue mostrando todas las filas incluyendo las sin decisión.
