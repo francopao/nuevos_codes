@@ -1,0 +1,108 @@
+Ahora busco cómo se genera GRUPO_ECONOMICO:
+
+Ahora busco Inversión vs VVL:
+
+Ahora tengo todo el contexto. Acá van las tres respuestas:
+
+---
+
+## 1. Reporte de PROBLEMÁTICOS y Cuestionario Integra
+
+El `no_match_report` (PROBLEMÁTICOS) se construye en el Módulo 10 pero **nunca se exporta** — solo imprime un conteo en consola. Y "Cuestionario Integra" es simplemente el valor de `Plus` de cada instrumento, pero tampoco hay un reporte filtrado. Necesitas agregar la exportación.
+
+**Ctrl+F →**
+
+```python
+            all_results[afp] = {
+                "valorizacion": val, "objetos": objetos,
+                "aum_mm": ctx.get("aum_multifondos_mm"),
+                "presentacion": pres,
+            }
+            if verbose:
+                print(f"  [{afp}] {len(objetos)} objetos, {len(pres.df)} registros.")
+```
+
+**Reemplazar por →**
+
+```python
+            all_results[afp] = {
+                "valorizacion": val, "objetos": objetos,
+                "aum_mm": ctx.get("aum_multifondos_mm"),
+                "presentacion": pres,
+            }
+            if verbose:
+                print(f"  [{afp}] {len(objetos)} objetos, {len(pres.df)} registros.")
+
+            # --- Reporte de instrumentos sin huella y Cuestionario Integra ---
+            vb = ctx["valorizacion_builder"]
+            _cols_rep = ["PORTAFOLIO", "TITULO", "CODIGO_SBS", "CODIGO_ISIN",
+                         "GRUPO_ECONOMICO", "Plus", "Inv MM$", "Huella", "CO2-H"]
+            _cols_rep = [c for c in _cols_rep if c in val.columns]
+
+            prob = val.loc[
+                (pd.to_numeric(val["CO2-H"], errors="coerce").fillna(0.0) == 0) &
+                (pd.to_numeric(val["Inv MM$"], errors="coerce").fillna(0.0).abs() > 1e-9),
+                _cols_rep].copy()
+            if not prob.empty:
+                prob.insert(0, "AFP", afp)
+                prob.insert(1, "Tipo", "PROBLEMÁTICO (con inversión, sin huella)")
+            cuest = val.loc[val["Plus"] == "Cuestionario Integra", _cols_rep].copy()
+            if not cuest.empty:
+                cuest.insert(0, "AFP", afp)
+                cuest.insert(1, "Tipo", "Cuestionario Integra")
+            all_results[afp]["diagnostico"] = pd.concat(
+                [prob, cuest], ignore_index=True)
+```
+
+Luego, para que se exporte como una hoja del Histórico, agrega esto. **Ctrl+F →**
+
+```python
+    # --- Dashboard (existente + multi-AFP) ---
+```
+
+**Pegar ANTES de esa línea →**
+
+```python
+    # --- Exportar diagnóstico consolidado ---
+    diag_frames = [r["diagnostico"] for r in all_results.values()
+                   if "diagnostico" in r and not r["diagnostico"].empty]
+    if diag_frames:
+        diag = pd.concat(diag_frames, ignore_index=True)
+        diag = diag.sort_values(["AFP", "Tipo", "PORTAFOLIO"], ignore_index=True)
+        ruta_diag = str(FsPath(output_dir) / "Diagnostico_Cobertura.xlsx")
+        diag.to_excel(ruta_diag, index=False, sheet_name="Diagnóstico")
+        if verbose:
+            n_prob = (diag["Tipo"].str.startswith("PROB")).sum()
+            n_cuest = (diag["Tipo"] == "Cuestionario Integra").sum()
+            print(f"\n  [Diagnóstico] {n_prob} PROBLEMÁTICOS + {n_cuest} Cuestionario Integra")
+            print(f"  [Diagnóstico] -> {ruta_diag}")
+
+```
+
+Esto te genera un Excel `Diagnostico_Cobertura.xlsx` con una sola hoja donde cada fila tiene AFP, Tipo (PROBLEMÁTICO o Cuestionario Integra), fondo, nombre, SBS, ISIN, grupo económico, y la inversión en MM$.
+
+---
+
+## 2. Cómo se genera GRUPO_ECONOMICO
+
+No se calcula — **viene directo del input**. Es una columna que ya existe en el archivo `BD1_S_Huella.xlsx` (columna original probablemente llamada `grupo_economico` o `Grupo Economico`). El script la lee, la renombra a `GRUPO_ECONOMICO` usando el schema de la línea 592, y la pasa tal cual. Su único uso computacional es en la **herencia por emisor**: si un instrumento no tiene huella pero otro instrumento del mismo `GRUPO_ECONOMICO` sí la tiene, le "hereda" esa intensidad (eso es lo que hacen las 14-21 herencias que ves en consola por AFP).
+
+---
+
+## 3. Inversión (Inv MM$) vs VVL (VALOR_VECTOR_LOCAL)
+
+Son cosas distintas aunque están relacionadas:
+
+**VVL (VALOR_VECTOR_LOCAL)** es la valorización del instrumento **en soles** (moneda local). En el flujo del `.xlsm` original, viene directamente del reporte de cartera de la SBS. En el flujo `BD1_S_Huella`, no existe como columna directa — el script la **reconstruye** a partir de `Weight × AUM` (línea 3599: `df["VALOR_VECTOR_LOCAL"] = Weight * AUM`), donde AUM es el patrimonio del fondo en soles y Weight es el peso del instrumento. Eso es un "reverse-engineering" para que el resto del pipeline funcione igual.
+
+**Inv MM$ (columna AD)** es la inversión **en millones de dólares**. Se calcula en la línea 1821:
+
+```
+Inv MM$ = VVL / Tipo_de_Cambio / 1,000,000
+```
+
+Es decir: VVL convertido a dólares y expresado en millones.
+
+**¿Por qué VVL tiene vacíos?** Porque en `BD1_S_Huella` los campos `Weight` o `AUM` pueden estar vacíos para ciertos instrumentos (instrumentos sin peso asignado, líneas de caja, etc.). Si `Weight` es NaN, entonces `Weight × AUM = NaN`, y VVL queda vacío. En cambio, `Inv MM$` aplica `fillna(0.0)` aguas abajo en varias operaciones, por eso no ves vacíos pero sí ceros — son los mismos instrumentos, solo que el cero se forzó después.
+
+En resumen: **VVL en soles → dividir entre TC → Inv MM$ en dólares**. La diferencia de escala entre ambas columnas es el tipo de cambio (~3.66) y el factor de un millón.
