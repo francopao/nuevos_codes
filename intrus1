@@ -1,0 +1,30 @@
+Los placeholders se reemplazaron bien. El problema es otro. Voy a extraer los datos JSON reales y probar la lógica de los charts:Los datos están completos: 8916 registros, campo AFP presente. Los fixes anteriores funcionaron. El problema debe estar en un error de JavaScript que rompe la ejecución. Voy a buscar el syntax error:Ahí está. Todavía hay un `# -----` (comentario de Python) **dentro del JavaScript**, en otra parte del código que no habíamos corregido. Node confirma que es un SyntaxError que mata todo el script. Vamos a encontrar dónde está en tu archivo Python:Encontrado. Hay un `# -----` en la **línea 3181**, que está *dentro* del string `JS_DASHBOARD` (entre las líneas 2845 y 3416). Al estar dentro del JavaScript, el navegador lo lee como código JS inválido y muere todo. Veamos el contexto exacto:Ahí está la línea intrusa. Es un solo cambio con Ctrl+F:
+
+---
+
+**Ctrl+F →** (copia estas líneas exactas, incluyendo las de alrededor para que sea única)
+
+```
+// ORQUESTADOR DE RENDER
+// ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CHARTS MULTI-AFP (comparativos)
+```
+
+**Reemplazar por →**
+
+```
+// ORQUESTADOR DE RENDER
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CHARTS MULTI-AFP (comparativos)
+```
+
+Es decir: **eliminar únicamente la línea 3181** (`# -----...`). Es un comentario de Python que quedó pegado dentro del string del JavaScript; en JS el carácter `#` es un token inválido y provoca un SyntaxError que impide que se ejecute *todo* el `<script>` — por eso `render()` nunca corre y todos los charts salen vacíos.
+
+Después de borrarla, para confirmar que no quedan más comentarios de Python dentro del JS, corre esto en tu terminal (o pídeme que lo verifique si me pasas el HTML de nuevo):
+
+Busca visualmente en el string `JS_DASHBOARD` (desde `JS_DASHBOARD = """` hasta el `"""` de cierre) cualquier línea que empiece con `#`. En JavaScript los comentarios son `//` o `/* */`, nunca `#`. Ese era el único que quedaba, así que con este cambio el dashboard debería renderizar todos los charts.
