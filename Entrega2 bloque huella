@@ -1,0 +1,634 @@
+# =============================================================================
+#  ENTREGA 2 — MODIFICACIONES AL PIPELINE DE HUELLA
+#  Archivo: huella_pipeline.py (Huella BD - Franco 5)
+# =============================================================================
+#
+#  INSTRUCCIONES DE INSERCIÓN:
+#
+#  PASO 1 — Buscar:   NOMBRE_DASHBOARD = "Dashboard_Huella.html"
+#           DESPUÉS de esa línea, pegar [INSERCIÓN A] (constantes BD1S).
+#
+#  PASO 2 — Buscar:   def construir_valorizacion(cfg: "Config",
+#           ANTES de esa línea, pegar [INSERCIÓN B] (adaptador + pipeline BD1S).
+#
+#  PASO 3 — Buscar:   CSS_DASHBOARD = """
+#           ANTES de esa línea, pegar [INSERCIÓN C] (colores multi-AFP).
+#
+#  PASO 4 — Buscar:   function render(){
+#           ANTES de esa línea (dentro de JS_DASHBOARD), pegar [INSERCIÓN D]
+#           (funciones JS de charts multi-AFP).
+#
+#  PASO 5 — Dentro de la función render(), buscar:
+#             safe('gContribGral'
+#           DESPUÉS de esa línea (la última safe() del render), pegar
+#           [INSERCIÓN E] (llamadas a charts multi-AFP).
+#
+#  PASO 6 — Buscar el array "tarjetas = [" dentro de construir_dashboard().
+#           DESPUÉS de la última tupla del array (gContribGral...) y ANTES
+#           del "]", pegar [INSERCIÓN F] (tarjetas nuevas).
+#
+#  PASO 7 — REEMPLAZAR el bloque if __name__ == "__main__" completo
+#           por [INSERCIÓN G].
+#
+# =============================================================================
+
+
+# ========================== [INSERCIÓN A] ====================================
+# Pegar DESPUÉS de: NOMBRE_DASHBOARD = "Dashboard_Huella.html"
+# -----------------------------------------------------------------------------
+
+# --- Modo BD1S: usa BD1_S_Huella.xlsx en lugar del workbook ----------------
+BD1S_HUELLA_DIR = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+    r"\1.Data Histórica\Output\Intermedio"
+)
+BD1S_HUELLA_FNAME = "{anio}{mes} BD1_S_Huella.xlsx"
+
+# ======================== FIN [INSERCIÓN A] ==================================
+
+
+# ========================== [INSERCIÓN B] ====================================
+# Pegar ANTES de: def construir_valorizacion(cfg: "Config",
+# -----------------------------------------------------------------------------
+
+###############################################################################
+#                                                                             #
+#   ADAPTADOR BD1S → VALORIZACIÓN                                             #
+#   Lee BD1_S_Huella.xlsx y produce inputs compatibles con                    #
+#   ValorizacionBuilder (sin modificar ninguna clase existente).              #
+#                                                                             #
+###############################################################################
+
+def _cargar_bd1s_huella(ruta_bd1s: str, afp: str = "Integra",
+                         verbose: bool = True):
+    """Lee BD1_S_Huella.xlsx para una AFP y produce los inputs que
+    ValorizacionBuilder espera.
+
+    Estrategia clave: VVL = Weight × AUM (reverse-engineered) para que
+    ValorizacionBuilder calcule Weight = VVL/AUM = Weight original.
+    Así no se modifica el builder y el Weight queda idéntico al reporte X.
+
+    Retorna: (df_val, caja_map, tc, aum_mm, caja_neta_mm,
+              parametria_lookup, sector_lookup)
+    """
+    df = pd.read_excel(ruta_bd1s, engine="openpyxl")
+
+    # --- Filtrar por AFP y solo F1/F2/F3 (excluir Multifondos) ----
+    df = df[df["Afp"] == afp].copy()
+    df = df[df["Fondo"].isin(["F1", "F2", "F3"])].copy()
+    if df.empty:
+        raise ValueError(f"No hay datos para AFP='{afp}' (F1/F2/F3) en BD1_S_Huella.")
+
+    # --- TC ---
+    tc = float(df["TC_USD"].iloc[0])
+
+    # --- Mapear Fondo → PORTAFOLIO ---
+    _fondo_a_port = {"F1": "IN-FONDO1", "F2": "IN-FONDO2", "F3": "IN-FONDO3"}
+    df["PORTAFOLIO"] = df["Fondo"].map(_fondo_a_port)
+
+    # --- Renombrar al esquema de Valorización ---
+    df = df.rename(columns={
+        "SBS":       "CODIGO_SBS",
+        "ISIN":      "CODIGO_ISIN",
+        "Nombre":    "TITULO",
+        "codEmisor": "EMISOR",
+    })
+
+    # --- VVL reverse-engineered: Weight × AUM → Weight = VVL/AUM ✓ ---
+    _w = pd.to_numeric(df["Weight"], errors="coerce").fillna(0.0)
+    _aum = pd.to_numeric(df["AUM"], errors="coerce").fillna(0.0)
+    df["VALOR_VECTOR_LOCAL"] = _w * _aum
+
+    # --- caja_map: PORTAFOLIO → AUM (patrimonio del fondo) ---
+    caja_map = {}
+    for port in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+        sub = df[df["PORTAFOLIO"] == port]
+        if not sub.empty:
+            caja_map[port] = float(sub["AUM"].iloc[0])
+
+    # --- AUM multifondos en USD MM ---
+    aum_total_pen = sum(caja_map.values())
+    aum_mm = aum_total_pen / tc / 1e6
+
+    # --- Caja neta = 0 (no se usa en Cobertura) ---
+    caja_neta_mm = 0.0
+
+    # --- Parametria lookup desde columnas de BD1_S_Huella ---
+    parametria_lookup: Dict[str, dict] = {}
+    for _, row in df.drop_duplicates(subset=["CODIGO_SBS"]).iterrows():
+        sbs = _to_string(row.get("CODIGO_SBS"))
+        if not sbs:
+            continue
+        parametria_lookup[sbs] = {
+            "NOMBRE":  row.get("TITULO"),
+            "CODIGO":  _to_string(row.get("Categoria")),
+            "RIESGOS": _to_string(row.get("Strategy")),
+            "RANKEST": _to_string(row.get("RANKEST") or row.get("assetclass")),
+        }
+
+    # --- Sector lookup ---
+    sector_lookup: Dict[str, str] = {}
+    for _, row in df.drop_duplicates(subset=["CODIGO_SBS"]).iterrows():
+        sbs = _to_string(row.get("CODIGO_SBS"))
+        sector = row.get("Sector_GICS")
+        if sbs and pd.notna(sector) and str(sector).strip():
+            # Doble clave: por SBS y por Nombre (para compatibilidad con M12)
+            sector_lookup[f"SBS::{sbs}"] = str(sector).strip()
+
+    if verbose:
+        print(f"  [BD1S] AFP={afp}: {len(df)} filas, TC={tc:.4f}, "
+              f"AUM={aum_mm:,.2f} USD MM, Fondos={list(caja_map.keys())}")
+
+    return df, caja_map, tc, aum_mm, caja_neta_mm, parametria_lookup, sector_lookup
+
+
+def construir_valorizacion_bd1s(cfg: "Config", ruta_bd1s: str,
+                                 afp: str = "Integra",
+                                 shared: Optional[dict] = None,
+                                 verbose: bool = True):
+    """Módulos 1..10 usando BD1_S_Huella como cartera.
+
+    'shared' es un dict con recursos compartidos (bd, px, perd, comp, mkt)
+    para evitar recargarlos en cada AFP. Si es None, se construyen aquí.
+    """
+    df_val, caja_map, tc, aum_mm, caja_neta_mm, param_lk, sector_lk = \
+        _cargar_bd1s_huella(ruta_bd1s, afp, verbose)
+
+    # --- Recursos compartidos (se construyen una vez para todas las AFPs) ---
+    if shared is None:
+        shared = _construir_shared(cfg, verbose)
+
+    vb = ValorizacionBuilder(
+        df_val,
+        caja_map=caja_map,
+        usd_rate=tc,
+        parametria_lookup=param_lk,
+        intensidad_post=shared["intensidad_post"],
+        plus_lookup=shared["plus_lookup"],
+        intensidad_t1={},
+        proxy_engine=shared["proxy_engine"],
+        perdieron_lookup=shared["perd_lookup"],
+        perdieron_mode="fill",
+        attrs_lookup=shared["attrs_lookup"],
+        aum_multifondos_mm=aum_mm,
+        verbose=verbose,
+    )
+    vb.build()
+
+    ctx = {
+        "config": cfg, "tc": tc, "sector_lookup": sector_lk,
+        "aum_multifondos_mm": aum_mm, "caja_neta_mm": caja_neta_mm,
+        "valorizacion_builder": vb,
+        "market_cap_loader": shared.get("mkt"),
+        "herencias": vb.get_inherited_history(),
+    }
+    return vb.df, ctx
+
+
+def _construir_shared(cfg: "Config", verbose: bool = True) -> dict:
+    """Construye BD MSCI, Proxies, Perdieron, Comparables y MarketCap UNA vez.
+    Se comparten entre todas las AFPs."""
+    if verbose:
+        print("  [SHARED] Construyendo recursos compartidos (BD MSCI, Proxies, etc.)...")
+
+    bd = BDMSCIBuilder(cfg).build()
+    bd.append_proxies(cfg.path_proxies)
+
+    perd = PerdieronHuellaLoader(cfg).build()
+    perd_lookup = perd.as_intensidad_lookup() if not perd.df.empty else {}
+
+    px = ProxyEngine(cfg).load()
+    intensidad_post = px.apply_to_bd(bd.as_intensidad_lookup())
+
+    comp = ComparablesLoader(cfg, verbose=verbose).build()
+    mkt = _market_cap_seguro(cfg, verbose)
+
+    return {
+        "bd": bd,
+        "proxy_engine": px,
+        "intensidad_post": intensidad_post,
+        "plus_lookup": bd.as_plus_lookup(),
+        "attrs_lookup": bd.as_attrs_lookup(),
+        "perd_lookup": perd_lookup,
+        "comp": comp,
+        "mkt": mkt,
+    }
+
+
+def run_pipeline_bd1s(semestre: str,
+                      ruta_bd1s: str,
+                      output_dir: str = OUTPUT_DIR_DEFAULT,
+                      afps: Optional[List[str]] = None,
+                      ruta_historico: Optional[str] = None,
+                      ruta_dashboard: Optional[str] = None,
+                      verbose: bool = True):
+    """Pipeline multi-AFP completo usando BD1_S_Huella como cartera.
+
+    Para cada AFP construye Valorización + pivots y los exporta al
+    histórico. Después genera el dashboard con charts existentes (por AFP)
+    + charts comparativos (multi-AFP).
+    """
+    out = FsPath(str(output_dir))
+    out.mkdir(parents=True, exist_ok=True)
+    ruta_historico = ruta_historico or str(out / NOMBRE_HISTORICO)
+    ruta_dashboard = ruta_dashboard or str(out / NOMBRE_DASHBOARD)
+
+    cfg = Config.from_semestre(semestre)
+    if verbose:
+        print(cfg.summary())
+
+    # --- Determinar AFPs disponibles ---
+    df_full = pd.read_excel(ruta_bd1s, engine="openpyxl")
+    available = sorted(df_full["Afp"].unique())
+    if afps is None:
+        afps = available
+    if verbose:
+        print(f"  [BD1S] AFPs disponibles: {available}")
+        print(f"  [BD1S] AFPs a procesar: {afps}")
+    del df_full
+
+    # --- Recursos compartidos (una sola carga) ---
+    faltantes = cfg.check_paths(verbose=verbose)
+    shared = _construir_shared(cfg, verbose)
+
+    # --- Procesar cada AFP ---
+    exp = HistoricoExporter(ruta_historico)
+    all_results: Dict[str, dict] = {}
+
+    for afp in afps:
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"  HUELLA — AFP: {afp}")
+            print(f"{'='*60}")
+        try:
+            val, ctx = construir_valorizacion_bd1s(
+                cfg, ruta_bd1s, afp=afp, shared=shared, verbose=verbose)
+
+            pres = PresentacionBuilder(
+                val, cfg.semestre,
+                sector_lookup=ctx.get("sector_lookup", {}),
+                intensidades_comp=shared["comp"].intensidades,
+                aum_comp=(shared["mkt"].aum if shared["mkt"] else {}),
+                caja_neta_mm=ctx.get("caja_neta_mm", 0.0),
+                aum_total_mm=ctx.get("aum_multifondos_mm"),
+            )
+            objetos = pres.build_all()
+
+            # --- Exportar al histórico con sufijo AFP ---
+            # Inyectar columna AFP en el formato largo para el dashboard
+            largo = pres.to_long()
+            largo.insert(1, "AFP", afp)
+            _exportar_con_afp(exp, largo, cfg.semestre, afp, pres, verbose)
+
+            all_results[afp] = {
+                "valorizacion": val, "objetos": objetos,
+                "aum_mm": ctx.get("aum_multifondos_mm"),
+                "presentacion": pres,
+            }
+            if verbose:
+                print(f"  [{afp}] {len(objetos)} objetos, {len(pres.df)} registros.")
+
+        except Exception as exc:
+            if verbose:
+                print(f"  [{afp}] [ERROR] {exc}")
+                import traceback; traceback.print_exc()
+
+    # --- Dashboard (existente + multi-AFP) ---
+    if verbose:
+        print(f"\n  [Dashboard] Generando con {len(all_results)} AFP(s)...")
+    construir_dashboard(ruta_historico, ruta_dashboard)
+
+    return {
+        "config": cfg, "resultados": all_results,
+        "ruta_historico": ruta_historico, "ruta_dashboard": ruta_dashboard,
+    }
+
+
+def _exportar_con_afp(exp: "HistoricoExporter", largo: pd.DataFrame,
+                       semestre: str, afp: str,
+                       builder: "PresentacionBuilder",
+                       verbose: bool = True):
+    """Exporta los datos de una AFP al histórico, incluyendo la columna AFP.
+
+    Preserva cortes previos y acumula en la hoja HISTORICO.
+    La hoja del corte se nombra '{semestre}_{afp}' para no colisionar.
+    """
+    hojas = exp._leer_existente()
+    nombre_hoja = f"{semestre}_{afp}"[:31]
+
+    # --- HISTORICO acumulado: purgar este corte+AFP y reinsertar ---
+    hist_prev = hojas.get(exp.HOJA_HISTORICO, pd.DataFrame())
+    if not hist_prev.empty:
+        # Añadir AFP a datos históricos previos que no la tengan
+        if "AFP" not in hist_prev.columns:
+            hist_prev.insert(1, "AFP", "Integra")
+        # Purgar este corte+AFP
+        mask = ((hist_prev["FECHA_CORTE"].astype(str) == semestre) &
+                (hist_prev["AFP"].astype(str) == afp))
+        hist_prev = hist_prev[~mask]
+
+    historico = (pd.concat([hist_prev, largo], ignore_index=True)
+                 if not hist_prev.empty else largo)
+    historico = historico.sort_values(
+        ["FECHA_CORTE", "AFP", "OBJETO", "METRICA"], ignore_index=True)
+
+    # --- Metadata ---
+    meta_prev = hojas.get(exp.HOJA_META, pd.DataFrame())
+    if not meta_prev.empty and "FECHA_CORTE" in meta_prev.columns:
+        mask = (meta_prev["FECHA_CORTE"].astype(str) == semestre)
+        if "AFP" in meta_prev.columns:
+            mask = mask & (meta_prev["AFP"].astype(str) == afp)
+        meta_prev = meta_prev[~mask]
+    meta_new = pd.DataFrame([{
+        "FECHA_CORTE": semestre, "AFP": afp,
+        "GENERADO": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "N_REGISTROS_FUENTE": len(builder.df),
+        "HUELLA_TOTAL": float(builder.df[COL["huella"]].sum()),
+        "AUM_TOTAL_MM": float(builder.df[COL["inv"]].sum()),
+    }])
+    meta = (pd.concat([meta_prev, meta_new], ignore_index=True)
+            if not meta_prev.empty else meta_new)
+
+    # --- Reescritura preservando cortes previos ---
+    otros = {k: v for k, v in hojas.items()
+             if k not in (exp.HOJA_HISTORICO, exp.HOJA_META, nombre_hoja)}
+
+    with pd.ExcelWriter(exp.ruta, engine="openpyxl") as xw:
+        historico.to_excel(xw, sheet_name=exp.HOJA_HISTORICO, index=False)
+        meta.to_excel(xw, sheet_name=exp.HOJA_META, index=False)
+        largo.to_excel(xw, sheet_name=nombre_hoja, index=False)
+        for nombre, df in sorted(otros.items(), reverse=True):
+            df.to_excel(xw, sheet_name=str(nombre)[:31], index=False)
+
+    if verbose:
+        print(f"  [Módulo 13] {afp} -> hoja '{nombre_hoja}' en histórico.")
+
+# ======================== FIN [INSERCIÓN B] ==================================
+
+
+# ========================== [INSERCIÓN C] ====================================
+# Pegar ANTES de: CSS_DASHBOARD = """
+# -----------------------------------------------------------------------------
+
+# Paleta de colores por AFP (para charts comparativos multi-AFP)
+COLORES_AFP = {
+    "Integra":    "#00AECB",   # teal corporativo
+    "Prima":      "#002060",   # azul oscuro
+    "Profuturo":  "#516FED",   # azul-violeta
+    "Habitat":    "#ACD7CA",   # verde suave
+    "Ex_Integra": "#8A99A8",   # gris
+}
+COLORES_AFP_FALLBACK = ["#00AECB", "#002060", "#516FED", "#ACD7CA", "#8A99A8",
+                         "#C8E5DC", "#61E8FF", "#AFC3E6"]
+
+# ======================== FIN [INSERCIÓN C] ==================================
+
+
+# ========================== [INSERCIÓN D] ====================================
+# Pegar DENTRO de JS_DASHBOARD, ANTES de: function render(){
+# -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CHARTS MULTI-AFP (comparativos)
+// ---------------------------------------------------------------------------
+const CAFP = __COLORES_AFP__;
+
+function getAfps(){
+  const s = new Set();
+  for(const r of HIST) if(r.AFP) s.add(r.AFP);
+  return [...s].sort();
+}
+
+function kpisMultiAfp(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) { document.getElementById(div).innerHTML=''; return; }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+  html += '<tr style="background:#0B3C5D;color:#fff"><th style="padding:8px">AFP</th>'
+    + '<th>Huella (miles Tn)</th><th>Intensidad</th><th>AUM (MM$)</th><th>Cobertura</th></tr>';
+  afps.forEach((afp, i) => {
+    const tot = (obj, met) => {
+      let t=0; const m2 = metricaDisponible(obj, met, corte);
+      for(const r of HIST) if(r.OBJETO===obj && r.METRICA===m2 &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1==='TOTAL')
+        t += +r.VALOR||0;
+      return t;
+    };
+    const cob = () => {
+      for(const r of HIST) if(r.OBJETO==='Cobertura' && r.METRICA==='Cobertura' &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp) return +r.VALOR||0;
+      return null;
+    };
+    const h = tot('Resumen_Bloques','Huella (miles Tn)');
+    const inten = tot('Resumen_Bloques','Intensidad');
+    const aum = tot('Resumen_Bloques','Inv MM$');
+    const c = cob();
+    const color = CAFP[afp] || '#666';
+    const bg = i%2===0 ? '#f8fafb' : '#fff';
+    html += '<tr style="background:'+bg+'">'
+      + '<td style="padding:6px 8px;font-weight:600;color:'+color+'">'+afp+'</td>'
+      + '<td style="text-align:right;padding:6px 8px">'+fmt(h)+'</td>'
+      + '<td style="text-align:right;padding:6px 8px">'+fmt(inten)+'</td>'
+      + '<td style="text-align:right;padding:6px 8px">'+fmt(aum)+'</td>'
+      + '<td style="text-align:right;padding:6px 8px">'+(c!==null?(c*100).toFixed(1)+'%':'—')+'</td>'
+      + '</tr>';
+  });
+  html += '</table>';
+  document.getElementById(div).innerHTML = html;
+}
+
+function huellaBarrasMultiAfp(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) return;
+  const vals = afps.map(afp => {
+    let t=0;
+    for(const r of HIST) if(r.OBJETO==='Resumen_Bloques' && r.METRICA==='Huella (miles Tn)' &&
+        String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1==='TOTAL') t+=+r.VALOR||0;
+    return t;
+  });
+  const colors = afps.map(a => CAFP[a] || '#666');
+  const lay = LAYOUT();
+  lay.showlegend = false;
+  lay.yaxis.title = 'Huella (miles Tn CO2)';
+  Plotly.react(div, [{type:'bar', x:afps, y:vals, marker:{color:colors},
+    text:vals.map(fmt), textposition:'outside', cliponaxis:false}], lay, OPTS);
+}
+
+function intensidadBarrasMultiAfp(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) return;
+  const vals = afps.map(afp => {
+    let t=0; const met = metricaDisponible('Resumen_Bloques','Intensidad',corte);
+    for(const r of HIST) if(r.OBJETO==='Resumen_Bloques' && r.METRICA===met &&
+        String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1==='TOTAL') t+=+r.VALOR||0;
+    return t;
+  });
+  const colors = afps.map(a => CAFP[a] || '#666');
+  const lay = LAYOUT();
+  lay.showlegend = false;
+  lay.yaxis.title = 'Intensidad (Tn CO2 / USD MM)';
+  Plotly.react(div, [{type:'bar', x:afps, y:vals, marker:{color:colors},
+    text:vals.map(fmt), textposition:'outside', cliponaxis:false}], lay, OPTS);
+}
+
+function huellaStrategyMultiAfp(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) return;
+  const bloques = [...new Set(HIST.filter(r=>r.OBJETO==='Resumen_Bloques' &&
+    r.DIM_1 && r.DIM_1!=='TOTAL').map(r=>r.DIM_1))];
+  const traces = bloques.map((bloque, i) => {
+    const vals = afps.map(afp => {
+      let t=0;
+      for(const r of HIST) if(r.OBJETO==='Resumen_Bloques' && r.METRICA==='Huella' &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1===bloque) t+=+r.VALOR||0;
+      return t;
+    });
+    return {type:'bar', name:bloque, x:afps, y:vals, marker:{color:P[i%P.length]}};
+  });
+  const lay = LAYOUT();
+  lay.barmode = 'stack';
+  lay.yaxis.title = 'Huella (Tn CO2)';
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+function heatmapAfpFondo(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) return;
+  const fondos = ['IN-FONDO1','IN-FONDO2','IN-FONDO3'];
+  const fondoLabels = ['F1','F2','F3'];
+  // Build intensity by AFP x Fondo from raw HISTORICO
+  // Use Resumen_Bloques TOTAL Intensidad as a proxy per AFP
+  // For per-fund, we need per-fund data which isn't in pivots...
+  // Fallback: show AUM and Huella per AFP as grouped bars
+  const traces = [];
+  const metrics = ['Huella (miles Tn)', 'Intensidad'];
+  metrics.forEach((met, mi) => {
+    const vals = afps.map(afp => {
+      let t=0; const m2 = metricaDisponible('Resumen_Bloques', met, corte);
+      for(const r of HIST) if(r.OBJETO==='Resumen_Bloques' && r.METRICA===m2 &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1==='TOTAL') t+=+r.VALOR||0;
+      return t;
+    });
+    traces.push({type:'bar', name:met, x:afps, y:vals,
+      marker:{color: mi===0 ? C_ACT : C_ACC},
+      text:vals.map(fmt), textposition:'outside', cliponaxis:false,
+      yaxis: mi===0 ? 'y' : 'y2'});
+  });
+  const lay = LAYOUT();
+  lay.barmode = 'group';
+  lay.yaxis.title = 'Huella (miles Tn)';
+  lay.yaxis2 = {overlaying:'y', side:'right', showgrid:false, zeroline:false,
+                title:'Intensidad'};
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+function topEmisoresMultiAfp(div, corte){
+  const afps = getAfps();
+  if(afps.length <= 1) return;
+  // Get top emitters across all AFPs
+  const emisorTotal = new Map();
+  for(const r of HIST){
+    if(r.OBJETO!=='Contrib_General' && r.OBJETO!=='Contrib_BU_TD') continue;
+    if(r.METRICA!=='Huella' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(!r.DIM_1 || r.DIM_1==='TOTAL') continue;
+    const key = r.DIM_1;
+    emisorTotal.set(key, (emisorTotal.get(key)||0) + (+r.VALOR||0));
+  }
+  let topKeys = [...emisorTotal.entries()].sort((a,b)=>b[1]-a[1]).slice(0,12).map(e=>e[0]);
+
+  const traces = afps.map(afp => {
+    const vals = topKeys.map(k => {
+      let t=0;
+      for(const r of HIST) if((r.OBJETO==='Contrib_General'||r.OBJETO==='Contrib_BU_TD') &&
+          r.METRICA==='Huella' && String(r.FECHA_CORTE)===String(corte) &&
+          r.AFP===afp && r.DIM_1===k) t+=+r.VALOR||0;
+      return t;
+    });
+    return {type:'bar', name:afp, x:topKeys, y:vals,
+      marker:{color: CAFP[afp]||'#666'}};
+  });
+  const lay = LAYOUT();
+  lay.barmode = 'group';
+  lay.yaxis.title = 'Huella (Tn CO2)';
+  lay.xaxis.tickangle = -35;
+  lay.margin.b = 120;
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+// ======================== FIN [INSERCIÓN D] ==================================
+
+
+# ========================== [INSERCIÓN E] ====================================
+# Pegar DESPUÉS de la última safe() en render():
+#   safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+# Agregar estas líneas:
+# -----------------------------------------------------------------------------
+
+  // --- Charts Multi-AFP ---
+  safe('gKpisMulti',     () => kpisMultiAfp('gKpisMulti', cAct));
+  safe('gHuellaMulti',   () => huellaBarrasMultiAfp('gHuellaMulti', cAct));
+  safe('gIntMulti',      () => intensidadBarrasMultiAfp('gIntMulti', cAct));
+  safe('gStratMulti',    () => huellaStrategyMultiAfp('gStratMulti', cAct));
+  safe('gHeatMulti',     () => heatmapAfpFondo('gHeatMulti', cAct));
+  safe('gTopMulti',      () => topEmisoresMultiAfp('gTopMulti', cAct));
+
+# ======================== FIN [INSERCIÓN E] ==================================
+
+
+# ========================== [INSERCIÓN F] ====================================
+# Agregar estas tuplas al array "tarjetas", DESPUÉS de la última tupla
+# (gContribGral...) y ANTES del cierre "]":
+# -----------------------------------------------------------------------------
+
+        # --- Multi-AFP ---
+        ("gKpisMulti", "📊 Comparativo Multi-AFP — KPIs por AFP (corte seleccionado)", True),
+        ("gHuellaMulti", "Huella total por AFP (miles Tn CO2)", False),
+        ("gIntMulti", "Intensidad por AFP (Tn CO2 / USD MM)", False),
+        ("gStratMulti", "Huella por bloque de estrategia × AFP — apilado", True),
+        ("gHeatMulti", "Huella e Intensidad por AFP — doble eje", True),
+        ("gTopMulti", "Top emisores del sistema — desglose por AFP", True),
+
+# ======================== FIN [INSERCIÓN F] ==================================
+
+
+# ========================== [INSERCIÓN G] ====================================
+# REEMPLAZAR el bloque completo:
+#   if __name__ == "__main__":
+#       ...
+# por este:
+# -----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    # ===================== AJUSTES DEL USUARIO ==============================
+    SEMESTRE = "202606"                 # semestre de la Base MSCI (yyyymm)
+
+    # Mes/año del BD1_S_Huella (el mes del reporte de cartera)
+    BD1S_ANIO = "2026"
+    BD1S_MES  = "07"
+
+    # AFPs a procesar (None = todas las disponibles en BD1_S_Huella)
+    AFPS = None     # o p.ej. ["Integra", "Prima"]
+
+    OUTPUT_DIR = OUTPUT_DIR_DEFAULT     # Z:\...\Python\Output
+    # ========================================================================
+
+    ruta_bd1s = FsPath(BD1S_HUELLA_DIR) / BD1S_HUELLA_FNAME.format(
+        anio=BD1S_ANIO, mes=BD1S_MES)
+
+    print(f"BD1S_Huella: {ruta_bd1s}")
+    if not ruta_bd1s.exists():
+        raise SystemExit(f"No se encontró BD1_S_Huella:\n  {ruta_bd1s}\n"
+                         f"Ejecuta primero BD_G&P_total.py para generarlo.")
+
+    resultado = run_pipeline_bd1s(
+        SEMESTRE, str(ruta_bd1s),
+        output_dir=OUTPUT_DIR,
+        afps=AFPS,
+    )
+    print("\nListo:")
+    print("  Histórico :", resultado["ruta_historico"])
+    print("  Dashboard :", resultado["ruta_dashboard"])
+    print("  AFPs      :", list(resultado["resultados"].keys()))
+
+# ======================== FIN [INSERCIÓN G] ==================================
