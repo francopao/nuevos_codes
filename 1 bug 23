@@ -1,0 +1,56 @@
+Encontré los 2 bugs que matan todo el dashboard. Son errores silenciosos en la función `construir_dashboard`:
+
+---
+
+## Bug 1 — `__COLORES_AFP__` nunca se reemplaza
+
+El JavaScript tiene `const CAFP = __COLORES_AFP__;` pero la cadena de `.replace()` en línea 3461-3463 solo reemplaza `__DATA__` y `__CFG__`. El navegador ve `__COLORES_AFP__` como una variable JS indefinida → **SyntaxError** → se muere todo el `<script>`, incluido `render()` y el `window.addEventListener`.
+
+## Bug 2 — La columna `AFP` no se exporta al JSON de datos
+
+Línea 3458 exporta 7 columnas pero no incluye `"AFP"`. Entonces `r.AFP` siempre es `undefined` y `getAfps()` devuelve `[]`.
+
+---
+
+## Fix 1
+
+**Ctrl+F →**
+
+```python
+    js = (JS_DASHBOARD
+          .replace("__DATA__", datos_js)
+          .replace("__CFG__", json.dumps(cfg_js, ensure_ascii=False)))
+```
+
+**Reemplazar por →**
+
+```python
+    js = (JS_DASHBOARD
+          .replace("__DATA__", datos_js)
+          .replace("__CFG__", json.dumps(cfg_js, ensure_ascii=False))
+          .replace("__COLORES_AFP__", json.dumps(COLORES_AFP, ensure_ascii=False)))
+```
+
+## Fix 2
+
+**Ctrl+F →**
+
+```python
+    datos_js = json.dumps(
+        hist[["FECHA_CORTE", "OBJETO", "DIM_1", "DIM_2", "DIM_3", "METRICA", "VALOR"]]
+        .to_dict(orient="records"), ensure_ascii=False)
+```
+
+**Reemplazar por →**
+
+```python
+    cols_js = ["FECHA_CORTE", "OBJETO", "DIM_1", "DIM_2", "DIM_3", "METRICA", "VALOR"]
+    if "AFP" in hist.columns:
+        cols_js.insert(1, "AFP")
+    datos_js = json.dumps(
+        hist[cols_js].to_dict(orient="records"), ensure_ascii=False)
+```
+
+---
+
+El **Bug 1** es el que mata todo: un `const CAFP = __COLORES_AFP__;` sin reemplazar genera un SyntaxError en JavaScript *antes* de que se defina `render()`, así que ningún chart se ejecuta nunca — ni los originales por AFP ni los multi-AFP. Por eso ves todo en blanco.
