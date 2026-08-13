@@ -1,0 +1,200 @@
+# ENTREGA 2 — Instrucciones de inserción en Huella BD - Franco 5
+
+## Archivo a modificar
+`huella_pipeline.py` (Huella BD - Franco 5, 3491 líneas)
+
+## Archivo de referencia
+`entrega2_bloque_huella.py` (el código que te entrego, con 7 inserciones)
+
+---
+
+## PASO 1 — Constantes BD1S (ruta del input)
+
+**Buscar** (Ctrl+F):
+```
+NOMBRE_DASHBOARD = "Dashboard_Huella.html"
+```
+
+**DESPUÉS** de esa línea, pegar el bloque `[INSERCIÓN A]`:
+```python
+BD1S_HUELLA_DIR = (...)
+BD1S_HUELLA_FNAME = "{anio}{mes} BD1_S_Huella.xlsx"
+```
+
+---
+
+## PASO 2 — Adaptador BD1S + Pipeline multi-AFP (el corazón)
+
+**Buscar**:
+```
+def construir_valorizacion(cfg: "Config",
+```
+
+**ANTES** de esa línea, pegar todo el bloque `[INSERCIÓN B]`.
+Este bloque contiene:
+- `_cargar_bd1s_huella()` — lee BD1_S_Huella y produce inputs compatibles
+- `construir_valorizacion_bd1s()` — reemplaza construir_valorizacion para BD1S
+- `_construir_shared()` — carga BD MSCI/Proxies/Perdieron una sola vez
+- `run_pipeline_bd1s()` — orquestador multi-AFP
+- `_exportar_con_afp()` — exporta al histórico con columna AFP
+
+Las funciones existentes (`construir_valorizacion`, `run_pipeline`, etc.) NO se tocan.
+
+---
+
+## PASO 3 — Colores multi-AFP
+
+**Buscar**:
+```
+CSS_DASHBOARD = """
+```
+
+**ANTES** de esa línea, pegar el bloque `[INSERCIÓN C]` (diccionario `COLORES_AFP`).
+
+---
+
+## PASO 4 — Funciones JavaScript de charts multi-AFP
+
+Este paso es DENTRO de la variable `JS_DASHBOARD` (que es un string multilínea).
+
+**Buscar** dentro de JS_DASHBOARD:
+```javascript
+function render(){
+```
+
+**ANTES** de esa línea, pegar el bloque `[INSERCIÓN D]`.
+
+**IMPORTANTE**: como es JavaScript dentro de un string Python, copiar exactamente como está.
+Además, buscar `__COLORES_AFP__` dentro de JS_DASHBOARD y verificar que aparezca
+en el string. Si no, agregarlo al diccionario `cfg_js` en `construir_dashboard()`:
+
+En la función `construir_dashboard()`, buscar:
+```python
+    cfg_js = {
+```
+Y agregar esta línea dentro del dict:
+```python
+        "colores_afp": COLORES_AFP,
+```
+
+Y en la línea donde se hace el replace de `__CFG__`, agregar después:
+```python
+    js = js.replace("__COLORES_AFP__", json.dumps(COLORES_AFP, ensure_ascii=False))
+```
+
+---
+
+## PASO 5 — Llamadas a los charts multi-AFP en render()
+
+Dentro de JS_DASHBOARD, buscar:
+```javascript
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+```
+
+**DESPUÉS** de esa línea, pegar las líneas de `[INSERCIÓN E]`:
+```javascript
+  safe('gKpisMulti',     () => kpisMultiAfp('gKpisMulti', cAct));
+  safe('gHuellaMulti',   () => huellaBarrasMultiAfp('gHuellaMulti', cAct));
+  // ... (ver archivo)
+```
+
+---
+
+## PASO 6 — Tarjetas HTML de los charts multi-AFP
+
+En la función `construir_dashboard()`, buscar el array `tarjetas = [`.
+Después de la última tupla:
+```python
+        ("gContribGral", "Mayores contribuyentes general ...", False),
+```
+Y ANTES del cierre `]`, pegar las tuplas de `[INSERCIÓN F]`.
+
+---
+
+## PASO 7 — Reemplazar el bloque __main__
+
+**Buscar**:
+```python
+if __name__ == "__main__":
+```
+
+**REEMPLAZAR** todo ese bloque (desde `if __name__` hasta el final del archivo)
+por el contenido de `[INSERCIÓN G]`.
+
+**Variables a ajustar** en el nuevo __main__:
+- `SEMESTRE = "202606"` — el semestre de Base MSCI a usar
+- `BD1S_ANIO = "2026"` / `BD1S_MES = "07"` — el mes del BD1_S_Huella
+- `AFPS = None` — None = todas, o lista específica ej. `["Integra", "Prima"]`
+
+---
+
+## Verificación rápida post-inserción
+
+1. El archivo debería tener ~3900 líneas (3491 originales + ~400 nuevas)
+2. Buscar `def run_pipeline_bd1s` — debe existir
+3. Buscar `def _cargar_bd1s_huella` — debe existir
+4. Buscar `COLORES_AFP` — debe existir
+5. Buscar `kpisMultiAfp` — debe existir (en el JS)
+
+---
+
+## Qué esperar al ejecutar
+
+```
+Config(semestre=202606, ...)
+  [SHARED] Construyendo recursos compartidos (BD MSCI, Proxies, etc.)...
+  [Módulo 6] BD MSCI: ...
+  [Módulo 8] Perdieron Huella: ...
+  [Módulo 9] BD(MSCI).T tras proxies: ...
+
+============================================================
+  HUELLA — AFP: Ex_Integra
+============================================================
+  [BD1S] AFP=Ex_Integra: 780 filas, TC=3.6555, AUM=7,234.12 USD MM
+  [Módulo 10] Filtro exclusión: 0 filas excluidas, quedan 780
+  [Módulo 10] CO2-H sin match -> 0. Legítimos: 400. PROBLEMÁTICOS: 50
+  [Módulo 12] 18 objetos (620 registros) para corte 202606
+  [Ex_Integra] 18 objetos, 620 registros.
+
+============================================================
+  HUELLA — AFP: Habitat
+============================================================
+  ...
+
+============================================================
+  HUELLA — AFP: Integra
+============================================================
+  ...
+  (cada AFP muestra sus propios diagnósticos de cobertura)
+
+  [Dashboard] Generando con 5 AFP(s)...
+  [Módulo 14] Dashboard -> Z:\...\Dashboard_Huella.html
+
+Listo:
+  Histórico : Z:\...\Huella_Historico.xlsx
+  Dashboard : Z:\...\Dashboard_Huella.html
+  AFPs      : ['Ex_Integra', 'Habitat', 'Integra', 'Prima', 'Profuturo']
+```
+
+## Dashboard resultante
+
+El dashboard mostrará:
+1. **Arriba**: todos los charts existentes de Integra (sin cambios)
+2. **Abajo**: sección "Multi-AFP" con:
+   - Tabla semáforo con KPIs por AFP
+   - Barras de Huella total por AFP
+   - Barras de Intensidad por AFP
+   - Barras apiladas: Huella por estrategia × AFP
+   - Doble eje: Huella + Intensidad por AFP
+   - Top emisores del sistema con desglose por AFP
+
+Los charts existentes usan los selectores de Corte y Comparación.
+Los charts multi-AFP se actualizan con el Corte seleccionado.
+
+## Archivo histórico
+
+El Excel histórico tendrá:
+- Hoja `HISTORICO`: formato largo con columna `AFP` añadida
+- Hojas `{semestre}_{AFP}`: una por AFP procesada (ej: `202606_Integra`)
+- Hoja `_META`: metadata con AFP como dimensión adicional
+- Retrocompatibilidad: datos previos sin columna AFP se asumen como Integra
