@@ -1,0 +1,63 @@
+Encontré el problema exacto. El dashboard no se visualiza porque hay un error de sintaxis en el JavaScript generado que rompe toda la ejecución. Mira las últimas líneas del HTML:
+
+```javascript
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+}                          // ← AQUÍ se cierra render()
+
+# -----------------------------------------------------------------------------   // ← ESTO ES COMENTARIO PYTHON, NO JS
+
+  // --- Charts Multi-AFP ---
+  safe('gKpisMulti',     () => kpisMultiAfp('gKpisMulti', cAct));   // ← FUERA de render()
+  safe('gHuellaMulti',   () => huellaBarrasMultiAfp('gHuellaMulti', cAct));
+  // ... etc.
+```
+
+Son **2 errores** que se combinan para matar el dashboard entero:
+
+1. **`#` no es un comentario válido en JavaScript** — el navegador ve `# ------` y lanza un SyntaxError, lo cual impide que se ejecute *todo* el `<script>`, incluyendo `render()` y el `window.addEventListener('load', ...)`.
+
+2. **Los `safe()` multi-AFP están fuera de `render()`** — referencian `safe` y `cAct`, que son variables locales de `render()`, así que incluso quitando el `#` darían ReferenceError.
+
+---
+
+En tu script Python, busca el bloque que genera la función `render()`. El fix es:
+
+**Ctrl+F →**
+
+```
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+}
+
+# -----------------------------------------------------------------------------
+
+  // --- Charts Multi-AFP ---
+```
+
+**Reemplazar por →**
+
+```
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+
+  // --- Charts Multi-AFP ---
+```
+
+Es decir: **eliminar el `}` prematuro** y **eliminar la línea `# -----...`**. Y luego asegurarte de que el `}` que cierra `render()` quede *después* del último `safe()` multi-AFP, o sea justo antes de `function onCorteChange()`.
+
+**Ctrl+F →**
+
+```
+  safe('gTopMulti',      () => topEmisoresMultiAfp('gTopMulti', cAct));
+
+function onCorteChange(){
+```
+
+**Reemplazar por →**
+
+```
+  safe('gTopMulti',      () => topEmisoresMultiAfp('gTopMulti', cAct));
+}
+
+function onCorteChange(){
+```
+
+Con esos 2 cambios la función `render()` cierra correctamente *después* de todos los charts (incluyendo multi-AFP), y el JavaScript ya no tiene syntax errors.
