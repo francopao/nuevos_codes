@@ -1,0 +1,39 @@
+Acá va, sin necesidad de meterse al código:
+
+---
+
+**Huella (miles Tn):** Es el total de emisiones de CO₂ atribuibles a la cartera de la AFP (en miles de toneladas). Para cada instrumento se multiplica su intensidad de carbono (toneladas CO₂ por dólar de deuda) por la inversión que la AFP tiene en ese instrumento. La Huella del portafolio es la suma de todas esas contribuciones individuales. Más grande la cartera y/o más "sucios" los emisores, mayor la huella.
+
+**Intensidad:** Es la huella ponderada por peso — cuántas toneladas de CO₂ corresponden a cada dólar invertido. Dos AFPs pueden tener Huellas muy distintas (porque una es más grande), pero Intensidades similares si invierten en emisores parecidos. Es la métrica que permite comparar "manzanas con manzanas" entre portafolios de tamaños diferentes.
+
+---
+
+Ahora, lo que te sorprende — el AUM y la Cobertura. Ambas se explican juntas porque están conectadas.
+
+## AUM (MM$) del KPI — por qué es menor al AUM real
+
+El AUM que imprime la consola (ej. Ex_Integra = 21,209 MM$) es el **patrimonio total** de los 3 fondos convertido a dólares. Pero la columna AUM del chart KPI no muestra eso — muestra la **inversión valorizada únicamente de los instrumentos que tienen huella de carbono distinta de cero** (el código filtra `Huella ≠ 0` antes de armar la tabla resumen). Los instrumentos sin data de carbono se caen, y con ellos su inversión.
+
+Por eso Ex_Integra pasa de 21,209 a 12,438: tiene **213 instrumentos con inversión pero sin huella** (los "PROBLEMÁTICOS" de tu consola). Integra en cambio solo tiene 38 problemáticos, así que cae menos (de 10,838 a 7,280).
+
+## Cobertura — por qué varía entre AFPs
+
+La fórmula es:
+
+```
+Cobertura = AUM Cubierto / AUM Total
+```
+
+Donde **AUM Cubierto** es la suma de `Inv MM$` solo de instrumentos cuya fuente de carbono (`Plus`) sea una de estas cuatro: Portafolio, ETF, SOV, o Proxies. Y **AUM Total** es el patrimonio completo de los 3 fondos (los 21,209 de Ex_Integra, los 10,838 de Integra, etc.).
+
+El detalle clave: **"Cuestionario Integra" no cuenta como cubierto**. Mirá tu consola:
+
+| AFP | Portafolio | ETF | SOV | Proxies | **Cubierto** | Cuest. Integra | **Total filas** |
+|---|---|---|---|---|---|---|---|
+| Ex_Integra | 101 | 267 | 68 | 115 | 551 | 245 | 796 |
+| Integra | 67 | 133 | 38 | 138 | 376 | 61 | 437 |
+| Profuturo | 39 | 64 | 32 | 77 | 212 | 110 | 322 |
+
+Integra tiene la cobertura más alta (94.1%) porque tiene proporcionalmente pocos "Cuestionario Integra" y pocos "PROBLEMÁTICOS". Profuturo tiene la más baja (80.6%) porque 110 de sus 322 instrumentos vienen de Cuestionario Integra (no cuentan) y tiene 94 problemáticos.
+
+El otro factor es que la cobertura se mide en **dólares, no en cantidad de instrumentos** — un solo instrumento grande sin data de carbono puede bajar la cobertura más que 50 instrumentos chicos.
