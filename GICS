@@ -1,0 +1,45 @@
+
+
+Entendido, quieres un override hardcodeado dentro del propio código. Para eso necesito ver la función exacta. Déjame ubicarla:Perfecto, ya tengo el contexto completo. Busca con Ctrl+F:
+
+```
+    mapa_gics = dic.set_index("BBG")["GICS"].to_dict()
+```
+
+Pega **justo debajo** de esa línea:
+
+```python
+    # ── Override: asegurar nombrado correcto de empresas del portafolio ──
+    _PORTAFOLIO = {
+        "BAP US Equity":       ("Credicorp Ltd.",                              "Financials"),
+        "IFS PE Equity":       ("Intercorp Financial Services Inc.",           "Financials"),
+        "BBVAC1 PE Equity":    ("Banco BBVA Perú",                            "Financials"),
+        "BVN US Equity":       ("Compañía de Minas Buenaventura",             "Mining"),
+        "HOC LN Equity":       ("Hochschild Mining plc",                      "Mining"),
+        "CVERDEC1 PE Equity":  ("Sociedad Minera Cerro Verde",                "Mining"),
+        "SCCO US Equity":      ("Southern Copper Corporation",                "Mining"),
+        "NEXA US Equity":      ("Nexa Resources",                             "Mining"),
+        "NEXAPEC1 PE Equity":  ("Nexa Resources Perú",                        "Mining"),
+        "MINSURI1 PE Equity":  ("Minsur",                                     "Mining"),
+        "VOLCABC1 PE Equity":  ("Volcan Compañía Minera",                     "Mining"),
+        "HBM CN Equity":       ("Hudbay Minerals Inc.",                       "Mining"),
+        "ORYGENC1 PE Equity":  ("Orygen Perú",                                "Utilities"),
+        "PLUZENC1 PE Equity":  ("Pluz Energía Perú",                          "Utilities"),
+        "ENGIEC1 PE Equity":   ("Engie Energía Perú",                         "Utilities"),
+        "INRETC1 PE Equity":   ("InRetail Perú Corp.",                        "Consumer"),
+        "ALICORC1 PE Equity":  ("Alicorp",                                    "Consumer"),
+        "BACKUSI1 PE Equity":  ("Unión de Cervecerías Peruanas Backus y Johnston", "Consumer"),
+        "CPACASC1 PE Equity":  ("Cementos Pacasmayo",                         "Construction Materials"),
+        "UNACEMC1 PE Equity":  ("UNACEM Corp",                                "Construction Materials"),
+        "CORAREC1 PE Equity":  ("Corporacion Aceros Arequipa",                "Construction Materials"),
+        "FERREYC1 PE Equity":  ("Ferreycorp",                                 "Industrials"),
+        "AENZAC1 PE Equity":   ("Aenza",                                      "Industrials"),
+        "ELCOMEI1 PE Equity":  ("Empresa Editora El Comercio",                "Media"),
+        "AUNA US Equity":      ("Auna",                                       "Health Care"),
+    }
+    for _tk, (_nom, _sec) in _PORTAFOLIO.items():
+        if mapa_emp.get(_tk) != _nom:
+            print(f"    ⚠ GICS override: {_tk} → '{_nom}' (era '{mapa_emp.get(_tk)}')")
+        mapa_emp[_tk]  = _nom
+        mapa_gics[_tk] = _sec
+```
