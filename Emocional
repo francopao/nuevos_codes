@@ -1,0 +1,55 @@
+Busca con Ctrl+F la línea exacta:
+
+```
+    # Exportar histórico de múltiplos por GICS
+```
+
+Pega este bloque **justo arriba** de esa línea:
+
+```python
+    # ── VALIDACIÓN: asegurar nombrado correcto de empresas del portafolio ──
+    dic_gics = leer_hoja_excel(RUTA_ZODA, "GICS", con_encabezado=True)
+    dic_gics = dic_gics.apply(lambda c: c.str.strip() if c.dtype == "object" else c)
+    mapa_emp  = dic_gics.set_index("BBG")["Empresa"].to_dict()
+
+    empresas_portafolio = (
+        Empresas_Financieras + Empresas_Cons_Const + Empresas_Min_Utl
+    )
+    errores_gics = []
+    for ticker in empresas_portafolio:
+        nombre = mapa_emp.get(ticker)
+        if nombre is None or nombre.strip() == "":
+            errores_gics.append(f"  ✗ {ticker}: SIN nombre en hoja GICS")
+        else:
+            # Detectar si el nombre está asignado a otro ticker también
+            otros = [t for t, n in mapa_emp.items()
+                     if n == nombre and t != ticker]
+            if otros:
+                errores_gics.append(
+                    f"  ✗ {ticker} → '{nombre}': nombre duplicado con {otros}"
+                )
+
+    if errores_gics:
+        print("\n" + "!" * 70)
+        print("  ALERTA: Problemas en hoja GICS para empresas del portafolio:")
+        for e in errores_gics:
+            print(e)
+        print("!" * 70)
+        print("  Corrige la hoja GICS antes de continuar. Abortando exportación.")
+        print("  (El resto del script ya se ejecutó correctamente.)\n")
+    else:
+        print("  ✓ Validación GICS: todas las empresas del portafolio OK")
+```
+
+Luego la línea que ya existe:
+
+```python
+    exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
+
+Cámbiala por:
+
+```python
+    if not errores_gics:
+        exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
