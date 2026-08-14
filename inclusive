@@ -1,0 +1,26 @@
+Busca con Ctrl+F:
+
+```
+    # ── VALIDACIÓN: asegurar nombrado correcto de empresas del portafolio ──
+```
+
+Borra desde esa línea hasta (inclusive) la línea:
+
+```
+        print("  ✓ Validación GICS: todas las empresas del portafolio OK")
+```
+
+Luego busca:
+
+```
+    if not errores_gics:
+        exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
+
+Reemplázalo por:
+
+```
+    exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
+
+Son esos dos cambios, nada más. El override hardcodeado que ya está **dentro** de `exportar_multiplos_historicos` es el que hace el trabajo real.
