@@ -1,0 +1,11 @@
+Hay celdas vacías en GICS que pandas lee como `NaN` (float). Busca con Ctrl+F:
+
+```
+        if nombre is None or nombre.strip() == "":
+```
+
+Reemplázala por:
+
+```
+        if nombre is None or not isinstance(nombre, str) or nombre.strip() == "":
+```
