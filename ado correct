@@ -1,0 +1,30 @@
+Dos cosas puntuales:
+
+**1)** HBM CN Equity — probablemente su celda "Empresa" en GICS tiene un valor numérico o NaN en vez de texto, por eso falla. Pero ya no importa porque el override dentro de `exportar_multiplos_historicos` lo corrige igual.
+
+**2)** Que no se detenga — busca con Ctrl+F el bloque de validación que agregamos antes. Busca:
+
+```
+    # ── VALIDACIÓN: asegurar nombrado correcto de empresas del portafolio ──
+```
+
+Borra desde esa línea hasta (inclusive):
+
+```
+        print("  (Solo warnings, no duplicados → se procede con la exportación.)\n")
+```
+
+Y borra también la condición que protege la llamada. Busca:
+
+```
+    if not any("duplicado" in e for e in errores_gics):
+        exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
+
+Reemplázalo por:
+
+```
+    exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+```
+
+El override hardcodeado dentro de la función ya hace el trabajo pesado — fuerza los nombres correctos antes del pivot, sin depender de que GICS esté limpio. La validación externa era redundante y es lo que te está frenando.
