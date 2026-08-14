@@ -1,0 +1,17 @@
+Solo BAP falta entre tus 25 targets. Déjame confirmar el mecanismo exacto con evidencia dura.
+
+Confirmado con evidencia. El diagnóstico es claro.
+
+**BAP sí se calcula bien** (en `OUTPUT_BD`, `Z_BAP US Equity` tiene 2772/2772 datos, último 1.63). El problema no está en el cálculo de múltiplos sino en **cómo se etiquetan al exportarse** a `Multiplos_hist.xlsx`.
+
+**Qué encontré:** de tus 25 tickers target, el único ausente por nombre es BAP. Pero no está ausente de verdad — está **escondido bajo el nombre "Yunnan Tin Company Limited"** en la hoja `Financials`. La prueba: ese bloque "Yunnan Tin" en Financials tiene Trail_PB en rango 1.04–3.35 con último valor **2.61**, que es exactamente el perfil de Credicorp (una tinera china no cotiza a ese P/B). Southern Copper, Buenaventura, Nexa, Hudbay, Auna (los otros US/CN) sí mapean bien, así que no es el sufijo "US Equity".
+
+**Causa raíz #1 — la hoja `GICS` de `ZODA.xlsm`.** `exportar_multiplos_historicos()` arma los nombres con `mapa_emp = dic.set_index("BBG")["Empresa"]`. La fila `BBG = "BAP US Equity"` tiene en la columna `Empresa` el valor placeholder **"Yunnan Tin Company Limited"** (residuo de plantilla) en lugar de "Credicorp". Por eso BAP sale con el nombre equivocado. Revisa esa fila y cualquier otra que aún diga "Yunnan Tin" — hay al menos un ticker de minería en la misma situación (bloque con Trail_EVEBITDA de -187 a 120, claramente roto/mal mapeado).
+
+**Causa raíz #2 — un bug en la propia función.** El reparto a hojas usa `if c[0] in emps.values`, es decir filtra **por nombre**, no por (nombre, sector). Como "Yunnan Tin" quedó asignado a >1 sector, sus columnas se **duplican en cada hoja** (por eso ves "Yunnan Tin" 1× en Financials y 3× en Mining, con series idénticas repetidas). Aunque arregles el GICS, este bug seguirá filtrando columnas entre hojas si dos tickers comparten nombre.
+
+Te dejo una versión endurecida de la función que (a) reparte por ticker→sector real eliminando la fuga, y (b) imprime diagnósticos: tickers sin nombre/sector y nombres asignados a más de un ticker (para cazar placeholders al instante).
+
+**Acción concreta:** abre `ZODA.xlsm` → hoja `GICS`, busca la fila `BBG = "BAP US Equity"` y corrige `Empresa` de "Yunnan Tin Company Limited" a "Credicorp" (con su `GICS` = Financials). Aprovecha y limpia cualquier otra fila que aún tenga "Yunnan Tin" como placeholder. Luego reemplaza la función con el patch y vuelve a correr: los prints te van a listar de una qué tickers quedan sin nombre, sin sector, o con nombre duplicado.
+
+Nota: no tengo `ZODA.xlsm` ni la hoja `GICS` para leer el valor exacto de esa celda, así que la asignación "BAP → Yunnan Tin" es inferencia — pero el match del P/B (1.04–3.35, último 2.61) contra Credicorp la hace casi segura. Al correrlo, el WARN de "nombres asignados a >1 ticker" te lo confirma en la consola.
