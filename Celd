@@ -1,0 +1,16 @@
+En el bloque `__main__` al final del script, cambia `HOJA_PROXY`:
+
+```python
+HOJA_PROXY = None        # automático (día 16)
+HOJA_PROXY = "202607"    # forzar julio 2026
+HOJA_PROXY = "202603"    # forzar marzo 2026
+```
+
+Y el período del reporte se cambia con `PERIODO`:
+
+```python
+PERIODO = "202607"       # julio 2026
+PERIODO = "202512"       # diciembre 2025
+```
+
+Son las dos variables editables al inicio del `if __name__ == "__main__"`.
