@@ -1,0 +1,254 @@
+Analicé el script. Los 3 cambios están interconectados en el JS (buildTraces → layout → redraw/render), así que van en 6 bloques ubicados en orden de aparición en el archivo. Usa Ctrl+F con el texto "BUSCAR" para ubicar cada bloque.
+
+**1) HTML — agregar barra de rango de fechas**
+BUSCAR:
+```html
+<div class="grid" id="grid"></div>
+```
+INSERTAR ANTES:
+```html
+<div class="basis" id="dateRangeBar">
+  <span><b>Rango de fechas (eje X):</b></span>
+  <label>Desde <input type="date" id="dateStart"></label>
+  <label>Hasta <input type="date" id="dateEnd"></label>
+  <button id="dateReset" type="button">Restablecer</button>
+</div>
+```
+
+**2) CSS — estilo del botón**
+BUSCAR:
+```css
+  .basis label{ cursor:pointer; }
+```
+INSERTAR DESPUÉS:
+```css
+  .basis button{ font-size:11px; padding:3px 10px; border:1px solid var(--line);
+                 border-radius:4px; background:#fff; color:var(--navy); cursor:pointer; }
+  .basis button:hover{ background:var(--grey); }
+```
+
+**3) JS — variables globales de rango + helpers**
+BUSCAR:
+```js
+let BASIS = "trail";
+```
+REEMPLAZAR POR:
+```js
+let BASIS = "trail";
+let RANGE_START = null;
+let RANGE_END   = null;
+
+function fechaToIndex(yyyyMm, fallback){
+  const i = FECHAS.indexOf(yyyyMm);
+  return i === -1 ? fallback : i;
+}
+function currentRange(){
+  const s = RANGE_START===null ? 0 : RANGE_START;
+  const e = RANGE_END===null ? FECHAS.length-1 : RANGE_END;
+  return [Math.min(s,e), Math.max(s,e)];
+}
+function slice(arr, s, e){ return arr.slice(s, e+1); }
+
+function computeYRange(traces){
+  let lo=Infinity, hi=-Infinity;
+  traces.forEach(t=>(t.y||[]).forEach(v=>{
+    if(v===null||v===undefined) return;
+    if(v<lo) lo=v; if(v>hi) hi=v;
+  }));
+  if(!isFinite(lo)||!isFinite(hi)) return undefined;
+  if(lo===hi){ lo-=1; hi+=1; }
+  const pad=(hi-lo)*0.08;
+  return [lo-pad, hi+pad];
+}
+```
+
+**4) JS — meanSeries (fix de longitud, ya que ahora los arrays vienen recortados) + buildTraces con recorte de fechas**
+BUSCAR:
+```js
+function meanSeries(seriesList){
+  const n = FECHAS.length, out = new Array(n).fill(null);
+```
+REEMPLAZAR POR:
+```js
+function meanSeries(seriesList){
+  const n = seriesList.length ? seriesList[0].length : 0, out = new Array(n).fill(null);
+```
+
+BUSCAR (bloque completo de buildTraces):
+```js
+function buildTraces(panel){
+  const sect = DATA[panel.sector] || {};
+  const targets = getSel(panel.id,"tg");
+  const comps   = getSel(panel.id,"cp");
+  const traces = [];
+
+  targets.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:FECHAS, y:sect[name][BASIS], name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.target[i%COL.target.length], width:2.6 } });
+  });
+
+  const compArrays = comps.filter(n=>sect[n]).map(n=>sect[n][BASIS]);
+  if(compArrays.length){
+    traces.push({ x:FECHAS, y:meanSeries(compArrays), name:"Comps",
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>Comps</extra>",
+      line:{ color:COL.comps, width:2.2 } });
+  }
+  comps.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:FECHAS, y:sect[name][BASIS], name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.indiv[i%COL.indiv.length], width:1.4 } });
+  });
+  return traces;
+}
+```
+REEMPLAZAR POR:
+```js
+function buildTraces(panel){
+  const sect = DATA[panel.sector] || {};
+  const targets = getSel(panel.id,"tg");
+  const comps   = getSel(panel.id,"cp");
+  const [s,e] = currentRange();
+  const xs = slice(FECHAS,s,e);
+  const traces = [];
+
+  targets.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:xs, y:slice(sect[name][BASIS],s,e), name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.target[i%COL.target.length], width:2.6 } });
+  });
+
+  const compArrays = comps.filter(n=>sect[n]).map(n=>slice(sect[n][BASIS],s,e));
+  if(compArrays.length){
+    traces.push({ x:xs, y:meanSeries(compArrays), name:"Comps",
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>Comps</extra>",
+      line:{ color:COL.comps, width:2.2 } });
+  }
+  comps.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:xs, y:slice(sect[name][BASIS],s,e), name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.indiv[i%COL.indiv.length], width:1.4 } });
+  });
+  return traces;
+}
+```
+
+**5) JS — layout() sin líneas horizontales, ticks X dinámicos, Y auto-padded**
+BUSCAR:
+```js
+function layout(panel){
+  return {
+    margin:{l:34,r:8,t:6,b:44},
+    height:300, plot_bgcolor:"#fff", paper_bgcolor:"#fff",
+    font:{ family:"Segoe UI, Arial", size:10.5, color:"#333" },
+    showlegend:true,
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.16, yanchor:"top",
+             font:{size:9.5}, tracegroupgap:2 },
+    xaxis:{ type:"date", tickformat:"%m-%y", dtick:"M16", ticks:"outside",
+            tickfont:{size:9.5}, showgrid:false, linecolor:"#b9c0cc",
+            tickangle:0 },
+    yaxis:{ range:panel.yrange, dtick:panel.dtick, tickformat:panel.tickfmt,
+            ticks:"outside", tickfont:{size:9.5}, gridcolor:"#eef1f5",
+            zeroline:false, linecolor:"#b9c0cc" }
+  };
+}
+```
+REEMPLAZAR POR:
+```js
+function layout(panel, traces){
+  const [s,e] = currentRange();
+  const monthsVisible = e - s + 1;
+  const xdtick = monthsVisible<=24 ? "M3" : monthsVisible<=60 ? "M6" : monthsVisible<=120 ? "M12" : "M24";
+  const yr = computeYRange(traces) || panel.yrange;
+  return {
+    margin:{l:34,r:8,t:6,b:44},
+    height:300, plot_bgcolor:"#fff", paper_bgcolor:"#fff",
+    font:{ family:"Segoe UI, Arial", size:10.5, color:"#333" },
+    showlegend:true,
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.16, yanchor:"top",
+             font:{size:9.5}, tracegroupgap:2 },
+    xaxis:{ type:"date", tickformat:"%m-%y", dtick:xdtick, ticks:"outside",
+            tickfont:{size:9.5}, showgrid:false, linecolor:"#b9c0cc",
+            tickangle:0 },
+    yaxis:{ range:yr, tickformat:panel.tickfmt,
+            ticks:"outside", tickfont:{size:9.5}, showgrid:false,
+            zeroline:false, linecolor:"#b9c0cc" }
+  };
+}
+```
+
+**6) JS — actualizar llamadas a layout() y agregar init del slicer**
+BUSCAR:
+```js
+function redraw(panel){
+  Plotly.react(panel.id+"_plot", buildTraces(panel), layout(panel), CFG);
+}
+```
+REEMPLAZAR POR:
+```js
+function redraw(panel){
+  const traces = buildTraces(panel);
+  Plotly.react(panel.id+"_plot", traces, layout(panel, traces), CFG);
+}
+```
+
+BUSCAR:
+```js
+    Plotly.newPlot(panel.id+"_plot", buildTraces(panel), layout(panel), CFG);
+```
+REEMPLAZAR POR:
+```js
+    const traces0 = buildTraces(panel);
+    Plotly.newPlot(panel.id+"_plot", traces0, layout(panel, traces0), CFG);
+```
+
+BUSCAR:
+```js
+  document.querySelectorAll('input[name="basis"]').forEach(r=>{
+    r.addEventListener("change",e=>{ BASIS=e.target.value;
+      PAYLOAD.panels.forEach(redraw); });
+  });
+}
+render();
+```
+REEMPLAZAR POR:
+```js
+  document.querySelectorAll('input[name="basis"]').forEach(r=>{
+    r.addEventListener("change",e=>{ BASIS=e.target.value;
+      PAYLOAD.panels.forEach(redraw); });
+  });
+  initDateRange();
+}
+
+function initDateRange(){
+  const first = FECHAS[0]+"-01", last = FECHAS[FECHAS.length-1]+"-01";
+  const inS = document.getElementById("dateStart");
+  const inE = document.getElementById("dateEnd");
+  inS.min = inE.min = first; inS.max = inE.max = last;
+  inS.value = first; inE.value = last;
+  const applyRange = ()=>{
+    let s = fechaToIndex(inS.value.slice(0,7), 0);
+    let e = fechaToIndex(inE.value.slice(0,7), FECHAS.length-1);
+    if(s>e){ [s,e]=[e,s]; }
+    RANGE_START = s; RANGE_END = e;
+    PAYLOAD.panels.forEach(redraw);
+  };
+  inS.addEventListener("change", applyRange);
+  inE.addEventListener("change", applyRange);
+  document.getElementById("dateReset").addEventListener("click", ()=>{
+    inS.value = first; inE.value = last;
+    RANGE_START = null; RANGE_END = null;
+    PAYLOAD.panels.forEach(redraw);
+  });
+}
+render();
+```
+
+Notas rápidas:
+- Bloque 1: elimina `gridcolor` del eje Y → sin líneas horizontales internas.
+- Bloques 2 y 3: slicer de fecha inicio/fin, recorta `FECHAS` y las series por índice; `dtick` del eje X se ajusta según el rango visible (M3/M6/M12/M24) para que no se sature.
+- Bloque 3 (`computeYRange`): rango Y se recalcula sobre los datos visibles con 8% de padding, evitando que curvas extremas toquen el marco. Si no hay datos visibles, cae al `panel.yrange` original como respaldo.
