@@ -1,0 +1,632 @@
+# =============================================================================
+#  ENTREGA 3 — Cambios al pipeline de Huella (Huella BD - Franco 5)
+#
+#  4 puntos: (1) nueva fuente de proxies, (2) prioridad BD MSCI,
+#  (3) workbook estático + B1 + mensual, (4) Base MSCI mensual.
+#
+#  INSTRUCCIONES: 8 reemplazos con Ctrl+F. Cada uno indica el texto VIEJO
+#  a buscar y el texto NUEVO que lo reemplaza.
+# =============================================================================
+
+
+# ===================== REEMPLAZO 1 =====================
+# Constantes de archivos. Buscar:
+#
+#   SUBDIR_PROXIES = "Huella Total  (SURA e Integra)"
+#
+# Reemplazar DESDE esa línea HASTA (inclusive):
+#
+#   FNAME_WORKBOOK = "Reporte de la Huella(Región) con Proxies - {semestre}.xlsm"
+#
+# Por esto:
+
+SUBDIR_PROXIES = (r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+                  r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+                  r"\2. Reportes\Reporte Mensual ASG")
+FNAME_PROXIES = "Lista Proxies - Huella y Comite mensual ASG.xlsx"
+PROXIES_HOJA_ASIGNACION = "Reporte ASG Mensual"
+
+FNAME_WORKBOOK_FIJO = "Reporte de Huella con Proxies.xlsm"
+
+D_SOBERANOS = (r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+               r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+               r"\1.Data Histórica\Dataset\MSCI")
+FNAME_SOBERANOS = "{yyyymm} Soberanos.xlsx"
+
+
+# ===================== REEMPLAZO 2 =====================
+# Config.from_semestre: validación mensual. Buscar:
+#
+#       if mm not in ("06", "12"):
+#            raise ValueError(
+#                f"SEMESTRE inválido: {semestre!r}. El proceso es SEMESTRAL: "
+#                f"mm debe ser '06' (S1) o '12' (S2), no {mm!r}."
+#            )
+#
+# Reemplazar por:
+
+        if not (1 <= int(mm) <= 12):
+            raise ValueError(
+                f"Período inválido: {semestre!r}. mm debe estar entre 01 y 12, "
+                f"no {mm!r}."
+            )
+
+
+# ===================== REEMPLAZO 3 =====================
+# Config.from_semestre: derivación de B1 y T-1. Buscar:
+#
+#        b1_yyyymmdd = f"{anio}0630" if mm == "06" else f"{anio}1231"
+#
+#        # MMYYYY compartido por Proxies y G&P (R1).
+#        mmyyyy = f"{mm}{anio}"
+#
+#        # T-1: semestre anterior alternando 06<->12.
+#        if mm == "06":
+#            semestre_t1 = f"{anio - 1}12"
+#        else:  # mm == "12"
+#            semestre_t1 = f"{anio}06"
+#
+# Reemplazar por:
+
+        # B1 = último día del mes de cierre.
+        import calendar
+        _last_day = calendar.monthrange(anio, int(mm))[1]
+        b1_yyyymmdd = f"{anio}{mm}{_last_day:02d}"
+
+        # MMYYYY compartido por Proxies y G&P (R1).
+        mmyyyy = f"{mm}{anio}"
+
+        # T-1: mes anterior (para comparación; si es enero -> diciembre año ant.)
+        _mm_int = int(mm)
+        if _mm_int == 1:
+            semestre_t1 = f"{anio - 1}12"
+        else:
+            semestre_t1 = f"{anio}{_mm_int - 1:02d}"
+
+
+# ===================== REEMPLAZO 4 =====================
+# Config.from_semestre: construcción de path_proxies y path_workbook.
+# Buscar:
+#
+#        p_proxies = (
+#            path_proxies
+#            if path_proxies is not None
+#            else str(rep / SUBDIR_PROXIES / FNAME_PROXIES.format(mmyyyy=mmyyyy))
+#        )
+#        # El workbook ya NO depende del semestre: nombre fijo en \Python\Inputs.
+#        inp = Path(inputs_dir)
+#        p_workbook = (
+#            path_workbook
+#            if path_workbook is not None
+#            else str(inp / f"Reporte de Huella con Proxies - {semestre}.xlsm")
+#        )
+#
+# Reemplazar por:
+
+        p_proxies = (
+            path_proxies
+            if path_proxies is not None
+            else str(Path(SUBDIR_PROXIES) / FNAME_PROXIES)
+        )
+        # Workbook estático (nombre fijo, sin semestre).
+        inp = Path(inputs_dir)
+        p_workbook = (
+            path_workbook
+            if path_workbook is not None
+            else str(inp / FNAME_WORKBOOK_FIJO)
+        )
+
+
+# ===================== REEMPLAZO 5 =====================
+# Nuevo sistema de proxies. Buscar:
+#
+#   PROXY_BD_SHEETS = ["Alts", "TD", "BU"]
+#
+# ANTES de esa línea, INSERTAR todo este bloque (ProxyLoaderASG).
+# La línea PROXY_BD_SHEETS y append_proxies() se mantienen intactas
+# (por compatibilidad con run_pipeline viejo), pero el nuevo pipeline
+# usa ProxyLoaderASG en su lugar.
+
+###############################################################################
+#                                                                             #
+#   PROXY LOADER ASG — nuevo sistema de proxies (reemplaza BU/TD/Alts)       #
+#   Lee "Reporte ASG Mensual" + hoja YYYYMM + Soberanos.xlsx                 #
+#                                                                             #
+###############################################################################
+
+def _normalize_nombre(s):
+    """Normaliza un nombre para fuzzy matching: minúsculas, sin *, espacios
+    extra, tildes simplificadas."""
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    s = re.sub(r'[*\.\,\-\(\)]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _determinar_hoja_proxy(forzar_yyyymm: Optional[str] = None) -> str:
+    """Hoja YYYYMM a leer. Si forzar_yyyymm es None, usa la lógica del día 16:
+    si hoy > 16 → mes actual, sino → mes anterior."""
+    if forzar_yyyymm:
+        return str(forzar_yyyymm)
+    hoy = datetime.now()
+    if hoy.day > 16:
+        return hoy.strftime("%Y%m")
+    # Mes anterior
+    primer_dia = hoy.replace(day=1)
+    mes_ant = primer_dia - timedelta(days=1)
+    return mes_ant.strftime("%Y%m")
+
+
+class ProxyLoaderASG:
+    """Carga proxies desde 'Lista Proxies - Huella y Comite mensual ASG.xlsx'.
+
+    Produce:
+      - intensidad_overrides: {Client_ID_instrumento → intensidad CO2}
+      - plus_overrides: {Client_ID_instrumento → {"Plus":"Proxies","Plus_1":"Proxies"}}
+    """
+
+    def __init__(self, path_proxies: str, path_soberanos: Optional[str] = None,
+                 hoja_yyyymm: Optional[str] = None,
+                 bd_msci_isins: Optional[set] = None,
+                 verbose: bool = True):
+        self.path = path_proxies
+        self.path_sob = path_soberanos
+        self.hoja = _determinar_hoja_proxy(hoja_yyyymm)
+        self.bd_msci_isins = bd_msci_isins or set()
+        self.verbose = verbose
+        self.intensidad_overrides: Dict[str, float] = {}
+        self.plus_overrides: Dict[str, dict] = {}
+        self._skipped_msci: List[str] = []
+
+    def load(self) -> "ProxyLoaderASG":
+        if not os.path.exists(self.path):
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] No encontrado: {self.path}")
+            return self
+
+        import openpyxl
+        wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
+        try:
+            asignacion = self._leer_asignacion(wb)
+            intensidades_fund = self._leer_hoja_yyyymm(wb)
+        finally:
+            wb.close()
+
+        intensidades_sob = self._leer_soberanos()
+
+        n_ok, n_skip, n_nodata = 0, 0, 0
+        for instr_id, proxy_id in asignacion.items():
+            # Punto 2: prioridad BD MSCI
+            if instr_id in self.bd_msci_isins:
+                self._skipped_msci.append(instr_id)
+                n_skip += 1
+                continue
+
+            # Buscar intensidad del proxy
+            intens = intensidades_fund.get(proxy_id)
+            if intens is None:
+                intens = intensidades_sob.get(proxy_id)
+            if intens is None:
+                n_nodata += 1
+                continue
+
+            self.intensidad_overrides[instr_id] = float(intens)
+            self.plus_overrides[instr_id] = {
+                BD_COL_PLUS: "Proxies", BD_COL_PLUS_1: "Proxies"
+            }
+            n_ok += 1
+
+        if self.verbose:
+            print(f"  [ProxyASG] Hoja intensidades: '{self.hoja}'")
+            print(f"  [ProxyASG] Asignaciones: {len(asignacion)} | "
+                  f"Con intensidad: {n_ok} | Sin dato: {n_nodata} | "
+                  f"Ya en BD MSCI (ignorados): {n_skip}")
+            if self._skipped_msci:
+                print(f"  [ProxyASG] Instrumentos con proxy asignado pero ya "
+                      f"cubiertos por BD MSCI ({n_skip}):")
+                for sid in self._skipped_msci[:15]:
+                    print(f"             {sid}")
+                if n_skip > 15:
+                    print(f"             ... y {n_skip - 15} más.")
+        return self
+
+    def _leer_asignacion(self, wb) -> Dict[str, str]:
+        """Lee 'Reporte ASG Mensual' → {ISIN_instrumento → ISIN_proxy}.
+        Match por SBS, ISIN, o nombre fuzzy."""
+        if PROXIES_HOJA_ASIGNACION not in wb.sheetnames:
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] Falta hoja '{PROXIES_HOJA_ASIGNACION}'")
+            return {}
+
+        ws = wb[PROXIES_HOJA_ASIGNACION]
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            return {}
+
+        header = [str(h).strip().upper() if h else '' for h in rows[0]]
+        # Detectar columnas flexiblemente
+        def _find(candidates):
+            for c in candidates:
+                cu = c.upper()
+                for j, h in enumerate(header):
+                    if cu == h or cu in h:
+                        return j
+            return None
+
+        col_sbs = _find(['SBS', 'CODIGO_SBS']) or 0
+        col_isin = _find(['ISIN', 'CODIGO_ISIN']) or 1
+        col_emisor = _find(['EMISOR', 'NOMBRE']) or 4
+        col_proxy = _find(['PROXY']) or 7
+
+        asign: Dict[str, str] = {}   # instrument_key → proxy_ISIN
+        _by_nombre: Dict[str, str] = {}  # nombre_normalizado → proxy_ISIN (fallback)
+
+        for row in rows[1:]:
+            if not row or col_proxy >= len(row):
+                continue
+            proxy_isin = _to_string(row[col_proxy]) if row[col_proxy] else None
+            if not proxy_isin:
+                continue
+
+            sbs = _to_string(row[col_sbs]) if col_sbs < len(row) and row[col_sbs] else None
+            isin = _to_string(row[col_isin]) if col_isin < len(row) and row[col_isin] else None
+            emisor = row[col_emisor] if col_emisor < len(row) else None
+
+            # Clave primaria: SBS
+            if sbs:
+                asign.setdefault(sbs, proxy_isin)
+            # Clave secundaria: ISIN del instrumento
+            if isin:
+                asign.setdefault(isin, proxy_isin)
+            # Clave terciaria: nombre normalizado
+            if emisor:
+                nm = _normalize_nombre(emisor)
+                if nm:
+                    _by_nombre.setdefault(nm, proxy_isin)
+
+        # Guardar nombres para fuzzy matching en segunda pasada
+        self._nombre_map = _by_nombre
+        return asign
+
+    def match_por_nombre(self, nombre_cartera: str) -> Optional[str]:
+        """Fuzzy match contra los nombres de Reporte ASG Mensual."""
+        if not hasattr(self, '_nombre_map') or not self._nombre_map:
+            return None
+        nm = _normalize_nombre(nombre_cartera)
+        if not nm:
+            return None
+        # Exacto normalizado
+        if nm in self._nombre_map:
+            return self._nombre_map[nm]
+        # Contains bidireccional
+        for key, proxy in self._nombre_map.items():
+            if nm in key or key in nm:
+                return proxy
+        # Fuzzy (ratio > 0.85)
+        matches = difflib.get_close_matches(nm, self._nombre_map.keys(), n=1, cutoff=0.85)
+        if matches:
+            return self._nombre_map[matches[0]]
+        return None
+
+    def _leer_hoja_yyyymm(self, wb) -> Dict[str, float]:
+        """Lee la hoja YYYYMM → {FUND_ISIN/Client_ID → FUND_FINANCED_CARBON_EMISSIONS}."""
+        if self.hoja not in wb.sheetnames:
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] Hoja '{self.hoja}' no existe. "
+                      f"Hojas: {wb.sheetnames}")
+            return {}
+
+        ws = wb[self.hoja]
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            return {}
+
+        header = [str(h).strip() if h else '' for h in rows[0]]
+        header_up = [h.upper() for h in header]
+
+        # Buscar FUND_FINANCED_CARBON_EMISSIONS flexiblemente
+        col_intens = None
+        for j, h in enumerate(header_up):
+            if 'FUND_FINANCED_CARBON_EMIS' in h:
+                col_intens = j
+                break
+        if col_intens is None:
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] No se encontró FUND_FINANCED_CARBON_EMISSIONS "
+                      f"en hoja '{self.hoja}'.")
+            return {}
+
+        # Buscar FUND_ISIN o Client_ID
+        col_isin = None
+        for cand in ['FUND_ISIN', 'CLIENT_ID']:
+            for j, h in enumerate(header_up):
+                if h == cand:
+                    col_isin = j
+                    break
+            if col_isin is not None:
+                break
+        if col_isin is None:
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] No se encontró FUND_ISIN ni Client_ID "
+                      f"en hoja '{self.hoja}'.")
+            return {}
+
+        result: Dict[str, float] = {}
+        for row in rows[1:]:
+            isin = _to_string(row[col_isin]) if col_isin < len(row) and row[col_isin] else None
+            if not isin:
+                continue
+            val = row[col_intens] if col_intens < len(row) else None
+            if val is not None:
+                try:
+                    result[isin] = float(val)
+                except (ValueError, TypeError):
+                    pass
+        if self.verbose:
+            print(f"  [ProxyASG] Hoja '{self.hoja}': {len(result)} proxies con intensidad.")
+        return result
+
+    def _leer_soberanos(self) -> Dict[str, float]:
+        """Lee {yyyymm} Soberanos.xlsx → {client1 → GHG_INTENSITY × 1000}."""
+        if not self.path_sob or not os.path.exists(self.path_sob):
+            if self.verbose and self.path_sob:
+                print(f"  [ProxyASG] [AVISO] Soberanos no encontrado: {self.path_sob}")
+            return {}
+
+        import openpyxl
+        wb = openpyxl.load_workbook(self.path_sob, data_only=True)
+        try:
+            ws = wb[wb.sheetnames[0]]
+            rows_all = list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+        if not rows_all:
+            return {}
+
+        header_up = [str(h).strip().upper() if h else '' for h in rows_all[0]]
+
+        # Buscar client1 y CARBON_GOVERNMENT_GHG_INTENSITY_KG_PPP_MR
+        col_c1 = None
+        for j, h in enumerate(header_up):
+            if h == 'CLIENT1':
+                col_c1 = j
+                break
+        col_ghg = None
+        for j, h in enumerate(header_up):
+            if 'CARBON_GOVERNMENT_GHG_INTENSIT' in h:
+                col_ghg = j
+                break
+
+        if col_c1 is None or col_ghg is None:
+            if self.verbose:
+                print(f"  [ProxyASG] [AVISO] Soberanos: no se encontró client1 o "
+                      f"CARBON_GOVERNMENT_GHG_INTENSITY.")
+            return {}
+
+        result: Dict[str, float] = {}
+        for row in rows_all[1:]:
+            c1 = _to_string(row[col_c1]) if col_c1 < len(row) and row[col_c1] else None
+            if not c1:
+                continue
+            val = row[col_ghg] if col_ghg < len(row) else None
+            if val is not None:
+                try:
+                    result[c1] = float(val) * 1000
+                except (ValueError, TypeError):
+                    pass
+        if self.verbose:
+            print(f"  [ProxyASG] Soberanos: {len(result)} con GHG intensity.")
+        return result
+
+
+# ===================== REEMPLAZO 6 =====================
+# Modificar _construir_shared() para usar ProxyLoaderASG.
+# Buscar la función completa:
+#
+#   def _construir_shared(cfg: "Config", verbose: bool = True) -> dict:
+#
+# Reemplazar TODO el cuerpo de la función por:
+
+def _construir_shared(cfg: "Config", verbose: bool = True,
+                      hoja_proxy_yyyymm: Optional[str] = None) -> dict:
+    """Construye BD MSCI, ProxyASG, Perdieron. Se comparten entre AFPs."""
+    if verbose:
+        print("  [SHARED] Construyendo recursos compartidos...")
+
+    bd = BDMSCIBuilder(cfg).build()
+    # NO llamar bd.append_proxies() — el nuevo sistema lo reemplaza.
+
+    # Set de ISINs ya cubiertos por BD MSCI (para prioridad punto 2)
+    bd_isins = set(bd.df[BD_COL_CLIENT_ID].dropna().unique())
+
+    # Soberanos
+    path_sob = str(Path(D_SOBERANOS) / FNAME_SOBERANOS.format(
+        yyyymm=cfg.semestre))
+    if not os.path.exists(path_sob):
+        # Intentar con base_msci_sheet como alternativa
+        path_sob_alt = str(Path(D_SOBERANOS) / FNAME_SOBERANOS.format(
+            yyyymm=cfg.base_msci_sheet))
+        if os.path.exists(path_sob_alt):
+            path_sob = path_sob_alt
+
+    # Nuevo proxy loader
+    proxy_asg = ProxyLoaderASG(
+        path_proxies=cfg.path_proxies,
+        path_soberanos=path_sob,
+        hoja_yyyymm=hoja_proxy_yyyymm,
+        bd_msci_isins=bd_isins,
+        verbose=verbose,
+    ).load()
+
+    # Agregar proxy overrides al catálogo de BD MSCI (para Plus lookup)
+    _filas_proxy = []
+    for cid, info in proxy_asg.plus_overrides.items():
+        intens = proxy_asg.intensidad_overrides.get(cid, 0.0)
+        _filas_proxy.append({
+            BD_COL_A: None, "Nombre": None, BD_COL_CLIENT_ID: cid,
+            "client1": None, "client2": None, "Valor": None,
+            "País": None, "Sector": None, "EVIC": None, "CO2": None,
+            "CO2/EVIC": None, "ESG": None, "E": None, "S": None,
+            "G": None, "Controversia": None, "Co2/Sales": None,
+            "Gov_pctl": None, "Rating": None,
+            BD_COL_INTENSIDAD: intens,
+            "%DebtPub": None, "CAT": None,
+            BD_COL_PLUS: info[BD_COL_PLUS],
+            BD_COL_PLUS_1: info[BD_COL_PLUS_1],
+        })
+    if _filas_proxy:
+        df_proxy = pd.DataFrame(_filas_proxy, columns=BD_MSCI_COLS)
+        antes = len(bd.df)
+        bd.df = pd.concat([bd.df, df_proxy], ignore_index=True)
+        bd.df = bd.df.drop_duplicates(BD_COL_CLIENT_ID, keep="first").reset_index(drop=True)
+        if verbose:
+            print(f"  [SHARED] BD(MSCI) + ProxyASG: {antes} -> {len(bd.df)} filas.")
+
+    perd = PerdieronHuellaLoader(cfg).build()
+    perd_lookup = perd.as_intensidad_lookup() if not perd.df.empty else {}
+
+    # ProxyEngine minimalista: solo para apply_inheritance (no lee archivo)
+    # Creamos un stub con los overrides ya cargados
+    px = ProxyEngine.__new__(ProxyEngine)
+    px.config = cfg
+    px.path = cfg.path_proxies
+    px.verbose = verbose
+    px.etf_ref_col = None
+    px.proxy_overrides = proxy_asg.intensidad_overrides
+    px.msci_ref = {}
+    px.df_inherited = None
+
+    intensidad_post = px.apply_to_bd(bd.as_intensidad_lookup())
+
+    comp = ComparablesLoader(cfg, verbose=verbose).build()
+    mkt = _market_cap_seguro(cfg, verbose)
+
+    return {
+        "bd": bd,
+        "proxy_engine": px,
+        "proxy_asg": proxy_asg,
+        "intensidad_post": intensidad_post,
+        "plus_lookup": bd.as_plus_lookup(),
+        "attrs_lookup": bd.as_attrs_lookup(),
+        "perd_lookup": perd_lookup,
+        "comp": comp,
+        "mkt": mkt,
+    }
+
+
+# ===================== REEMPLAZO 7 =====================
+# Detección de duplicados en histórico. Buscar dentro de
+# _exportar_con_afp, la línea:
+#
+#    if verbose:
+#        print(f"  [Módulo 13] {afp} -> hoja '{nombre_hoja}' en histórico.")
+#
+# ANTES de esa línea, INSERTAR:
+
+    # Aviso de duplicado de período
+    _periodo_yyyymm = semestre[:6]
+    if not hist_prev.empty and "FECHA_CORTE" in hist_prev.columns:
+        _cortes_existentes = hist_prev["FECHA_CORTE"].astype(str).unique()
+        _mismos_mes = [c for c in _cortes_existentes
+                       if c[:6] == _periodo_yyyymm and c != semestre]
+        if _mismos_mes:
+            print(f"  [AVISO] Ya existen datos para el mes {_periodo_yyyymm} con "
+                  f"corte(s) diferente(s): {_mismos_mes}.")
+            print(f"          Se purgaron las filas de {_mismos_mes} y se reemplazan "
+                  f"por el corte actual '{semestre}' (AFP={afp}).")
+            # Purgar los cortes viejos del mismo mes
+            for _c_viejo in _mismos_mes:
+                mask_viejo = ((historico["FECHA_CORTE"].astype(str) == _c_viejo) &
+                              (historico["AFP"].astype(str) == afp))
+                historico = historico[~mask_viejo]
+
+
+# ===================== REEMPLAZO 8 =====================
+# Nuevo __main__ con soporte mensual y hoja proxy configurable.
+# Buscar:
+#
+#   if __name__ == "__main__":
+#
+# REEMPLAZAR todo el bloque hasta el final del archivo por:
+
+if __name__ == "__main__":
+
+    # ===================== AJUSTES DEL USUARIO ==============================
+    PERIODO = "202607"               # período en revisión (yyyymm, mensual OK)
+
+    # Mes/año del BD1_S_Huella (el mes del reporte de cartera)
+    BD1S_ANIO = "2026"
+    BD1S_MES  = "07"
+
+    # Hoja de intensidades en Lista Proxies (None = automático por día 16)
+    HOJA_PROXY = None                # o forzar: "202607"
+
+    # AFPs a procesar (None = todas las disponibles en BD1_S_Huella)
+    AFPS = None     # o p.ej. ["Integra", "Prima"]
+
+    OUTPUT_DIR = OUTPUT_DIR_DEFAULT
+    # ========================================================================
+
+    ruta_bd1s = FsPath(BD1S_HUELLA_DIR) / BD1S_HUELLA_FNAME.format(
+        anio=BD1S_ANIO, mes=BD1S_MES)
+
+    print(f"BD1S_Huella: {ruta_bd1s}")
+    if not ruta_bd1s.exists():
+        raise SystemExit(f"No se encontró BD1_S_Huella:\n  {ruta_bd1s}\n"
+                         f"Ejecuta primero BD_G&P_total.py para generarlo.")
+
+    resultado = run_pipeline_bd1s(
+        PERIODO, str(ruta_bd1s),
+        output_dir=OUTPUT_DIR,
+        afps=AFPS,
+        hoja_proxy_yyyymm=HOJA_PROXY,
+    )
+    print("\nListo:")
+    print("  Histórico :", resultado["ruta_historico"])
+    print("  Dashboard :", resultado["ruta_dashboard"])
+    print("  AFPs      :", list(resultado["resultados"].keys()))
+# ===================== REEMPLAZO 9 (en run_pipeline_bd1s) =====================
+# Buscar la firma de la función:
+#
+#   def run_pipeline_bd1s(semestre: str,
+#                         ruta_bd1s: str,
+#                         output_dir: str = OUTPUT_DIR_DEFAULT,
+#                         afps: Optional[List[str]] = None,
+#                         ruta_historico: Optional[str] = None,
+#                         ruta_dashboard: Optional[str] = None,
+#                         verbose: bool = True):
+#
+# Reemplazar por (agrega hoja_proxy_yyyymm):
+
+def run_pipeline_bd1s(semestre: str,
+                      ruta_bd1s: str,
+                      output_dir: str = OUTPUT_DIR_DEFAULT,
+                      afps: Optional[List[str]] = None,
+                      ruta_historico: Optional[str] = None,
+                      ruta_dashboard: Optional[str] = None,
+                      hoja_proxy_yyyymm: Optional[str] = None,
+                      verbose: bool = True):
+
+
+# Luego, dentro de la misma función, buscar:
+#
+#    shared = _construir_shared(cfg, verbose)
+#
+# Reemplazar por:
+
+    shared = _construir_shared(cfg, verbose, hoja_proxy_yyyymm=hoja_proxy_yyyymm)
+
+
+# ===================== REEMPLAZO 10 (import difflib) =====================
+# Buscar al inicio del pipeline de Huella, donde están los imports:
+#
+#   import os
+#
+# Agregar DESPUÉS si no existe ya:
+#
+#   import difflib
+#
+# (Se usa en ProxyLoaderASG para fuzzy matching de nombres)
