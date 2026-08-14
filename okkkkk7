@@ -1,0 +1,459 @@
+# -*- coding: utf-8 -*-
+"""
+Monitor de Multiplos - Comite Corporativo (AFP Integra)
+Genera un dashboard HTML interactivo (Plotly) replicando 'Charts_referenciales'.
+Inputs (en BASE_DIR): Multiplos_hist.xlsx, integra_logo.png
+Output: Dashboard_Multiplos.html
+"""
+
+import os
+import sys
+import json
+import base64
+import traceback
+
+# ------------------------------------------------------------------ CONFIG
+BASE_DIR = r"\\SPPEAPP00023\Inversiones\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\ZODA"
+XLSX_NAME = "Multiplos_hist.xlsx"
+LOGO_NAME = "integra_logo.png"
+OUT_NAME  = "Dashboard_Multiplos.html"
+
+FECHA_INICIO = "2015-03-01"      # inicio visualizado (igual a los charts referenciales)
+RESAMPLE     = "ME"             # fin de mes -> serie mensual limpia
+
+# Orden fijo de multiplos por bloque de empresa en el Excel
+MULT_ORDER = ["Fwd_EVEBITDA", "Fwd_PB", "Fwd_PE", "Fwd_PS",
+              "Trail_EVEBITDA", "Trail_PB", "Trail_PE", "Trail_PS"]
+
+# Paleta corporativa (idéntica en espíritu a los charts referenciales)
+COLOR_TARGET   = ["#1F3864", "#77933C"]   # navy + verde oliva (target 1 / target 2)
+COLOR_COMPS    = "#C00000"                # promedio de comparables (rojo)
+COLOR_INDIV    = ["#95B3D7", "#8064A2", "#4BACC6", "#B8CCE4",
+                  "#4F81BD", "#00B0F0", "#C4BD97", "#D99694"]
+
+# Definición de paneles (idéntico layout 3x2 a Charts_referenciales)
+PANELS = [
+    dict(id="p1", titulo="Evolución P/B — BAP, IFS y Comps.",
+         sector="Financials", metric="PB",
+         targets=["Intercorp Financial Services Inc."],
+         comps=["Banco Santander-Chile", "Banco de Chile", "BBVA México"],
+         yrange=[0, 8], dtick=1, tickfmt=".1f"),
+    dict(id="p2", titulo="Evolución EV/EBITDA — BVN y Comps.",
+         sector="Mining", metric="EVEBITDA",
+         targets=["Compañía de Minas Buenaventura"],
+         comps=["Newmont Corporation", "Antofagasta plc",
+                "Southern Copper Corporation", "Freeport-McMoRan Inc."],
+         yrange=[0, 45], dtick=5, tickfmt="d"),
+    dict(id="p3", titulo="Evolución EV/EBITDA — Hochschild y Comps.",
+         sector="Mining", metric="EVEBITDA",
+         targets=["Hochschild Mining plc"],
+         comps=["Industrias Peñoles", "Pan American Silver Corp.",
+                "Fortuna Mining Corp.", "SSR Mining Inc."],
+         yrange=[0, 40], dtick=5, tickfmt="d"),
+    dict(id="p4", titulo="Evolución EV/EBITDA — Ferreycorp y Comps.",
+         sector="Industrials", metric="EVEBITDA",
+         targets=["Ferreycorp"],
+         comps=["Finning International Inc.", "Toromont Industries Ltd.",
+                "Wajax Corporation", "Barloworld Limited"],
+         yrange=[0, 25], dtick=5, tickfmt="d"),
+    dict(id="p5", titulo="Evolución EV/EBITDA — InRetail y Comps.",
+         sector="Consumer", metric="EVEBITDA",
+         targets=["InRetail Perú Corp."],
+         comps=["Wal-Mart de México", "Cencosud", "Carrefour", "Falabella"],
+         yrange=[5, 35], dtick=5, tickfmt="d"),
+    dict(id="p6", titulo="Evolución EV/EBITDA — Pacasmayo, Unacem y Comps.",
+         sector="Construction Materials", metric="EVEBITDA",
+         targets=["Cementos Pacasmayo", "UNACEM Corp"],
+         comps=["CEMEX", "Holcim AG", "Gerdau",
+                "Loma Negra Compañía Industrial Argentina Sociedad Anónima"],
+         yrange=[3, 33], dtick=5, tickfmt="d"),
+]
+
+METRIC_COLS = {"PB": ("Fwd_PB", "Trail_PB"),
+               "EVEBITDA": ("Fwd_EVEBITDA", "Trail_EVEBITDA")}
+
+
+# ------------------------------------------------------------------ HELPERS
+def log(msg):  print(f"[INFO] {msg}", flush=True)
+def warn(msg): print(f"[WARN] {msg}", flush=True)
+def err(msg):  print(f"[ERROR] {msg}", flush=True)
+
+
+def check_deps():
+    faltan = []
+    try:
+        import openpyxl  # noqa
+    except Exception:
+        faltan.append("openpyxl")
+    try:
+        import pandas  # noqa
+    except Exception:
+        faltan.append("pandas")
+    if faltan:
+        err("Faltan librerías: " + ", ".join(faltan))
+        err("Instala con:  pip install " + " ".join(faltan))
+        sys.exit(1)
+
+
+# ------------------------------------------------------------------ EXTRACT
+def construir_dataset(xlsx_path):
+    import pandas as pd
+    import numpy as np  # noqa
+
+    sectores_necesarios = sorted({p["sector"] for p in PANELS})
+    log(f"Leyendo hojas: {', '.join(sectores_necesarios)}")
+    hojas = pd.read_excel(xlsx_path, sheet_name=sectores_necesarios, header=None)
+
+    data = {}          # sector -> {empresa -> {"fwd": Series, "trail": Series}}
+    fechas_ref = None  # eje X común (YYYY-MM)
+
+    for sector in sectores_necesarios:
+        if sector not in hojas:
+            warn(f"Sector ausente en el Excel: '{sector}' (se omite)")
+            continue
+        df = hojas[sector]                     # fila0=Empresa, fila1=Multiplo, fila3+=datos
+        empresas_row = df.iloc[0].tolist()
+        mult_row = df.iloc[1].tolist()
+        fechas = pd.to_datetime(df.iloc[3:, 0], errors="coerce")
+        mask = fechas.notna()
+        fechas = fechas[mask]
+
+        metric = next(p["metric"] for p in PANELS if p["sector"] == sector)
+        col_fwd, col_trail = METRIC_COLS[metric]
+
+        # bloques: columna donde arranca cada empresa
+        bloques, cur = [], None
+        for c in range(1, df.shape[1]):
+            nm = empresas_row[c]
+            if isinstance(nm, str) and nm.strip():
+                cur = nm.strip()
+                bloques.append((cur, c))
+
+        data[sector] = {}
+        vistas = set()
+        for name, st in bloques:
+            if name in vistas:
+                continue
+            vistas.add(name)
+            mults = [mult_row[st + k] if st + k < df.shape[1] else None for k in range(8)]
+            reg = {}
+            for tag, mcol in (("fwd", col_fwd), ("trail", col_trail)):
+                if mcol in mults:
+                    col = st + mults.index(mcol)
+                    vals = pd.to_numeric(df.iloc[3:, col], errors="coerce")[mask.values]
+                    s = pd.Series(vals.values, index=fechas.values, dtype="float64")
+                    s = s.resample(RESAMPLE).last()
+                    s = s[s.index >= FECHA_INICIO]
+                    reg[tag] = s
+            if not reg:
+                continue
+            ref = reg.get("trail", reg.get("fwd"))
+            if fechas_ref is None:
+                fechas_ref = [pd.Timestamp(d).strftime("%Y-%m") for d in ref.index]
+            data[sector][name] = reg
+
+    if fechas_ref is None:
+        err("No se pudo construir el eje temporal (sin datos válidos).")
+        sys.exit(1)
+
+    # alinear todas las series al eje comun (clave 'YYYY-MM') -> listas con None
+    import numpy as np
+    n = len(fechas_ref)
+    salida = {}
+    total_emp = 0
+    for sector, emps in data.items():
+        salida[sector] = {}
+        for name, reg in emps.items():
+            row = {}
+            for tag in ("fwd", "trail"):
+                if tag in reg:
+                    s = reg[tag]
+                    d = {pd.Timestamp(ix).strftime("%Y-%m"): val
+                         for ix, val in zip(s.index, s.values)}
+                    row[tag] = [None if (d.get(k) is None or
+                                         (isinstance(d.get(k), float) and np.isnan(d.get(k))))
+                                else round(float(d[k]), 3) for k in fechas_ref]
+                else:
+                    row[tag] = [None] * n
+            salida[sector][name] = row
+            total_emp += 1
+        log(f"Sector '{sector}': {len(emps)} empresas procesadas.")
+
+    log(f"Total empresas: {total_emp} | Puntos temporales: {n} "
+        f"({fechas_ref[0]} → {fechas_ref[-1]})")
+    return salida, fechas_ref
+
+
+# ------------------------------------------------------------------ VALIDATE
+def validar_defaults(dataset):
+    for p in PANELS:
+        sect = dataset.get(p["sector"], {})
+        for grupo in ("targets", "comps"):
+            faltan = [e for e in p[grupo] if e not in sect]
+            if faltan:
+                warn(f"[{p['id']}] no encontradas en '{p['sector']}': {faltan}")
+            p[grupo] = [e for e in p[grupo] if e in sect]  # solo válidas
+
+
+# ------------------------------------------------------------------ HTML
+def b64_logo(path):
+    try:
+        with open(path, "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    except Exception as e:
+        warn(f"No se pudo cargar el logo ({e}); se omite.")
+        return ""
+
+
+def build_html(dataset, fechas, logo_uri):
+    payload = {
+        "fechas": fechas,
+        "data": dataset,
+        "panels": [{k: p[k] for k in
+                    ("id", "titulo", "sector", "targets", "comps",
+                     "yrange", "dtick", "tickfmt")} for p in PANELS],
+        "colors": {"target": COLOR_TARGET, "comps": COLOR_COMPS, "indiv": COLOR_INDIV},
+    }
+    data_json = json.dumps(payload, ensure_ascii=False)
+
+    html = r"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Monitor de Múltiplos — AFP Integra</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  :root{ --navy:#1F3864; --grey:#eef1f5; --line:#d9dee6; --text:#1F3864; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:'Segoe UI',Arial,sans-serif; color:#333;
+        background:#ffffff; }
+  header{ display:flex; align-items:center; justify-content:space-between;
+          background:var(--grey); padding:14px 26px; border-bottom:3px solid var(--navy);}
+  header .t h1{ margin:0; font-size:20px; color:var(--navy); font-weight:700; }
+  header .t h2{ margin:2px 0 0; font-size:14px; color:var(--navy); font-weight:400; }
+  header img{ height:34px; }
+  .basis{ display:flex; gap:16px; align-items:center; padding:10px 26px;
+          border-bottom:1px solid var(--line); font-size:13px; color:var(--navy);}
+  .basis label{ cursor:pointer; }
+  .grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; padding:16px 22px;}
+  @media(max-width:1200px){ .grid{ grid-template-columns:repeat(2,1fr);} }
+  @media(max-width:820px){ .grid{ grid-template-columns:1fr;} }
+  .card{ border:1px solid var(--line); border-radius:6px; padding:8px 10px 4px;
+         background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .card h3{ margin:2px 0 6px; font-size:13.5px; color:var(--navy);
+            font-weight:700; text-align:center; }
+  .plot{ width:100%; height:300px; }
+  .ctrls{ display:flex; gap:8px; margin-top:6px; }
+  .ctrls .box{ flex:1; }
+  .ctrls .lbl{ font-size:10.5px; color:var(--navy); font-weight:600;
+               text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px;}
+  select[multiple]{ width:100%; height:66px; font-size:11px; border:1px solid var(--line);
+                    border-radius:4px; padding:2px; color:#333; }
+  .hint{ font-size:10px; color:#8a93a2; padding:0 26px 18px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="t">
+    <h1>Evolución del comportamiento de múltiplos</h1>
+    <h2>Vemos potencial adicional en algunas acciones: BAP, IFS, HOC, InRetail</h2>
+  </div>
+  <img src="__LOGO__" alt="AFP Integra">
+</header>
+
+<div class="basis">
+  <span><b>Base del múltiplo:</b></span>
+  <label><input type="radio" name="basis" value="trail" checked> Trailing</label>
+  <label><input type="radio" name="basis" value="fwd"> Forward</label>
+  <span style="margin-left:auto;color:#8a93a2;font-size:11px;">
+    Ctrl/Shift + clic para selección múltiple en cada slicer</span>
+</div>
+
+<div class="grid" id="grid"></div>
+<div class="hint">Fuente: Multiplos_hist.xlsx · Serie mensual (fin de mes) ·
+  Línea <b style="color:#C00000;">roja</b> = promedio de comparables ·
+  Descarga cada gráfico como PNG con el ícono de cámara para pegarlo en tus diapositivas.</div>
+
+<script>
+const PAYLOAD = __DATA__;
+const FECHAS = PAYLOAD.fechas;
+const DATA   = PAYLOAD.data;
+const COL    = PAYLOAD.colors;
+let BASIS = "trail";
+
+function meanSeries(seriesList){
+  const n = FECHAS.length, out = new Array(n).fill(null);
+  for(let i=0;i<n;i++){
+    let s=0,c=0;
+    for(const arr of seriesList){ const v=arr[i]; if(v!==null&&v!==undefined){s+=v;c++;} }
+    out[i] = c ? s/c : null;
+  }
+  return out;
+}
+
+function buildTraces(panel){
+  const sect = DATA[panel.sector] || {};
+  const targets = getSel(panel.id,"tg");
+  const comps   = getSel(panel.id,"cp");
+  const traces = [];
+
+  targets.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:FECHAS, y:sect[name][BASIS], name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.target[i%COL.target.length], width:2.6 } });
+  });
+
+  const compArrays = comps.filter(n=>sect[n]).map(n=>sect[n][BASIS]);
+  if(compArrays.length){
+    traces.push({ x:FECHAS, y:meanSeries(compArrays), name:"Comps",
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>Comps</extra>",
+      line:{ color:COL.comps, width:2.2 } });
+  }
+  comps.forEach((name,i)=>{
+    if(!sect[name]) return;
+    traces.push({ x:FECHAS, y:sect[name][BASIS], name:shortName(name),
+      mode:"lines", connectgaps:true, hovertemplate:"%{y:.1f}<extra>"+shortName(name)+"</extra>",
+      line:{ color:COL.indiv[i%COL.indiv.length], width:1.4 } });
+  });
+  return traces;
+}
+
+function shortName(n){
+  const map={
+    "Intercorp Financial Services Inc.":"IFS",
+    "Compañía de Minas Buenaventura":"BVN",
+    "Hochschild Mining plc":"Hochschild",
+    "InRetail Perú Corp.":"InRetail",
+    "Cementos Pacasmayo":"Pacasmayo",
+    "UNACEM Corp":"Unacem",
+    "Banco Santander-Chile":"Santander Chile",
+    "Banco de Chile":"Banco de Chile",
+    "BBVA México":"BBVA Mex",
+    "Southern Copper Corporation":"SCCO",
+    "Wal-Mart de México":"Walmex",
+    "Industrias Peñoles":"Peñoles",
+    "Pan American Silver Corp.":"Pan American",
+    "Fortuna Mining Corp.":"Fortuna",
+    "Newmont Corporation":"Newmont",
+    "Antofagasta plc":"Antofagasta",
+    "Freeport-McMoRan Inc.":"Freeport",
+    "Finning International Inc.":"Finning",
+    "Toromont Industries Ltd.":"Toromont",
+    "Wajax Corporation":"Wajax",
+    "Barloworld Limited":"Barloworld",
+    "Holcim AG":"Holcim",
+    "Loma Negra Compañía Industrial Argentina Sociedad Anónima":"Loma Negra"
+  };
+  return map[n] || n;
+}
+
+function layout(panel){
+  return {
+    margin:{l:34,r:8,t:6,b:44},
+    height:300, plot_bgcolor:"#fff", paper_bgcolor:"#fff",
+    font:{ family:"Segoe UI, Arial", size:10.5, color:"#333" },
+    showlegend:true,
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.16, yanchor:"top",
+             font:{size:9.5}, tracegroupgap:2 },
+    xaxis:{ type:"date", tickformat:"%m-%y", dtick:"M16", ticks:"outside",
+            tickfont:{size:9.5}, showgrid:false, linecolor:"#b9c0cc",
+            tickangle:0 },
+    yaxis:{ range:panel.yrange, dtick:panel.dtick, tickformat:panel.tickfmt,
+            ticks:"outside", tickfont:{size:9.5}, gridcolor:"#eef1f5",
+            zeroline:false, linecolor:"#b9c0cc" }
+  };
+}
+
+const CFG={ displaylogo:false, responsive:true,
+  modeBarButtonsToRemove:["lasso2d","select2d","autoScale2d"],
+  toImageButtonOptions:{ format:"png", scale:3, filename:"multiplo" } };
+
+function getSel(pid,kind){
+  const el=document.getElementById(pid+"_"+kind);
+  return Array.from(el.selectedOptions).map(o=>o.value);
+}
+
+function redraw(panel){
+  Plotly.react(panel.id+"_plot", buildTraces(panel), layout(panel), CFG);
+}
+
+function optionsFor(sector, selected){
+  const names=Object.keys(DATA[sector]||{}).sort((a,b)=>a.localeCompare(b));
+  return names.map(n=>`<option value="${n.replace(/"/g,'&quot;')}"`
+      +(selected.includes(n)?" selected":"")+`>${shortName(n)}</option>`).join("");
+}
+
+function render(){
+  const grid=document.getElementById("grid");
+  PAYLOAD.panels.forEach(panel=>{
+    const card=document.createElement("div"); card.className="card";
+    card.innerHTML=`
+      <h3>${panel.titulo}</h3>
+      <div id="${panel.id}_plot" class="plot"></div>
+      <div class="ctrls">
+        <div class="box"><div class="lbl">Target</div>
+          <select multiple id="${panel.id}_tg">${optionsFor(panel.sector,panel.targets)}</select></div>
+        <div class="box"><div class="lbl">Comparables</div>
+          <select multiple id="${panel.id}_cp">${optionsFor(panel.sector,panel.comps)}</select></div>
+      </div>`;
+    grid.appendChild(card);
+    Plotly.newPlot(panel.id+"_plot", buildTraces(panel), layout(panel), CFG);
+    card.querySelector(`#${panel.id}_tg`).addEventListener("change",()=>redraw(panel));
+    card.querySelector(`#${panel.id}_cp`).addEventListener("change",()=>redraw(panel));
+  });
+  document.querySelectorAll('input[name="basis"]').forEach(r=>{
+    r.addEventListener("change",e=>{ BASIS=e.target.value;
+      PAYLOAD.panels.forEach(redraw); });
+  });
+}
+render();
+</script>
+</body>
+</html>
+"""
+    html = html.replace("__LOGO__", logo_uri)
+    html = html.replace("__DATA__", data_json)
+    return html
+
+
+# ------------------------------------------------------------------ MAIN
+def main():
+    print("=" * 62)
+    print("  Monitor de Múltiplos — Generador de Dashboard HTML")
+    print("=" * 62)
+    check_deps()
+
+    xlsx_path = os.path.join(BASE_DIR, XLSX_NAME)
+    logo_path = os.path.join(BASE_DIR, LOGO_NAME)
+    out_path  = os.path.join(BASE_DIR, OUT_NAME)
+
+    if not os.path.isdir(BASE_DIR):
+        err(f"No existe la ruta base: {BASE_DIR}")
+        sys.exit(1)
+    if not os.path.isfile(xlsx_path):
+        err(f"No se encontró el Excel: {xlsx_path}")
+        sys.exit(1)
+    if not os.path.isfile(logo_path):
+        warn(f"No se encontró el logo: {logo_path} (el dashboard saldrá sin logo)")
+
+    try:
+        dataset, fechas = construir_dataset(xlsx_path)
+        validar_defaults(dataset)
+        logo_uri = b64_logo(logo_path) if os.path.isfile(logo_path) else ""
+        html = build_html(dataset, fechas, logo_uri)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        log(f"Dashboard generado: {out_path}")
+        log(f"Tamaño: {os.path.getsize(out_path)/1024:.0f} KB")
+        print("=" * 62)
+        print("  LISTO. Abre el HTML en tu navegador (requiere internet para Plotly CDN).")
+        print("=" * 62)
+    except Exception as e:
+        err(f"Fallo inesperado: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
