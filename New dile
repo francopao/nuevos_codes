@@ -1,0 +1,28 @@
+El Reemplazo 1 borró accidentalmente `FNAME_BASE_MSCI`, `FNAME_MARKET_CAP` y `FNAME_GYP` que estaban entre las líneas reemplazadas. Busca el bloque que pegaste del Reemplazo 1 y agrégale estas 3 líneas justo después de `PROXIES_HOJA_ASIGNACION`:
+
+```python
+FNAME_BASE_MSCI = "Base MSCI (Sob+ETF+BU).xlsx"
+FNAME_MARKET_CAP = "Market Cap.xlsx"
+FNAME_GYP = "G&P_MLab_{mmyyyy}.xlsm"
+```
+
+Debe quedar así el bloque completo:
+
+```python
+SUBDIR_PROXIES = (r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+                  r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+                  r"\2. Reportes\Reporte Mensual ASG")
+FNAME_PROXIES = "Lista Proxies - Huella y Comite mensual ASG.xlsx"
+PROXIES_HOJA_ASIGNACION = "Reporte ASG Mensual"
+
+FNAME_BASE_MSCI = "Base MSCI (Sob+ETF+BU).xlsx"
+FNAME_MARKET_CAP = "Market Cap.xlsx"
+FNAME_GYP = "G&P_MLab_{mmyyyy}.xlsm"
+
+FNAME_WORKBOOK_FIJO = "Reporte de Huella con Proxies.xlsm"
+
+D_SOBERANOS = (r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+               r"\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI"
+               r"\1.Data Histórica\Dataset\MSCI")
+FNAME_SOBERANOS = "{yyyymm} Soberanos.xlsx"
+```
