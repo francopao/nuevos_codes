@@ -1,0 +1,188 @@
+6 bloques adicionales, en orden de aparición en el archivo:
+
+**1) Python — PANELS: título dinámico (base sin tickers) + agregar Credicorp Ltd. como target #1**
+BUSCAR el bloque completo `PANELS = [ ... ]` y REEMPLAZAR POR:
+```python
+PANELS = [
+    dict(id="p1", titulo_base="Evolución P/B",
+         sector="Financials", metric="PB",
+         targets=["Intercorp Financial Services Inc.", "Credicorp Ltd."],
+         comps=["Banco Santander-Chile", "Banco de Chile", "BBVA México"],
+         yrange=[0, 8], dtick=1, tickfmt=".1f"),
+    dict(id="p2", titulo_base="Evolución EV/EBITDA",
+         sector="Mining", metric="EVEBITDA",
+         targets=["Compañía de Minas Buenaventura"],
+         comps=["Newmont Corporation", "Antofagasta plc",
+                "Southern Copper Corporation", "Freeport-McMoRan Inc."],
+         yrange=[0, 45], dtick=5, tickfmt="d"),
+    dict(id="p3", titulo_base="Evolución EV/EBITDA",
+         sector="Mining", metric="EVEBITDA",
+         targets=["Hochschild Mining plc"],
+         comps=["Industrias Peñoles", "Pan American Silver Corp.",
+                "Fortuna Mining Corp.", "SSR Mining Inc."],
+         yrange=[0, 40], dtick=5, tickfmt="d"),
+    dict(id="p4", titulo_base="Evolución EV/EBITDA",
+         sector="Industrials", metric="EVEBITDA",
+         targets=["Ferreycorp"],
+         comps=["Finning International Inc.", "Toromont Industries Ltd.",
+                "Wajax Corporation", "Barloworld Limited"],
+         yrange=[0, 25], dtick=5, tickfmt="d"),
+    dict(id="p5", titulo_base="Evolución EV/EBITDA",
+         sector="Consumer", metric="EVEBITDA",
+         targets=["InRetail Perú Corp."],
+         comps=["Wal-Mart de México", "Cencosud", "Carrefour", "Falabella"],
+         yrange=[5, 35], dtick=5, tickfmt="d"),
+    dict(id="p6", titulo_base="Evolución EV/EBITDA",
+         sector="Construction Materials", metric="EVEBITDA",
+         targets=["Cementos Pacasmayo", "UNACEM Corp"],
+         comps=["CEMEX", "Holcim AG", "Gerdau",
+                "Loma Negra Compañía Industrial Argentina Sociedad Anónima"],
+         yrange=[3, 33], dtick=5, tickfmt="d"),
+]
+```
+
+**2) Python — clave del payload**
+BUSCAR:
+```python
+        "panels": [{k: p[k] for k in
+                    ("id", "titulo", "sector", "targets", "comps",
+                     "yrange", "dtick", "tickfmt")} for p in PANELS],
+```
+REEMPLAZAR POR:
+```python
+        "panels": [{k: p[k] for k in
+                    ("id", "titulo_base", "sector", "targets", "comps",
+                     "yrange", "dtick", "tickfmt")} for p in PANELS],
+```
+
+**3) HTML — cargar SheetJS (genera el .xlsx con múltiples hojas)**
+BUSCAR:
+```html
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+```
+INSERTAR DESPUÉS:
+```html
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+```
+
+**4) HTML — botón de descarga**
+BUSCAR:
+```html
+  <span style="margin-left:auto;color:#8a93a2;font-size:11px;">
+    Ctrl/Shift + clic para selección múltiple en cada slicer</span>
+</div>
+```
+REEMPLAZAR POR:
+```html
+  <span style="margin-left:auto;color:#8a93a2;font-size:11px;">
+    Ctrl/Shift + clic para selección múltiple en cada slicer</span>
+  <button id="exportBtn" type="button">Descargar datos (Excel)</button>
+</div>
+```
+
+**5) JS — shortName: agregar BAP**
+BUSCAR:
+```js
+  const map={
+    "Intercorp Financial Services Inc.":"IFS",
+```
+REEMPLAZAR POR:
+```js
+  const map={
+    "Intercorp Financial Services Inc.":"IFS",
+    "Credicorp Ltd.":"BAP",
+```
+
+**6) JS — título dinámico: función + uso en render()/redraw()**
+BUSCAR:
+```js
+function layout(panel, traces){
+```
+INSERTAR ANTES:
+```js
+function panelTitle(panel){
+  const names = getSel(panel.id,"tg").map(shortName);
+  const suffix = names.length ? names.join(", ")+" y Comps." : "Comps.";
+  return `${panel.titulo_base} — ${suffix}`;
+}
+```
+
+BUSCAR:
+```js
+      <h3>${panel.titulo}</h3>
+```
+REEMPLAZAR POR:
+```js
+      <h3 id="${panel.id}_title">${panelTitle(panel)}</h3>
+```
+
+BUSCAR:
+```js
+function redraw(panel){
+  const traces = buildTraces(panel);
+  Plotly.react(panel.id+"_plot", traces, layout(panel, traces), CFG);
+}
+```
+REEMPLAZAR POR:
+```js
+function redraw(panel){
+  const traces = buildTraces(panel);
+  Plotly.react(panel.id+"_plot", traces, layout(panel, traces), CFG);
+  const titleEl = document.getElementById(panel.id+"_title");
+  if(titleEl) titleEl.textContent = panelTitle(panel);
+}
+```
+
+**7) JS — exportación a Excel (una hoja por chart, con los filtros activos aplicados) + init**
+BUSCAR:
+```js
+  initDateRange();
+}
+```
+REEMPLAZAR POR:
+```js
+  initDateRange();
+  initExport();
+}
+```
+
+BUSCAR:
+```js
+render();
+```
+INSERTAR ANTES:
+```js
+function sanitizeSheetName(name){
+  return name.replace(/[\\/?*\[\]:]/g,"-").slice(0,31) || "Datos";
+}
+
+function buildSheetAOA(panel){
+  const traces = buildTraces(panel);
+  const aoa = [["Fecha", ...traces.map(t=>t.name)]];
+  const n = traces.length ? traces[0].x.length : 0;
+  for(let i=0;i<n;i++){
+    aoa.push([traces[0].x[i], ...traces.map(t=>t.y[i])]);
+  }
+  return aoa;
+}
+
+function exportWorkbook(){
+  const wb = XLSX.utils.book_new();
+  const basisLabel = BASIS === "trail" ? "Trailing" : "Forward";
+  PAYLOAD.panels.forEach(panel=>{
+    const ws = XLSX.utils.aoa_to_sheet(buildSheetAOA(panel));
+    const sheetName = sanitizeSheetName(`${panelTitle(panel)} (${basisLabel})`);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+  XLSX.writeFile(wb, "Multiplos_ZODA_export.xlsx");
+}
+
+function initExport(){
+  document.getElementById("exportBtn").addEventListener("click", exportWorkbook);
+}
+```
+
+Notas:
+- `buildSheetAOA` reutiliza `buildTraces(panel)`, que ya refleja target/comps seleccionados, basis (trail/fwd) y rango de fechas activo — mismos datos que ve el usuario en el chart.
+- Cada hoja: header `Fecha` + una columna por serie mostrada (targets, "Comps", comparables individuales), nombre de hoja truncado a 31 caracteres (límite de Excel).
+- El título del card (`panelTitle`) ahora se arma con los shortnames de los targets seleccionados, así que BAP aparecerá por default en el chart 1 junto con IFS, y el título se actualiza solo si el usuario cambia el slicer de target.
