@@ -1,0 +1,36 @@
+El error es que `panelTitle(panel)` se llama dentro del `innerHTML` **antes** de que el `<select>` con id `${panel.id}_tg` exista en el DOM (se está armando el string, aún no se inserta). Eso hace que `getSel` reciba `null` y lance `TypeError`, deteniendo todo `render()` → dashboard vacío en cualquier navegador (Chrome incluido).
+
+**Fix — 2 bloques:**
+
+BUSCAR:
+```js
+function panelTitle(panel){
+  const names = getSel(panel.id,"tg").map(shortName);
+  const suffix = names.length ? names.join(", ")+" y Comps." : "Comps.";
+  return `${panel.titulo_base} — ${suffix}`;
+}
+```
+REEMPLAZAR POR:
+```js
+function titleFromNames(panel, rawNames){
+  const names = rawNames.map(shortName);
+  const suffix = names.length ? names.join(", ")+" y Comps." : "Comps.";
+  return `${panel.titulo_base} — ${suffix}`;
+}
+function panelTitle(panel){
+  return titleFromNames(panel, getSel(panel.id,"tg"));
+}
+```
+
+BUSCAR:
+```js
+      <h3 id="${panel.id}_title">${panelTitle(panel)}</h3>
+```
+REEMPLAZAR POR:
+```js
+      <h3 id="${panel.id}_title">${titleFromNames(panel, panel.targets)}</h3>
+```
+
+El título inicial ahora se arma con `panel.targets` (dato ya disponible), y `panelTitle(panel)` con lectura del DOM solo se usa después, en `redraw()`, cuando el `<select>` ya existe.
+
+Nota aparte sobre Internet Explorer: el script (desde el original, no por mis cambios) usa `let/const`, arrow functions y template literals — IE11 nunca soportó eso, así que no renderizará ahí sin reescribir todo a ES5. Para Chrome, Firefox y Edge (todos con motor moderno) el fix de arriba sí resuelve el problema.
