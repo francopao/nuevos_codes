@@ -1,0 +1,78 @@
+2. Bloques de código corregidos
+FIX 1 (esencial) — cerrar el leak de None/vacío en df_result
+
+Ctrl+F: busca esta línea exacta (línea 671):
+
+python
+    df = df.drop(df[df[fondo] <= 0].index)
+
+Reemplázala por:
+
+python
+    _w = pd.to_numeric(df[fondo], errors='coerce')
+    df = df[_w > 0]
+
+Esto conserva solo pesos estrictamente positivos: elimina 0, negativos, None, NaN y cualquier texto, de forma robusta. La línea siguiente (_registrar_descarte) sigue funcionando igual porque compara índices.
+
+FIX 2 (blindaje que pediste) — validar el conteo antes del rename
+
+Aunque hoy el mapeo es correcto, los índices posicionales fijos son frágiles ante cambios de layout del G&P. Esto lo protege con assert + prints.
+
+Ctrl+F: busca esta línea (línea 486):
+
+python
+    del dfg['PBS']
+
+Selecciona desde esa línea hasta el final del rename (hasta la línea que termina en 'RIF3GAP', 'PFF3GAP', 'SIF3GAP']) y reemplaza todo ese bloque por:
+
+python
+    # --- BLINDAJE anti-desalineación: borrar TODAS las 'PBS' y verificar el conteo
+    _n_pbs = int((dfg.columns == 'PBS').sum())
+    print(f"[G&P] Columnas 'PBS' a eliminar: {_n_pbs} (se esperan 15)")
+    dfg = dfg.loc[:, dfg.columns != 'PBS']        # elimina TODAS las 'PBS' (no depende de del)
+    _nombres = ['SBS', 'SBS2', 'Nombre', 'Asset Class', 'Cat', 'SubCat', 'Sub Cat2',
+                'Categoría', 'AC Dir', 'Rank Rt',
+                'INF1', 'HAF1GAP', 'RIF1GAP', 'PFF1GAP', 'SIF1GAP',
+                'INF2', 'HAF2GAP', 'RIF2GAP', 'PFF2GAP', 'SIF2GAP',
+                'INF3', 'HAF3GAP', 'RIF3GAP', 'PFF3GAP', 'SIF3GAP']
+    assert dfg.shape[1] == len(_nombres), (
+        f"[G&P] DESALINEACION: quedaron {dfg.shape[1]} columnas tras borrar PBS, "
+        f"se esperaban {len(_nombres)}. Revisa el layout GAP/PBS de 'Detallado'.")
+    dfg.columns = _nombres
+    _chk = pd.to_numeric(dfg['INF1'], errors='coerce')
+    print(f"[G&P] Mapeo OK -> INF1: {int((_chk > 0).sum())} >0, "
+          f"{int((_chk == 0).sum())} en 0, {int(_chk.isna().sum())} vacias/no-numericas.")
+
+Ese assert detiene el script con mensaje claro antes del rename silencioso si algún día el layout cambia. El print de vacias/no-numericas te dirá, en cada corrida, cuántas posiciones Integra llegan vacías (que es justo lo que el FIX 1 va a filtrar).
+
+3. Origen de 22201112601A
+
+Lo busqué en todos tus inputs. No está en el G&P. Aparece únicamente en VP.xlsm, hoja CalcP (fila 63): es un bono corporativo peruano en soles — SBS 22201112601A, ISIN PEP21400M122, ID ALIC2DBC1A, moneda NSOL.
+
+Tu código actual no puede inyectarlo: el único uso de VP para identidad es dfg.insert(0, 'ISIN', dfg["SBS"].map(...)), que solo mapea ISIN sobre SBS que ya existen en el G&P — nunca agrega SBS nuevos. Como es estrategia BU y las filas BU salen 100% de df_BU (derivado del G&P), no hay ruta en el código vigente que lo produzca. Su presencia en tu output es un remanente: o el G&P que realmente corrió esa entrega sí lo contenía (otro vintage del archivo), o lo generó una versión anterior del script.
+
+Guard opcional (si quieres una red de seguridad permanente). Ctrl+F: busca (línea 1140 aprox.):
+
+python
+        df_p_m.to_excel(ruta_bd1, index=False)
+
+e inserta justo ANTES de esa línea:
+
+python
+    _univ = set(base.df['SBS'].astype(str).str.strip())
+    _orphan = df_p_m.loc[~df_p_m['SBS'].astype(str).str.strip().isin(_univ)]
+    if len(_orphan):
+        print(f"[GUARD] {len(_orphan)} fila(s) con SBS fuera del universo G&P -> eliminadas: "
+              f"{sorted(_orphan['SBS'].astype(str).unique())}")
+        df_p_m = df_p_m.loc[df_p_m['SBS'].astype(str).str.strip().isin(_univ)]
+
+(En este punto del código todas las filas provienen del G&P; los SBS de EPU/ETF se inyectan después, así que este guard no los toca.)
+
+Cómo confirmar cuál escenario aplica
+
+Como no puedo recalcular TM4 aquí, el paso decisivo lo das tú: aplica FIX 1 + FIX 2, corre el script de verdad y revisa dos cosas en consola/output:
+
+El print [G&P] Mapeo OK -> INF1: ... vacias/no-numericas. Si el número de "vacías" es alto, confirma que bajo TM4 hay posiciones que llegan como None (el caso que FIX 1 arregla).
+Vuelve a buscar tus 5 SBS en el BD1_S nuevo. Con FIX 1, cualquier fila Integra con INF1 vacío/0 desaparecerá.
+
+Si tras el fix algún SBS sigue con peso positivo en Integra F1, entonces bajo TM4 esa posición sí es un número real (no vacío), y no sería un phantom sino una posición legítima del escenario que no ves en el valor guardado del Excel. En ese caso no hay nada que corregir: sería una lectura distinta de escenario, no un bug.
