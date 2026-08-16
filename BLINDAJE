@@ -1,0 +1,32 @@
+El error confirma que al menos un instrumento (SBS) está recibiendo, para `Precio`, `Q` o `Tipo`, una **lista/tupla** en vez de un número al hacer la multiplicación en la línea 1131. Esto pasa porque tus 3 diccionarios (`dic_precio`, `dic_sbs`, `dic_moneda`) se construyen suponiendo que para la fecha buscada hay **exactamente una fila que calza** en BDPrecios / QEST / RIESGO. Con `2026-07-22` (fecha reciente/posiblemente aún no cerrada en esas fuentes), es muy probable que para algún instrumento esa suposición se rompa — no puedo determinar sin correrlo cuál de las 3 tablas es la culpable exacta, así que el fix de abajo además de resolver el corte te va a **decir exactamente qué SBS y qué columna** está fallando.
+
+## Fix (con diagnóstico incluido)
+
+**Ctrl+F:** busca esta línea exacta:
+```python
+    df_p_m['Inversión'] = df_p_m['Precio'] * df_p_m['Q'] * df_p_m['Tipo']
+```
+**Reemplázala** por:
+```python
+    # --- BLINDAJE: detectar y neutralizar valores tipo lista/tupla en Precio/Q/Tipo ---
+    def _es_secuencia(v):
+        return isinstance(v, (list, tuple, set))
+    for _col in ['Precio', 'Q', 'Tipo']:
+        _malos = df_p_m.loc[df_p_m[_col].apply(_es_secuencia), 'SBS']
+        if len(_malos):
+            print(f"[ALERTA] Columna '{_col}' trae {len(_malos)} valor(es) tipo lista/tupla "
+                  f"para SBS: {sorted(_malos.astype(str).unique().tolist())[:20]}")
+        df_p_m[_col] = df_p_m[_col].apply(lambda v: v[0] if _es_secuencia(v) and len(v) else v)
+        df_p_m[_col] = pd.to_numeric(df_p_m[_col], errors='coerce')
+    df_p_m['Inversión'] = df_p_m['Precio'] * df_p_m['Q'] * df_p_m['Tipo']
+```
+
+Qué hace:
+- Ya no truena: cualquier celda tipo lista se reduce a su primer valor, y cualquier basura no numérica queda como `NaN` en vez de romper el script.
+- Te imprime `[ALERTA]` con el/los SBS exactos y en qué columna (Precio, Q o Tipo) venía la lista, para poder ir a la fuente correcta.
+
+## Qué hacer con el resultado
+
+1. Corre el script de nuevo con `FECHA_FORZADA = '2026-07-22'`.
+2. Si aparece `[ALERTA]`, pásame el mensaje completo (columna + SBS). Con eso reviso directamente en BDat_Act, DQ_IN/DQ_RV/DQ_RF o RIESGO si para esa fecha hay **filas duplicadas** o **falta el dato** para ese instrumento, y te doy el fix definitivo en la fuente (tomar `v[0]` a ciegas puede no ser el precio/Q correcto, solo evita el crash).
+3. Si **no** aparece ninguna `[ALERTA]` pero el script sigue corriendo sin más errores, probablemente el problema ya quedó neutralizado (el `to_numeric` también atrapa strings sueltos u otros tipos raros, no solo listas) — en ese caso solo revisa que `Inversión` no tenga demasiados `NaN` nuevos (te lo puedo ayudar a contar si me pasas el output).
