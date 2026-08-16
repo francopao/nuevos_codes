@@ -1,0 +1,223 @@
+Let me check all references to "Cobertura" across the script to make sure nothing else consumes the old shape.He revisado tu script "Huella 7" completo y localicé los puntos exactos que menciona el prompt. Aquí van los bloques con instrucciones **Ctrl+F**. No necesitas agregar ningún import (numpy y pandas ya están importados).
+
+---
+
+## MEJORA A — Reponderación de weights al 100%
+
+**Ctrl+F** busca esta línea (está dentro de `def _cargar_bd1s_huella`):
+
+```python
+    df["VALOR_VECTOR_LOCAL"] = _w * _aum
+```
+
+**Pega este bloque JUSTO DESPUÉS de esa línea** (misma indentación, 4 espacios):
+
+```python
+    # --- MEJORA A: normalizar Weight al 100% por fondo (dentro de esta AFP) ---
+    _wt = pd.to_numeric(df["Weight"], errors="coerce").fillna(0.0)
+    _sum_fondo = _wt.groupby(df["Fondo"]).transform("sum")
+    _gap = _wt.groupby(df["Fondo"]).sum().to_dict()          # sumas ORIGINALES
+    df["Weight"] = _wt.divide(_sum_fondo).where(_sum_fondo != 0, _wt)
+    # Recalcular VVL con weights ya normalizados (todo downstream lo usa)
+    df["VALOR_VECTOR_LOCAL"] = pd.to_numeric(
+        df["Weight"], errors="coerce").fillna(0.0) * _aum
+    if verbose:
+        _det = " | ".join(f"{f}: {_gap.get(f, 0.0):.4f} → 1.0000"
+                          for f in ["F1", "F2", "F3"] if f in _gap)
+        print(f"  [Normalización] {afp} — {_det}")
+```
+
+Esto normaliza `Weight` por fondo (la AFP ya viene filtrada) y **recalcula** `VALOR_VECTOR_LOCAL`. Como en el builder `Weight = VVL/AUM` e `Inv MM$ = VVL/TC/1e6`, todos los cálculos aguas abajo (Inv MM$, Huella, Intensidad, Cobertura) quedan con los weights normalizados sin tocar el `ValorizacionBuilder`.
+
+---
+
+## MEJORA B — Cobertura en 2 niveles por fondo
+
+### B.1 — Reemplazar el método `cobertura()`
+
+**Ctrl+F** busca `def cobertura(self)` y **reemplaza el método completo** (desde `def cobertura(self) -> pd.DataFrame:` hasta el `}])` de su `return`) por:
+
+```python
+    def cobertura(self) -> pd.DataFrame:
+        """Cobertura en 2 niveles por fondo:
+          - Directa: Plus ∈ {Portafolio, ETF, SOV}  (data MSCI real)
+          - Proxy  : Plus == 'Proxies'
+        Denominador = AUM del fondo = Σ(Inv MM$) del fondo (con weights ya
+        normalizados al 100% en Mejora A). Directa + Proxy = 100%.
+        """
+        _map = {"IN-FONDO1": "F1", "IN-FONDO2": "F2", "IN-FONDO3": "F3"}
+        d = self.df.copy()
+        d["_Fondo"] = d[COL["portafolio"]].map(_map)
+        d = d[d["_Fondo"].notna()]
+        d["_inv"] = pd.to_numeric(d[COL["inv"]], errors="coerce").fillna(0.0)
+
+        filas = []
+        for fondo in ["F1", "F2", "F3"]:
+            sub = d[d["_Fondo"] == fondo]
+            aum_f = float(sub["_inv"].sum())
+            num_dir = float(sub.loc[
+                sub[COL["plus"]].isin(["Portafolio", "ETF", "SOV"]), "_inv"].sum())
+            num_prx = float(sub.loc[
+                sub[COL["plus"]] == "Proxies", "_inv"].sum())
+            filas.append({
+                "Fondo": fondo,
+                "Cobertura_Directa": (num_dir / aum_f) if aum_f else 0.0,
+                "Cobertura_Proxy":   (num_prx / aum_f) if aum_f else 0.0,
+                "AUM_Fondo": aum_f,
+            })
+
+        # --- Total por AFP: ponderado por AUM de cada fondo ---
+        aum_tot = sum(f["AUM_Fondo"] for f in filas)
+        if aum_tot:
+            tot_dir = sum(f["Cobertura_Directa"] * f["AUM_Fondo"] for f in filas) / aum_tot
+            tot_prx = sum(f["Cobertura_Proxy"] * f["AUM_Fondo"] for f in filas) / aum_tot
+        else:
+            tot_dir = tot_prx = 0.0
+        filas.append({"Fondo": "TOTAL", "Cobertura_Directa": tot_dir,
+                      "Cobertura_Proxy": tot_prx, "AUM_Fondo": aum_tot})
+        return pd.DataFrame(filas)
+```
+
+### B.2 — `build_all()` y `to_long()`: **NO requieren cambios**
+
+Te aclaro esto para que no pierdas tiempo buscándolos:
+
+- **`build_all()`** ya llama `"Cobertura": self.cobertura()` (línea sin cambios) — como mantuve el mismo nombre de método, sigue funcionando y el `insert(0, "FECHA_CORTE", ...)` opera igual sobre el nuevo DataFrame.
+- **`to_long()`** es genérico: detecta columnas numéricas como `METRICA` y el resto como dimensiones. Con el nuevo DataFrame produce automáticamente **DIM_1 = Fondo** y **METRICA ∈ {Cobertura_Directa, Cobertura_Proxy, AUM_Fondo}**, que es exactamente lo que pide el prompt. No lo toques.
+
+### B.3 — Dashboard JS: `kpis(`
+
+**Ctrl+F** busca este bloque dentro de `function kpis(cAct, cCmp)`:
+
+```javascript
+  const cob = (corte) => {
+    for(const r of HIST){
+      if(r.OBJETO==='Cobertura' && r.METRICA==='Cobertura' &&
+         String(r.FECHA_CORTE)===String(corte) && r.DIM_1==='TOTAL') return +r.VALOR||0;
+    }
+    return null;
+  };
+```
+
+**Reemplázalo por** (agrega el parámetro `metrica`):
+
+```javascript
+  const cob = (corte, metrica) => {
+    for(const r of HIST){
+      if(r.OBJETO==='Cobertura' && r.METRICA===metrica &&
+         String(r.FECHA_CORTE)===String(corte) && r.DIM_1==='TOTAL') return +r.VALOR||0;
+    }
+    return null;
+  };
+```
+
+Luego **Ctrl+F** busca este bloque (en la misma función):
+
+```javascript
+  const ca = cob(cAct), cb = cob(cCmp);
+  let htmlCob = '';
+  if(ca!==null){
+    const dpp = (cb!==null) ? (ca - cb)*100 : null;
+    const colr = dpp===null ? '#5A6B7B' : (dpp>=0 ? '#1B8F5A' : '#C0392B');
+    const flc = dpp===null ? '' : (dpp>=0 ? '▲' : '▼');
+    htmlCob = '<div class="kpi"><span class="kpi-t">Cobertura</span>'+
+      '<span class="kpi-v">'+(ca*100).toFixed(1)+'%</span>'+
+      '<span class="kpi-u">del AUM total</span>'+
+      '<span class="kpi-d" style="color:'+colr+'">'+flc+' '+
+      (dpp===null?'s/d':((dpp>=0?'+':'')+dpp.toFixed(1)+' pp vs '+cCmp))+'</span></div>';
+  }
+  document.getElementById('kpis').innerHTML = html + htmlCob;
+```
+
+**Reemplázalo por** (dos tiles: Directa y Proxy):
+
+```javascript
+  const cobItems = [
+    ['Cob. Directa', 'Cobertura_Directa', 'data MSCI directa'],
+    ['Cob. Proxy',   'Cobertura_Proxy',   'data por proxy']
+  ];
+  const htmlCob = cobItems.map(([titulo, metrica, unidad])=>{
+    const ca = cob(cAct, metrica), cb = cob(cCmp, metrica);
+    if(ca===null) return '';
+    const dpp = (cb!==null) ? (ca - cb)*100 : null;
+    const colr = dpp===null ? '#5A6B7B' : (dpp>=0 ? '#1B8F5A' : '#C0392B');
+    const flc = dpp===null ? '' : (dpp>=0 ? '▲' : '▼');
+    return '<div class="kpi"><span class="kpi-t">'+titulo+'</span>'+
+      '<span class="kpi-v">'+(ca*100).toFixed(1)+'%</span>'+
+      '<span class="kpi-u">'+unidad+'</span>'+
+      '<span class="kpi-d" style="color:'+colr+'">'+flc+' '+
+      (dpp===null?'s/d':((dpp>=0?'+':'')+dpp.toFixed(1)+' pp vs '+cCmp))+'</span></div>';
+  }).join('');
+  document.getElementById('kpis').innerHTML = html + htmlCob;
+```
+
+### B.4 — Dashboard JS: `kpisMultiAfp(`
+
+**Ctrl+F** busca la cabecera de la tabla:
+
+```javascript
+    + '<th>Huella (miles Tn)</th><th>Intensidad</th><th>AUM (MM$)</th><th>Cobertura</th></tr>';
+```
+
+**Reemplázala por:**
+
+```javascript
+    + '<th>Huella (miles Tn)</th><th>Intensidad</th><th>AUM (MM$)</th>'
+    + '<th>Cob. Directa</th><th>Cob. Proxy</th></tr>';
+```
+
+Luego **Ctrl+F** busca el helper `cob` dentro de esa función:
+
+```javascript
+    const cob = () => {
+      for(const r of HIST) if(r.OBJETO==='Cobertura' && r.METRICA==='Cobertura' &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp) return +r.VALOR||0;
+      return null;
+    };
+```
+
+**Reemplázalo por:**
+
+```javascript
+    const cob = (metrica) => {
+      for(const r of HIST) if(r.OBJETO==='Cobertura' && r.METRICA===metrica &&
+          String(r.FECHA_CORTE)===String(corte) && r.AFP===afp && r.DIM_1==='TOTAL') return +r.VALOR||0;
+      return null;
+    };
+```
+
+Luego **Ctrl+F** busca:
+
+```javascript
+    const c = cob();
+```
+
+**Reemplázalo por:**
+
+```javascript
+    const cDir = cob('Cobertura_Directa');
+    const cPrx = cob('Cobertura_Proxy');
+```
+
+Finalmente **Ctrl+F** busca la celda de cobertura:
+
+```javascript
+      + '<td style="text-align:right;padding:6px 8px">'+(c!==null?(c*100).toFixed(1)+'%':'—')+'</td>'
+      + '</tr>';
+```
+
+**Reemplázala por** (dos celdas):
+
+```javascript
+      + '<td style="text-align:right;padding:6px 8px">'+(cDir!==null?(cDir*100).toFixed(1)+'%':'—')+'</td>'
+      + '<td style="text-align:right;padding:6px 8px">'+(cPrx!==null?(cPrx*100).toFixed(1)+'%':'—')+'</td>'
+      + '</tr>';
+```
+
+---
+
+## Resumen de lo que tocas
+
+Mejora A: 1 bloque insertado en `_cargar_bd1s_huella`. Mejora B: 1 método reemplazado (`cobertura`) + 6 reemplazos en el JS (`kpis` y `kpisMultiAfp`). `build_all()` y `to_long()` **no se tocan**.
+
+Un punto a tener en cuenta: la cobertura Directa+Proxy sumará exactamente 100% solo si todos los instrumentos del fondo caen en `{Portafolio, ETF, SOV, Proxies}`. Si aparecen filas con `Plus = "Cash"` o `"Cuestionario Integra"`, la suma quedará por debajo de 100% y verás la diferencia. Si al correrlo notas que no llegan a 100%, revisa el print `[Módulo 12] Distribución de Plus:` que ya tienes — te dirá cuántas filas quedaron fuera de esos cuatro buckets.
