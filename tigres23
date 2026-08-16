@@ -1,0 +1,39 @@
+Auna está bien configurada en el código (EMPRESAS_HOJA con sector Salud). El problema debe estar en cómo `exp_fin` (o el AUM del emisor) se calcula para Auna vs cómo lo hace para Nexa. Reviso la rama `fuente == "Hoja"` y de dónde sale el AUM base de Auna.Encontré la causa. Al final del loop de Holdings hay este bloque:Voy a revisar `load_exposicion_sector` para confirmar si filtra por sector — eso explicaría por qué Nexa (minería) no se ve afectado por este mismo sobre-escritor que sí golpea a Auna.Verifico si "Nexa Resources Perú" también sería sobre-escrito por ese mismo bloque (mirando el AUM real en Valorización), para confirmar si el bug es solo de Auna o más amplio.`exp_comb` solo alimenta el Excel — no el FEN. El AUM del FEN viene de otra estructura (`EXP_CLASE`). La busco.Sospecho que el verdadero problema es doble: hay **dos rutas** que cargan a Auna en paralelo — `EMPRESAS_HOJA` (con su 100% de AUM, sin el factor Perú) y `Holdings` (con el factor correcto) — y la primera está pisando o duplicando a la segunda. Verifico cómo se procesa `EMPRESAS_HOJA`.Confirmado. Reviso el bloque 8026-8060 para ver exactamente cómo carga Auna sin el factor.Ahí está la causa raíz completa. `_aplicar_factor_peru` se llama para Minería, Utilities y Construcción — pero **nunca para `exp_hoja`** (la ruta de EMPRESAS_HOJA, que carga Auna, Alicorp y Aenza). La fila de Holdings de Auna con `Fuente=Hoja` queda descartada porque `Hoja_Activos` está vacía (mismo patrón que viste antes con Aenza/Alicorp: *"sin activos en []; se omite"*), y el AUM real termina saliendo 100% sin factor por la ruta EMPRESAS_HOJA. Confirmo cómo se llena `_factor_peru_all` y el log para blindar el diagnóstico.Diagnóstico completo. `_factor_peru_all["Auna"] = 0.4359` ya existe (leído de Holdings), y `_aplicar_factor_peru` es una función genérica lista para usarse — solo falta **una llamada** en la ruta de `exp_hoja`. Este es el fix exacto, y de paso corrige el mismo bug latente en Aenza y Alicorp.
+
+## El fix — una línea
+
+Busca este bloque (línea ~8032):
+```python
+            equiv_hoja = {nm: spec["empresa"]
+                          for spec in EMPRESAS_HOJA for nm in spec["exp"]}
+            universo_hoja = [spec["empresa"] for spec in EMPRESAS_HOJA]
+            exp_hoja = load_exposicion_sector(
+                risk_path, sheet_val, equiv_hoja, universo_hoja, "empresas-hoja")
+```
+Reemplázalo por:
+```python
+            equiv_hoja = {nm: spec["empresa"]
+                          for spec in EMPRESAS_HOJA for nm in spec["exp"]}
+            universo_hoja = [spec["empresa"] for spec in EMPRESAS_HOJA]
+            exp_hoja = load_exposicion_sector(
+                risk_path, sheet_val, equiv_hoja, universo_hoja, "empresas-hoja")
+            exp_hoja = _aplicar_factor_peru(exp_hoja, "Empresas-hoja")   # NUEVO
+```
+
+## Por qué es exactamente esto
+
+- `_factor_peru_all` ya lee **toda** la hoja Holdings (línea ~7801) y ya tiene `Auna → 0.4359`, `Aenza → 0.7282`, `Alicorp → 0.8636` — construido de forma genérica, no específico de sector.
+- `_aplicar_factor_peru` ya se usa para Minería/Utilities/Construcción (líneas 7823, 7996, 8016) — es el mismo patrón, solo faltaba en `exp_hoja`.
+- Como la fila `Fuente=Hoja` de Auna en Holdings **no tiene `Hoja_Activos`** (ni la necesita: Auna ya se mapea por `EMPRESAS_HOJA`), esa fila **se omite** ("sin activos en []") — es esperado y correcto, tal como pasa con Aenza/Alicorp. El factor Perú NO depende de esa fila específica; depende de `_factor_peru_all`, que se llena de **cualquier** fila Holdings de ese emisor (incluidas las de países extranjeros, que sí tienen el factor). Por eso una sola línea basta.
+
+## Qué esperar
+
+`exp_hoja["Auna"]` pasará de S/230,110,342 (100%) a **S/100,321,569** (43.59%). Como `_add_sector` usa `exp_hoja` para repartir el AUM entre las sedes físicas de Auna, tanto el AUM del mapa como el numerador/denominador del FEN quedarán consistentes con el 43.59%. **Aenza y Alicorp también se corrigen** de paso (mismo bug, nunca reportado porque quizás no lo notaste).
+
+## Verificar
+
+Corre y en el log busca:
+```
+Empresas-hoja: 'Auna' AUM ajustado por factor Perú 0.44 (S/ 230,110,342 -> S/ 100,321,569); 56% extranjero fuera.
+```
+(mensaje generado automático por `_aplicar_factor_peru`). Y en el FEN, la columna AUM de Auna debe reflejar ese ~100.3M, no 230.1M.
