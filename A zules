@@ -1,0 +1,178 @@
+Now let me verify the CSV files exist and test the fiscal chart function:
+
+Todo validado. Ahora te doy los 3 cambios exactos sobre tu script actual. Aplícalos **de abajo hacia arriba**.
+
+---
+
+**EDIT 1 — Registrar el chart fiscal en CHARTS (línea 489)**
+
+`Ctrl+F` → busca exactamente:
+
+```
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+```
+
+Eso está en la **línea 489**. Selecciona **solo esa línea** y reemplázala por estas 5 líneas:
+
+```python
+    ("gasto_fiscal_fen",
+     "El esfuerzo fiscal FEN 2023-24 casi duplico al de 2015-16, pero la brecha de ejecucion persiste",
+     "Presupuesto asignado vs. ejecutado (devengado) en miles de millones de S/. PP 0068 para 2026.",
+     chart_fen_fiscal),
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+```
+
+---
+
+**EDIT 2 — Agregar la función `chart_fen_fiscal` (entre líneas 452 y 455)**
+
+`Ctrl+F` → busca exactamente:
+
+```
+    return fig
+
+
+# ----------------------------------------------------------------------------
+# 4) Chart #2: Tabla comparativa de precision del BCRP durante FEN.
+```
+
+Eso corresponde a las **líneas 452–456**. Posiciona el cursor **después** de `return fig` (línea 452) y **antes** del bloque `# ----` de la Sección 4 (línea 455). Inserta entre ambos este bloque completo:
+
+
+```python
+
+
+# ----------------------------------------------------------------------------
+# 3b) Chart — Gasto fiscal FEN: comparacion entre episodios.
+#     Comparo la escala del esfuerzo fiscal entre los episodios FEN 2015-16,
+#     2023-24 y el presupuesto 2026 de prevencion de desastres (PP 0068).
+# ----------------------------------------------------------------------------
+def chart_fen_fiscal():
+    df15 = pd.read_csv(FILE_FEN_2015)
+    df16 = pd.read_csv(FILE_FEN_2016)
+    df23 = pd.read_csv(FILE_FEN_2023)
+    df24 = pd.read_csv(FILE_FEN_2024)
+
+    asig_1516  = (df15.ASIGNACION_PRESUPUESTARIA.sum() + df16.ASIGNACION_PRESUPUESTARIA.sum()) / 1e9
+    dev_1516   = (df15.MONTO_DEVENGADO.sum() + df16.MONTO_DEVENGADO.sum()) / 1e9
+    marco_2324 = (df23.MARCO_PRESUPUESTAL.sum() + df24.MARCO_PRESUPUESTAL.sum()) / 1e9
+    dev_2324   = (df23.MONTO_DEVENGADO.sum() + df24.MONTO_DEVENGADO.sum()) / 1e9
+
+    # MEF consulta amigable 2026 — PP 0068 Reduccion de Vulnerabilidad
+    wb = openpyxl.load_workbook(FILE_MEF_2026, data_only=True)
+    ws = wb["ejecucion del gasto"]
+    pim_26, dev_26 = 0.0, 0.0
+    for r in ws.iter_rows(values_only=True):
+        if r[0] and "0068" in str(r[0]):
+            pim_26 = _to_float(r[2]) / 1e9
+            dev_26 = _to_float(r[6]) / 1e9
+            break
+
+    labs       = ["FEN 2015\u201316", "FEN 2023\u201324", "Prev. desastres\n2026 (a ago.)"]
+    marcos     = [asig_1516,  marco_2324,  pim_26]
+    devengados = [dev_1516,   dev_2324,    dev_26]
+
+    fig = go.Figure()
+
+    # Capa 1 — Presupuesto (detras, color suave)
+    fig.add_trace(go.Bar(
+        x=labs, y=marcos, name="Presupuesto (Marco / PIM)",
+        marker_color="#AFC3E6", width=0.50, opacity=0.85,
+        hovertemplate="<b>%{x}</b><br>Presupuesto: S/ %{y:.2f} mil MM<extra></extra>"))
+
+    # Capa 2 — Ejecutado (delante, teal institucional)
+    fig.add_trace(go.Bar(
+        x=labs, y=devengados, name="Ejecutado (Devengado)",
+        marker_color=COL_OBS, width=0.50,
+        hovertemplate="<b>%{x}</b><br>Ejecutado: S/ %{y:.2f} mil MM<extra></extra>"))
+
+    # --- Annotations ---
+    # FEN 2015-16: ahora si tengo marco (ASIGNACION_PRESUPUESTARIA)
+    rate_1516 = dev_1516 / asig_1516 * 100
+    gap_1516  = asig_1516 - dev_1516
+    fig.add_annotation(
+        x=labs[0], y=asig_1516 + 0.12, yanchor="bottom", showarrow=False,
+        text="<b>Ejec. {:.0f}%</b>".format(rate_1516),
+        font=dict(size=12, color=COL_FCST))
+    fig.add_annotation(
+        x=labs[0], y=asig_1516 + 0.52, yanchor="bottom", showarrow=False,
+        text="Brecha: S/ {:.1f} mil MM".format(gap_1516).replace(".", ","),
+        font=dict(size=9, color=COL_TXT_SOFT))
+
+    # FEN 2023-24
+    rate_2324 = dev_2324 / marco_2324 * 100
+    gap_2324  = marco_2324 - dev_2324
+    fig.add_annotation(
+        x=labs[1], y=marco_2324 + 0.12, yanchor="bottom", showarrow=False,
+        text="<b>Ejec. {:.0f}%</b>".format(rate_2324),
+        font=dict(size=12, color=COL_FCST))
+    fig.add_annotation(
+        x=labs[1], y=marco_2324 + 0.52, yanchor="bottom", showarrow=False,
+        text="Brecha: S/ {:.1f} mil MM".format(gap_2324).replace(".", ","),
+        font=dict(size=9, color=COL_TXT_SOFT))
+
+    # PP 0068 — 2026
+    rate_26 = dev_26 / pim_26 * 100
+    gap_26  = pim_26 - dev_26
+    fig.add_annotation(
+        x=labs[2], y=pim_26 + 0.12, yanchor="bottom", showarrow=False,
+        text="<b>Ejec. {:.0f}%</b>".format(rate_26),
+        font=dict(size=12, color=COL_FCST))
+    fig.add_annotation(
+        x=labs[2], y=pim_26 + 0.52, yanchor="bottom", showarrow=False,
+        text="Brecha: S/ {:.1f} mil MM".format(gap_26).replace(".", ","),
+        font=dict(size=9, color=COL_TXT_SOFT))
+
+    ymax = max(v for v in marcos + devengados if v is not None) * 1.30
+
+    fig.update_layout(
+        barmode="overlay",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+        yaxis=dict(range=[0, ymax],
+                   title=dict(text="Miles de millones de S/", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10),
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
+
+---
+
+**EDIT 3 — Agregar rutas de archivos fiscales y el import de pandas (líneas 18 y 42)**
+
+Primero, `Ctrl+F` → busca exactamente:
+
+```
+import numpy as np
+```
+
+Eso está en la **línea 18**. Justo **debajo** de esa línea (después de `import numpy as np`, antes de la línea en blanco), inserta:
+
+```python
+import pandas as pd
+```
+
+Segundo, `Ctrl+F` → busca exactamente:
+
+```
+FILE_LOGO    = os.path.join(BASE_DIR, "Integra_logo.png")
+```
+
+Eso está en la **línea 42**. Justo **encima** de esa línea (antes de `FILE_LOGO`), inserta estas 5 líneas:
+
+```python
+FILE_FEN_2015 = os.path.join(BASE_DIR, "2015GastoFenomenoNino.csv")
+FILE_FEN_2016 = os.path.join(BASE_DIR, "2016GastoFenomenoNino.csv")
+FILE_FEN_2023 = os.path.join(BASE_DIR, "2023GastoEmergenciasFEN.csv")
+FILE_FEN_2024 = os.path.join(BASE_DIR, "2024GastoEmergenciasFEN.csv")
+FILE_MEF_2026 = os.path.join(BASE_DIR, "MEF_consulta_amigable.xlsx")
+```
+
+Nota: corregí el chart original que tenías — antes mostraba "Sin dato de marco" para 2015-16, pero sí existe `ASIGNACION_PRESUPUESTARIA` en esos CSVs (S/ 3,1 mil MM asignados, S/ 2,4 mil MM ejecutados = 78%). Ahora las 3 barras muestran presupuesto vs. ejecutado de forma consistente.
