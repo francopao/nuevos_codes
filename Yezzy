@@ -1,0 +1,61 @@
+He verificado tu comparación directamente contra la hoja "Detallado" que pegaste en el archivo. Aquí el análisis completo.
+
+## 1. Tu referencia (columna G&P) está bien calculada
+
+Reproduje `construir_base()` línea por línea sobre tu "Detallado" y los totales de INF1/INF2/INF3 me dan **exacto** lo mismo que pusiste como referencia:
+
+| Fondo | Tu referencia G&P | Mi reproducción |
+|---|---|---|
+| F1 | 0.9853490 | 0.9853490 ✓ |
+| F2 | 1.0013781 | 1.0013781 ✓ |
+| F3 | 0.9890036 | 0.9890036 ✓ |
+
+Confirma que el punto de comparación es correcto y que no hay error de método de tu lado.
+
+## 2. Lectura de la tabla OLD vs NEW: el fix funcionó como debía
+
+| AFP / Fondo | G&P (referencia) | Script viejo | Script nuevo | Cambio |
+|---|---|---|---|---|
+| Integra F1 | 0.9853 | **0.9924** ⚠️ | 0.9574 | −3.50pp |
+| Integra F2 | 1.0014 | **1.0047** ⚠️ | 0.9858 | −1.90pp |
+| Integra Multifondos | — | 1.0008 | 0.9803 | −2.05pp |
+| Integra F3 | 0.9890 | 0.9880 | 0.9885 | +0.05pp |
+| Prima F3 | — | 0.9747 | 0.9531 | −2.15pp |
+| Profuturo F3 | — | 0.9974 | 0.9643 | −3.32pp |
+| Ex_Integra F3 | — | 0.9750 | 0.9655 | −0.95pp |
+
+**Lo primero que salta a la vista, y es la prueba más contundente:** en el script **viejo**, Integra F1 (0.9924) y F2 (1.0047) **superaban** el total crudo del propio G&P (0.9853 y 1.0014). Eso es matemáticamente imposible en un pipeline correcto — tu output nunca puede pesar más que el universo del que proviene. Es la firma exacta del bug de `None/NaN` que identificamos: celdas vacías se colaban como si tuvieran peso. El script nuevo ya no supera la referencia en ningún caso — quedó "adentro" de lo físicamente posible, que es la señal de que el fix cerró la fuga.
+
+También fíjate en el patrón por **F3**: bajó en Prima, Profuturo y Ex_Integra (no solo Integra). Eso es coherente — el mismo filtro `<=0` roto aplicaba a **todas** las columnas de fondo (HAF3, PFF3, RIF3, SIF3, no solo INF1), así que era esperable que el fix "desinflara" varias columnas a la vez, no solo la que investigamos originalmente.
+
+## 3. Por qué Integra F1 nuevo (0.9574) sigue por debajo de la referencia (0.9853)
+
+Esto es lo que faltaba explicarte. Reproduje también la clasificación BU/TD/SOB sobre tu Detallado para aislar dónde se va ese 2.79pp restante:
+
+Con `FM()` aplicado, la clasificación BU+TD+SOB captura el **100.00%** de tu referencia (0.9853 exacto) — o sea, **no se está perdiendo nada por clasificación**. El hueco completo de 2.79pp aparece **después**, en una etapa que no puedo reproducir aquí porque depende de archivos que no tengo cargados con el detalle de esta corrida (`{anio}{mes} ETF Perú.xlsx`, `{anio}{mes} EPU US.xlsx`):
+
+Esta es la única etapa restante donde el peso puede perderse legítimamente (sin ser un bug): el wrapper del ETF/EPU (SBS2 `54`/`50`) se **elimina** del portafolio final y se reemplaza por el detalle de sus posiciones subyacentes, ponderado por `Market Value (%) (P)` de cada constituyente. Si esa hoja de holdings (`{mes} ETF Perú.xlsx` / `{mes} EPU US.xlsx`) no suma exactamente 100% para algún fondo/AFP (por ejemplo, si el archivo solo lista las principales posiciones y omite caja/derivados del fondo, o si para ese mes el archivo está desactualizado), el peso del wrapper que Integra tenía en F1 no se reconstituye completo — ahí se puede estar filtrando justo tu 2.79pp.
+
+**Ctrl+F:** busca esta línea exacta:
+```python
+    epu['peso'] = epu["Market Value (%) (P)"] * epu['Weight']
+```
+**Justo antes**, inserta:
+```python
+    # --- DIAGNÓSTICO: ¿la hoja de holdings del ETF/EPU suma 100%? ---
+    _cov = epu.groupby(['SBS', 'Fondo', 'AFP'])['Market Value (%) (P)'].sum()
+    _cov_bajo = _cov[_cov < 0.98]
+    if len(_cov_bajo):
+        print(f"\n[DIAGNÓSTICO EPU/ETF] {len(_cov_bajo)} combinación(es) SBS-Fondo-AFP con "
+              f"cobertura de holdings < 98% (posible fuga de Weight):")
+        print(_cov_bajo.sort_values().to_string())
+```
+
+Corre el script de nuevo y revisa si aparece ese `[DIAGNÓSTICO EPU/ETF]`. Si sale, ahí vas a ver exactamente qué ETF/EPU y qué combinación Fondo+AFP no suma 100% en sus holdings — eso confirmaría el origen del 2.79pp de Integra F1 (y explicaría también por qué Prima/Profuturo F3 bajaron tanto, si ese fondo específico tiene mayor exposición a ETFs con holdings incompletos).
+
+## En resumen
+
+1. **No estás perdiendo instrumentos de la competencia** — eso ya lo confirmamos, cada AFP se filtra por su propia columna, de forma independiente.
+2. **El fix hizo lo correcto**: quitó peso "fantasma" que antes hacía que Integra F1/F2 superaran matemáticamente el 100% de su propio universo (imposible). Esa era la fuga real.
+3. **La clasificación BU/TD/SOB está sana**: capturé el 100.00% exacto de tu referencia G&P al reproducirla con `FM()` incluido — no hay pérdida ahí.
+4. **El 2.79pp restante de Integra F1** (y probablemente buena parte de las caídas en F3 de Prima/Profuturo) muy probablemente vive en el paso EPU/ETF, por holdings incompletos en los archivos de composición del fondo — no es un bug de tu código, es una posible brecha de dato fuente. El diagnóstico de arriba te lo va a confirmar con nombres y números concretos.
