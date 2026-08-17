@@ -1,0 +1,150 @@
+# Actualización de charts de minería — BU Elecciones 2026
+### Fuente: Cartera de Proyectos de Inversión Minera 2026 (MINEM)
+
+---
+
+## 1. Mapeo: ¿qué charts del deck sí vienen de esta fuente?
+
+| Chart (BU Elecciones 2026) | Slide | ¿Viene de Cartera MINEM? | Acción |
+|---|---|---|---|
+| Recuadro "Cartera de proyectos 2025: 64$Bn en 65 proyectos..." | 1 | ✅ Sí, directamente | Actualizar cifras |
+| Bubble chart "Inicio de construcción de principales proyectos mineros" | 1 | ✅ Sí (Gráfico 02 del MINEM) | Reconstruir con datos nuevos |
+| Mapa "Ubicación de los principales proyectos mineros a CP" | 1 | ⚠️ Parcialmente (mezcla con otras fuentes) | Corregir y flaggear inconsistencias |
+| Donut "Minería ilegal afecta proyectos por US$12Bn" | 2 | ⚠️ Solo el denominador (US$64Bn) | Confirmar total; el 19/81% no es recalculable con esta fuente |
+| "El ciclo del proyecto minero..." (11.3/2.1/2.1 años) | 1 | ❌ No — no aparece en este PDF | No tocar |
+| "Aumento de las expectativas mineras" (índice BCRP) | 1 | ❌ No — encuesta de expectativas BCRP | No tocar |
+| Mapa de conflictos sociales + tabla "Exposición por compañía" | 2 | ❌ No — Defensoría del Pueblo/BCRP | No tocar |
+| "Índice de conflictos mineros" por proceso electoral | 2 | ❌ No | No tocar |
+| "Superposición de amenazas" (terrorismo/conflictos/ilegal/crimen) | 2 | ❌ No — conceptual, no cuantitativo | No tocar |
+
+---
+
+## 2. Actualizaciones puntuales
+
+### 2.1 Recuadro de texto "Cartera de proyectos 2025"
+
+| Dato | Versión actual del deck | Dato actualizado (Cartera 2026) |
+|---|---|---|
+| Proyectos totales | 65 proyectos | **66 proyectos** (entra Colquijirca, Huancapetí, etc.; **sale San Gabriel** —Moquegua, US$650M— que culminó ejecución e inició operación comercial en 2025) |
+| Inversión total | US$64 Bn | **US$64,075 millones** (prácticamente estable vs. edición previa) |
+| Ejecución iniciada en el año más reciente | "solo 2 proyectos iniciaron ejecución, por debajo de lo previsto en 2Q25 (9 proyectos)" | **Cifra final 2025: 3 proyectos** iniciaron ejecución — Reposición Raura (US$76M), Reposición Ferrobamba (US$1,753M) y Tía María (US$1,805M), US$3,634M en conjunto. *(No puedo reconstruir el benchmark "9 previstos en 2Q25" — es tu propia estimación interna; solo actualiza el lado "real" a 3)* |
+| % de inversión ejecutándose después de 2028 | "79% después de 2028" | La Cartera 2026 ya no reporta el corte exacto en 2028, pero es reconstruible: Total (64,075) − ejecutado a 2025 (1,936) − 2026 (1,612) − 2027 (3,237) − 2028 (3,522) = **US$53,768M → 83.9% después de 2028**. Es decir, el pipeline se está **corriendo más hacia adelante**, no menos (79%→83.9% interanual) |
+| "Greenfield de gran escala desplazados hacia 2028-2031" | — | **Matizar**: algunos greenfield grandes sí tienen fecha confirmada temprana — Corani (US$579M, 2026) y Pampa de Pongo (US$1,781M, 2027). Los verdaderos mega-greenfield (Conga US$4,800M, El Galeno US$3,500M, Hierro Apurímac US$2,900M, Los Chancas US$2,600M, Michiquillay US$2,500M, La Granja US$2,400M, Cañariaco US$2,160M, Río Blanco US$2,792M) siguen **"P.D." (sin fecha definida)**, no en una ventana 2028-2031 — es una situación más incierta que "desplazado", no tienen fecha en absoluto |
+
+---
+
+### 2.2 Bubble chart "Inicio de construcción de principales proyectos mineros"
+
+Data completa y verificada (Sección 4.1 / Gráfico 02 del MINEM) para reconstruir el chart:
+
+| Año inicio ejecución | # proyectos | Inversión conjunta | Proyectos |
+|---|---|---|---|
+| 2023 (ya ejecutando) | 1 | US$1,319M | Reposición Inmaculada |
+| 2024 (ya ejecutando) | 2 | US$1,734M | Reposición Antamina (US$1,604M), Romina (US$130M) |
+| 2025 (ya ejecutando) | 3 | US$3,634M | Reposición Raura (US$76M), **Reposición Ferrobamba (US$1,753M)**, Tía María (US$1,805M) |
+| 2026 | 7 | US$4,366M | Reposición San Rafael (US$294M, primer hito 30-mar-2026), **Ampliación Huarón (US$118M)**, Reposición Colquijirca (US$502M), Ampliación Esperanza (US$428M), Optimización Cerro Verde (US$2,100M), Ampliación Huancapetí (US$345M), Corani (US$579M) |
+| 2027 | 7 | US$6,014M | Integración Coroccohuayco (US$1,800M), Pampa de Pongo (US$1,781M), Trapiche (US$1,038M), Los Calatos (US$655M), Mina Justa Subterránea (US$510M), Optimización Carahuacra-San Cristóbal (US$143M), Integración Atacocha-El Porvenir (US$86M) |
+| 2028 | 0 | — | Sin proyectos con fecha confirmada de inicio |
+| 2029 | 2 | US$2,098M | La Arena Sulfuros (US$1,500M), Coimolache Sulfuros (US$598M) |
+| **Sin fecha (P.D.)** | **44** | **US$44,910M (70.1% del total)** | Incluye los mega-greenfield (Conga, El Galeno, Michiquillay, La Granja, Cañariaco, Río Blanco, Hierro Apurímac, Los Chancas) y **Zafranal** (US$1,900M) |
+
+**Cambios clave vs. tu chart actual:**
+- **Reposición Ferrobamba**: mover de 2026 → **2025** (ya inició ejecución)
+- **Ampliación Huarón**: mover de 2025 → **2026**
+- **Coimolache Sulfuros**: confirmar en **2029** (no en el bucket genérico "2028-2030")
+- **Zafranal**: sacar del bucket "2028-2030" — actualmente está en Ingeniería de Detalle **sin fecha de inicio de ejecución definida** (P.D.); no hay evidencia en la Cartera de que inicie en esa ventana
+- Bucket "+2030" → actualizar de "48 proyectos (US$41 mm)" a **"44 proyectos (US$44,910M)"**
+- Faltan en tu chart varios proyectos grandes con fecha ya confirmada en 2026-2027: **Optimización Cerro Verde (US$2,100M, 2026)**, Corani (US$579M, 2026), Reposición Colquijirca (US$502M, 2026), Ampliación Esperanza (US$428M, 2026), Integración Coroccohuayco (US$1,800M, 2027), Pampa de Pongo (US$1,781M, 2027)
+
+---
+
+### 2.3 Mapa "Ubicación de los principales proyectos mineros a CP"
+
+**"En construcción" (etapa EJECUCIÓN confirmada, 8 proyectos en Cartera 2026):**
+Inmaculada, Reposición Antamina, Romina, Reposición Raura, **Reposición Ferrobamba**, Tía María, y **Ariana** (ejecución *suspendida*). Reposición San Rafael recién entra a este grupo en 2026 (primer hito 30-mar-2026).
+
+⚠️ **Chalcobamba** y **Tantahuatay** no aparecen en ningún lugar de la Cartera de Proyectos Mineros 2026 (el umbral metodológico del MINEM es CAPEX ≥ US$70M para proyectos nuevos/de expansión discretos) — probablemente vienen de otra fuente tuya (sostenimiento operativo, no CAPEX de "proyecto"). Verifícalos antes de mantenerlos en el mapa.
+
+**"Nuevas minas o Ampliaciones, Inicio 2025-2026":**
+⚠️ **Ampliación Cuajone** y **Ampliación Huachocolpa** — ambos figuran como "P.D." (sin fecha definida) en Pre-factibilidad/Factibilidad. No hay soporte en la Cartera 2026 para ubicarlos en 2025-2026; recomiendo sacarlos o reetiquetarlos como "pipeline sin fecha confirmada".
+⚠️ **Zafranal** (marcado con *) — misma observación: Ingeniería de Detalle, pero **P.D.**, no 2025-2026.
+✅ **Tía María** — correcto, ya en ejecución desde 2025.
+
+---
+
+### 2.4 Donut "Minería ilegal afecta proyectos por US$12Bn"
+
+El total US$64Bn coincide con el nuevo total (US$64,075M) — no requiere cambio. El split 19%/81% (cartera afectada/no afectada) cruza datos de Defensoría del Pueblo/zonas de conflicto con la ubicación de proyectos — **no es recalculable solo con estos dos documentos**; si quieres actualizarlo necesitas el detalle geográfico de "minería ilegal" que no está en la Cartera de Proyectos.
+
+---
+
+## 3. Charts adicionales sugeridos (vista sectorial, más allá de tu portafolio)
+
+Dado que tu comité ve principalmente las mineras en las que están invertidos, estos charts —construidos 100% con la Cartera MINEM— dan contexto de todo el sector:
+
+**A. Embudo de madurez de la Cartera (etapa de avance)** — *el más accionable para el comité*
+Muestra cuánto del pipeline de US$64Bn es "real" (cerca de construcción) vs. especulativo:
+
+| Etapa | # proyectos | Inversión | % del total |
+|---|---|---|---|
+| Ejecución | 8 | US$7,121M | 11.1% |
+| Ingeniería de Detalle | 6 | US$7,530M | 11.8% |
+| Factibilidad | 15 | US$16,523M | 25.8% |
+| Pre-factibilidad | 26 | US$21,876M | 34.1% |
+| Conceptual | 11 | US$11,026M | 17.2% |
+
+Solo **22.9%** del pipeline (Ejecución + Ingeniería de Detalle) está en etapa avanzada. Complementa directamente el chart que ya tienen sobre los 15.5 años promedio de maduración de un proyecto minero en Perú.
+
+**B. Fuente de abastecimiento de agua** (ESG / riesgo físico — conecta con tu trabajo en RVL/ESG)
+30.1% agua superficial, 7.4% subterránea, 6.0% de mar, 14.3% fuente mixta, y **42.2% sin información** (proyectos tempranos sin plan de agua definido, incluye Conga y El Galeno). Relevante para tu dashboard de riesgo físico existente.
+
+**C. Mix por mineral principal**
+Cobre domina con 70.9% (US$45,402M, 35 proyectos) — útil para dimensionar la exposición del sector al ciclo del cobre más allá de tus posiciones directas.
+
+**D. Origen del inversionista (país)**
+China 21.5%, Canadá 17.0%, EE.UU. 15.7%, México 14.8%, Australia 10.4%, Perú 7.8%, Suiza 5.2%, Reino Unido 4.8%. Lente geopolítico/de atracción de inversión — relevante en el contexto electoral del propio deck.
+
+**E. Concentración geográfica (macrorregión)**
+Sur 45.5% (25 proyectos), Norte 37.0% (12), Centro 17.2% (28), Oriente 0.3%. Se puede cruzar con tu mapa de conflictos sociales existente en el slide 2 para ver qué % del pipeline está en zonas de mayor riesgo social.
+
+---
+
+*Todas las cifras provienen directamente de "Cartera de Proyectos de Inversión Minera 2026" (MINEM). Los ítems marcados con ⚠️ requieren verificación con otra fuente propia, ya que no están soportados en este documento.*
+
+---
+
+## Anexo: referencias exactas de página (Cartera de Proyectos Mineros 2026, MINEM)
+
+### Datos usados para actualizar los charts existentes
+
+| Dato / chart a actualizar | Página(s) | Tabla / Gráfico / Sección |
+|---|---|---|
+| 66 proyectos, US$64,075M (total) | p. 8-12 y p. 28 | Tabla 01 (fila TOTAL) + intro sección 4.4 |
+| San Gabriel sale de la cartera (graduó a operación) | p. 18 | Sección 4.1, narrativa |
+| 2025: 3 proyectos iniciaron ejecución (Raura, Ferrobamba, Tía María), US$3,634M | p. 18 | Sección 4.1, narrativa |
+| 2026: 7 proyectos, US$4,366M (San Rafael, Huarón, Colquijirca, Esperanza, Cerro Verde, Huancapetí, Corani) | p. 19 | Sección 4.1, narrativa |
+| 2027: 7 proyectos, US$6,014M (Coroccohuayco, Pampa de Pongo, Trapiche, Los Calatos, Mina Justa, Carahuacra-San Cristóbal, Atacocha-El Porvenir) | p. 19 | Sección 4.1, narrativa |
+| 2029: 2 proyectos, US$2,098M (Coimolache Sulfuros, La Arena Sulfuros) | p. 19 | Sección 4.1, narrativa |
+| 44 proyectos sin fecha (P.D.), US$44,910M, 70.1% | p. 19 | Sección 4.1, narrativa |
+| Visual del bubble/timeline de inicio de ejecución | p. 20 | Gráfico 02 |
+| Fechas "P.D." de Zafranal, Amp. Cuajone, Amp. Huachocolpa | p. 8-12 | Tabla 01 (columna "Inicio/fin ejecución") |
+| 8 proyectos en etapa Ejecución (mapa "en construcción") | p. 30 | Sección 4.5, narrativa |
+| Ejecutado hasta 2025 (US$1,936M) y proyección anualizada 2026-2029, usado para reconstruir "83.9% después de 2028" | p. 37-39 | Secc. 5.1, Tabla 06, Secc. 5.2, Gráfico 12 |
+
+### Chart nuevo ya construido (etapa de avance)
+
+| Dato | Página | Fuente |
+|---|---|---|
+| Ejecución / Ingeniería de Detalle / Factibilidad / Pre-factibilidad / Conceptual (# proyectos, US$, %) | p. 30 | Sección 4.5, narrativa |
+| Visual de referencia | p. 31 | Gráfico 07 |
+
+### Charts adicionales propuestos (aún no construidos)
+
+| Chart propuesto | Página(s) | Tabla / Gráfico |
+|---|---|---|
+| Fuente de abastecimiento de agua | p. 31-33 | Sección 4.6, Tabla 05, Gráfico 08 |
+| Mix por mineral principal | p. 35-36 | Sección 4.8, Gráfico 10 |
+| País de origen del inversionista | p. 24-27 | Sección 4.3, Gráfico 05 |
+| Concentración por macrorregión | p. 23-24 | Sección 4.2, Gráfico 04 |
+
+*Nota: Tabla 01 (el listado de 66 proyectos) es un bloque continuo en el PDF sin marcadores de salto de página visibles en la extracción — el rango p. 8-12 es aproximado.*
