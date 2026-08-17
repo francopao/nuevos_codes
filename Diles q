@@ -1,0 +1,706 @@
+# -*- coding: utf-8 -*-
+"""
+Dashboard de Inversiones - AFP Integra
+Chart #1: PBI de Sectores Primarios en el contexto del FEN.
+Chart #2: Tabla comparativa de precision del BCRP en episodios FEN + slicer de sector.
+
+Cuento una sola historia: como viene el sector primario, como se comporta en cada
+FEN y que proyecta el BCRP hacia adelante. Dejo la arquitectura lista para ir
+agregando mas charts al dashboard sin tocar la estructura principal.
+"""
+
+import os
+import json
+import base64
+import datetime as dt
+
+import openpyxl
+import numpy as np
+
+import plotly.graph_objects as go
+import plotly.io as pio
+
+# ----------------------------------------------------------------------------
+# 1) Configuracion general: aqui centralizo rutas, archivos y estilo.
+#    Cambio BASE_DIR y todo lo demas se acomoda solo.
+# ----------------------------------------------------------------------------
+BASE_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\Semestral - Trabajos\Renzo"
+
+# Si estoy corriendo el script fuera de la mesa (por ejemplo probando en local),
+# caigo de forma elegante a la carpeta del script o al directorio actual.
+if not os.path.isdir(BASE_DIR):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+
+FILE_BCRP    = os.path.join(BASE_DIR, "BCRP data.xlsx")
+FILE_MEMORIA = os.path.join(BASE_DIR, "Memoria Anual 2023 BCRP.xlsx")
+FILE_ENFEN   = os.path.join(
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD"
+    r"\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos"
+    r"\Python\Inputs",
+    "ENFEN_Comunicados_Resumen.xlsx")
+FILE_LOGO    = os.path.join(BASE_DIR, "Integra_logo.png")
+
+# Fallback: si ENFEN no esta en la ruta larga, busco en BASE_DIR.
+if not os.path.isfile(FILE_ENFEN):
+    FILE_ENFEN = os.path.join(BASE_DIR, "ENFEN_Comunicados_Resumen.xlsx")
+
+OUTPUT_DIR = BASE_DIR
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Paleta institucional AFP Integra
+PALETA = [
+    "#00AECB", "#00C9EA", "#61E8FF", "#C5F7FF",
+    "#ACD7CA", "#C8E5DC", "#E3F2ED", "#B7EEFF",
+    "#AFC3E6", "#D4EAF3",
+]
+PALETA_PIE = [
+    "#3494BA", "#0070C0", "#AEC2E6", "#A1C6E7",
+    "#BAD5ED", "#C3D2ED", "#D8E7F5", "#D2EAE2",
+    "#E3F2ED", "#002060", "#686868", "#D9D9D9",
+]
+
+# Roles de color que uso en los charts
+COL_OBS      = "#00AECB"   # linea observada (teal institucional)
+COL_FCST     = "#002060"   # forecast BCRP (azul profundo, autoridad)
+COL_FEN      = "#AFC3E6"   # bandas FEN
+COL_ZERO     = "#9AA3AF"   # linea de 0%
+COL_TXT      = "#2B2B2B"   # texto principal
+COL_TXT_SOFT = "#686868"   # texto secundario
+COL_GRAY     = "#D9D9D9"
+
+# Tipografia corporativa que uso en todo el dashboard.
+FONT = "Segoe UI, Calibri, Arial, Helvetica, sans-serif"
+
+# Config comun de Plotly: sin logo de Plotly y descarga PNG en alta resolucion (scale=3).
+CFG = {
+    "displaylogo": False,
+    "responsive": True,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "toImageButtonOptions": {"format": "png", "scale": 3, "filename": "chart"},
+}
+
+
+# ----------------------------------------------------------------------------
+# 2) Carga de datos. No asumo nombres: leo las hojas tal cual y valido.
+# ----------------------------------------------------------------------------
+_MESES = {"ene":1, "feb":2, "mar":3, "abr":4, "may":5, "jun":6,
+          "jul":7, "ago":8, "set":9, "sep":9, "oct":10, "nov":11, "dic":12}
+
+
+def _to_float(x):
+    """Convierto celdas tipo '3,2' (formato ES) o numeros a float; None si no puedo."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(" ", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _load_monthly_buckets():
+    """
+    Leo la hoja mensual del BCRP y devuelvo un dict {year: {col_index: [valores]}}.
+    Ademas devuelvo el nombre de cada columna para poder mapear sectores.
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws = wb["Mensuales"]
+    rows = list(ws.iter_rows(values_only=True))
+    names = rows[1]
+    buckets = {}
+    for r in rows[2:]:
+        lab = r[0]
+        if not lab:
+            continue
+        lab = str(lab)
+        mes = _MESES.get(lab[:3].lower())
+        if mes is None:
+            continue
+        yy = int(lab[3:])
+        year = 1900 + yy if yy >= 90 else 2000 + yy
+        for ci in range(1, len(r)):
+            val = _to_float(r[ci])
+            if val is not None:
+                buckets.setdefault(year, {}).setdefault(ci, []).append(val)
+    return buckets, names
+
+
+def load_primary_annual():
+    """
+    Construyo la serie ANUAL del PBI primario (var. % interanual) a partir de la
+    hoja mensual del BCRP. La hoja 'anual' del archivo solo llega a 1952 para este
+    agregado, asi que uso el promedio de las 12 variaciones interanuales del anio
+    como proxy del crecimiento anual. Devuelvo solo anios completos (12 meses).
+    """
+    buckets, names = _load_monthly_buckets()
+    col_prim = next(i for i, n in enumerate(names) if n and "Sectores Primarios" in str(n))
+    years, vals = [], []
+    for y in sorted(buckets):
+        if col_prim in buckets[y] and len(buckets[y][col_prim]) >= 12:
+            years.append(y)
+            vals.append(float(np.mean(buckets[y][col_prim])))
+    return np.array(years), np.array(vals)
+
+
+def load_forecast():
+    """
+    Tomo la proyeccion del PBI primario del Reporte de Inflacion mas reciente
+    (hoja 'Reporte de Inflacion 2026'). Uso una sola cosecha (RI Jun.26) para
+    2026 y 2027, de modo que el forecast sea metodologicamente consistente.
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws = wb["Reporte de Inflacion 2026"]
+    rows = list(ws.iter_rows(values_only=True))
+    header = [str(c) if c is not None else "" for c in rows[0]]
+
+    def col_like(*keys):
+        for i, h in enumerate(header):
+            if all(k.lower() in h.lower() for k in keys):
+                return i
+        return None
+
+    c_2026 = col_like("2026", "RI Jun")
+    c_2027 = col_like("2027", "RI Jun")
+    row_prim = next(r for r in rows[1:] if r and str(r[0]).strip().lower() == "pbi primario")
+    f2026 = _to_float(row_prim[c_2026])
+    f2027 = _to_float(row_prim[c_2027])
+    return {2026: f2026, 2027: f2027}
+
+
+def load_fen_episodes(min_magnitudes=("Fuerte", "Extraordinario")):
+    """
+    Leo el catalogo fechado de FEN de la Memoria 2023 (hoja 'p41') y me quedo
+    con los episodios de mayor magnitud, que son los relevantes para el PBI.
+    """
+    wb = openpyxl.load_workbook(FILE_MEMORIA, data_only=True)
+    ws = wb["p41"]
+    rows = list(ws.iter_rows(values_only=True))
+    eps = []
+    for r in rows[1:]:
+        if r[0] is None:
+            continue
+        y0, m0, y1, m1, dur, mag = r[0], r[1], r[2], r[3], r[4], r[5]
+        if mag not in min_magnitudes:
+            continue
+        start = y0 + (m0 - 1) / 12.0
+        end = y1 + m1 / 12.0
+        eps.append((start, end, str(mag)))
+    return eps
+
+
+# ---------- Loaders para Chart #2 (tabla comparativa) ----------
+
+# Mapeo de sector a columna mensual (para calcular el PBI % efectivo).
+# Solo los sectores que tienen serie mensual directa en el BCRP.
+_SECTOR_TO_MONTHLY_COL = {
+    "PBI primario":         "Sectores Primarios",
+    "Agropecuario":         "Agropecuario",
+    "Pesca":                "Pesca",
+    "PBI no primario":      "Sectores no Primarios",
+    "Manufactura":          "Manufactura",
+    "Minería e Hidrocarburos": "Minería e Hidrocarburos",  # col name partial match
+}
+
+# Hojas RI que uso para la tabla, en el orden en que las proceso.
+_RI_SHEETS = [
+    {"sheet": "Reporte de Inflacion 2017", "fen_year": 2017, "extra_year": 2018},
+    {"sheet": "Reporte de Inflacion 2023", "fen_year": 2023, "extra_year": 2024},
+    {"sheet": "Reporte de Inflacion 2026", "fen_year": 2026, "extra_year": 2027},
+]
+
+
+def load_ri_forecasts():
+    """
+    De cada hoja RI extraigo, para cada sector, la proyeccion del ultimo RI disponible
+    para el ano FEN. Para la hoja 2026 tambien tomo el ano siguiente (2027).
+    Devuelvo {sector: {year: forecast_value}}.
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    result = {}
+
+    for spec in _RI_SHEETS:
+        ws = wb[spec["sheet"]]
+        rows = list(ws.iter_rows(values_only=True))
+        header = [str(c) if c is not None else "" for c in rows[0]]
+
+        # Localizo la columna del ultimo RI para el ano FEN.
+        # Patron: "{fen_year} RI {mes}.{yy}" — tomo la ultima columna que matchee.
+        fen_yr = spec["fen_year"]
+        last_ri_col = None
+        extra_col = None
+        for ci, h in enumerate(header):
+            if str(fen_yr) in h and "RI" in h:
+                last_ri_col = ci  # me quedo con la ultima que aparece
+        # Para la hoja 2026 tambien tomo la columna del ano siguiente.
+        if spec["sheet"] == "Reporte de Inflacion 2026":
+            for ci, h in enumerate(header):
+                if str(spec["extra_year"]) in h and "RI" in h:
+                    extra_col = ci
+
+        for r in rows[1:]:
+            sector = str(r[0]).strip() if r[0] else None
+            if not sector:
+                continue
+            result.setdefault(sector, {})
+            if last_ri_col is not None:
+                v = _to_float(r[last_ri_col])
+                if v is not None:
+                    result[sector][fen_yr] = v
+            if extra_col is not None:
+                v = _to_float(r[extra_col])
+                if v is not None:
+                    result[sector][spec["extra_year"]] = v
+
+    return result
+
+
+def load_actual_pbi_by_sector():
+    """
+    Devuelvo {sector_ri_name: {year: promedio_anual}} usando la serie mensual.
+    Solo para anos con 12 meses completos.
+    """
+    buckets, names = _load_monthly_buckets()
+    actual = {}
+    for sector_ri, col_key in _SECTOR_TO_MONTHLY_COL.items():
+        # Busco la columna mensual cuyo nombre contiene col_key.
+        col_idx = None
+        for i, n in enumerate(names):
+            if n and col_key in str(n):
+                col_idx = i
+                break
+        if col_idx is None:
+            continue
+        actual[sector_ri] = {}
+        for y in sorted(buckets):
+            if col_idx in buckets[y] and len(buckets[y][col_idx]) >= 12:
+                actual[sector_ri][y] = round(float(np.mean(buckets[y][col_idx])), 1)
+    return actual
+
+
+def load_enfen_magnitudes():
+    """
+    Leo la hoja 'Comunicados ENFEN' y para cada ano FEN devuelvo la magnitud pico.
+    Normalizo todo lo que no sea fuerte/moderada/debil/neutra/extraordinario a 'No Activo'.
+    Para 1998 no hay datos ENFEN: lo marco como 'Extraordinario' (excepcion conocida).
+    """
+    ACTIVAS = {"fuerte", "débil", "moderada", "neutra", "extraordinario"}
+    MAG_RANK = {"extraordinario": 5, "fuerte": 4, "moderada": 3, "débil": 2, "neutra": 1}
+
+    wb = openpyxl.load_workbook(FILE_ENFEN, data_only=True)
+    ws = wb["Comunicados ENFEN"]
+    rows = list(ws.iter_rows(values_only=True))
+    header = rows[0]
+
+    # Localizo la columna de magnitud de forma dinamica.
+    mag_col = next(i for i, h in enumerate(header) if h and "Magnitud El" in str(h))
+
+    # Calculo la magnitud pico por ano.
+    peaks = {}
+    for r in rows[1:]:
+        y = r[1]
+        if y is None:
+            continue
+        raw = str(r[mag_col]).strip().lower() if r[mag_col] else ""
+        if raw not in ACTIVAS:
+            continue
+        rank = MAG_RANK.get(raw, 0)
+        if y not in peaks or rank > MAG_RANK.get(peaks[y], 0):
+            peaks[y] = raw
+
+    # Capitalizo.
+    result = {}
+    for y, mag in peaks.items():
+        result[y] = mag.capitalize()
+
+    # Excepcion: 1998 no tiene datos ENFEN pero fue Extraordinario.
+    result[1998] = "Extraordinario"
+    return result
+
+
+def build_table_data(sector="PBI primario"):
+    """
+    Armo los datos de la tabla comparativa para un sector dado.
+    Columnas: 1998, 2017, 2023, 2026, 2027.
+    Filas: Proyeccion BCRP, PBI %, Diferencia, Magnitud FEN.
+    """
+    forecasts = load_ri_forecasts()
+    actuals = load_actual_pbi_by_sector()
+    magnitudes = load_enfen_magnitudes()
+
+    cols = [1998, 2017, 2023, 2026, 2027]
+    fc = forecasts.get(sector, {})
+    ac = actuals.get(sector, {})
+
+    proy = []
+    pbi = []
+    diff = []
+    mag = []
+    for y in cols:
+        f_val = fc.get(y)
+        a_val = ac.get(y)
+        proy.append(f_val)
+        pbi.append(a_val)
+        if f_val is not None and a_val is not None:
+            diff.append(round(f_val - a_val, 1))
+        else:
+            diff.append(None)
+        mag.append(magnitudes.get(y))
+
+    return cols, proy, pbi, diff, mag
+
+
+def get_slicer_sectors():
+    """
+    Devuelvo la lista de sectores disponibles para el slicer.
+    Son los que existen en las 3 hojas RI (interseccion comun).
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    sets = []
+    for spec in _RI_SHEETS:
+        ws = wb[spec["sheet"]]
+        rows = list(ws.iter_rows(values_only=True))
+        sectors = set(str(r[0]).strip() for r in rows[1:] if r[0] is not None)
+        sets.append(sectors)
+    common = sets[0]
+    for s in sets[1:]:
+        common = common & s
+    # Ordeno con PBI primario al inicio.
+    ordered = ["PBI primario"] + sorted(s for s in common if s != "PBI primario")
+    return ordered
+
+
+# ----------------------------------------------------------------------------
+# 3) Chart #1 en Plotly. Devuelvo un go.Figure interactivo, compacto y limpio.
+#    El titulo/subtitulo van en el HTML (Seccion 6), no dentro del plot, para
+#    evitar superposiciones y mantener el area del grafico despejada.
+# ----------------------------------------------------------------------------
+def chart_primary_fen():
+    years, vals = load_primary_annual()
+    fcst = load_forecast()
+    episodes = load_fen_episodes()
+
+    x0 = 1995
+    mask = years >= x0
+    yrs, vls = years[mask], vals[mask]
+    last_y, last_v = int(yrs[-1]), float(vls[-1])
+    fx = [last_y, 2026, 2027]
+    fv = [last_v, fcst[2026], fcst[2027]]
+
+    fig = go.Figure()
+
+    # Bandas FEN de mayor magnitud (contexto, al fondo)
+    for s, e, mag in episodes:
+        if e < x0:
+            continue
+        fig.add_vrect(x0=s, x1=e, fillcolor=COL_FEN,
+                      opacity=0.50 if mag == "Extraordinario" else 0.32,
+                      line_width=0, layer="below")
+
+    # Linea de 0% como unica referencia horizontal
+    fig.add_hline(y=0, line_color=COL_ZERO, line_width=1)
+
+    # Serie observada
+    fig.add_trace(go.Scatter(
+        x=yrs, y=vls, mode="lines", name="Observado",
+        line=dict(color=COL_OBS, width=2.6),
+        hovertemplate="<b>%{x}</b>   %{y:.1f}%<extra>Observado</extra>"))
+
+    # Proyeccion BCRP (discontinua + marcadores, color distinto)
+    fig.add_trace(go.Scatter(
+        x=fx, y=fv, mode="lines+markers", name="Proyeccion BCRP (RI Jun.26)",
+        line=dict(color=COL_FCST, width=2.6, dash="dot"),
+        marker=dict(size=7, color=COL_FCST),
+        hovertemplate="<b>%{x}</b>   %{y:.1f}%<extra>Proyeccion BCRP</extra>"))
+
+    # Annotations (posicionadas para no superponerse)
+    def yat(y):
+        return float(vls[np.where(yrs == y)[0][0]])
+
+    fig.add_annotation(x=1998, y=yat(1998) + 2.2, text="FEN 97-98",
+                       showarrow=False, font=dict(size=11, color=COL_TXT_SOFT))
+    fig.add_annotation(x=2020, y=yat(2020) - 2.4, text="COVID-19",
+                       showarrow=False, font=dict(size=11, color=COL_TXT_SOFT))
+    fig.add_annotation(x=2023.5, y=13.2, text="<b>FEN 2023-24</b>",
+                       showarrow=False, font=dict(size=11, color="#5B6E9E"))
+    fig.add_annotation(x=2026, y=fcst[2026], ay=34, ax=0,
+                       text="<b>{:+.1f}%<br>2026</b>".format(fcst[2026]).replace(".", ","),
+                       showarrow=True, arrowhead=0, arrowwidth=1.1,
+                       arrowcolor=COL_FCST, yanchor="top",
+                       font=dict(size=11.5, color=COL_FCST))
+    fig.add_annotation(x=2027, y=fcst[2027] + 2.6,
+                       text="<b>{:+.1f}%<br>2027</b>".format(fcst[2027]).replace(".", ","),
+                       showarrow=False, font=dict(size=11, color=COL_FCST))
+
+    ymin = min(vls.min(), min(fv)) - 3
+    ymax = max(vls.max(), max(fv)) + 3
+    fig.update_layout(
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(range=[x0 - 0.5, 2027.9], dtick=5, ticks="outside",
+                   tickfont=dict(size=10), showgrid=False,
+                   linecolor="#C9CED6", tickcolor="#C9CED6"),
+        yaxis=dict(range=[ymin, ymax], ticksuffix="%", dtick=5, ticks="outside",
+                   tickfont=dict(size=10), showgrid=False, zeroline=False,
+                   linecolor="#ffffff", tickcolor="#ffffff"))
+    return fig
+
+
+# ----------------------------------------------------------------------------
+# 4) Chart #2: Tabla comparativa de precision del BCRP durante FEN.
+#    La tabla es JS puro en el HTML; aqui solo preparo el payload JSON con los
+#    datos de todos los sectores para que el slicer funcione sin recalcular.
+# ----------------------------------------------------------------------------
+def build_all_sectors_payload():
+    """
+    Preparo un dict {sector: {cols, proy, pbi, diff, mag}} para todos los sectores
+    del slicer. Lo serializo a JSON y lo incrusto en el HTML.
+    """
+    sectors = get_slicer_sectors()
+    payload = {}
+    for sec in sectors:
+        cols, proy, pbi, diff, mag = build_table_data(sec)
+        payload[sec] = {
+            "cols": cols,
+            "proy": [v if v is not None else None for v in proy],
+            "pbi":  [v if v is not None else None for v in pbi],
+            "diff": [v if v is not None else None for v in diff],
+            "mag":  [v if v is not None else "—" for v in mag],
+        }
+    return payload, sectors
+
+
+# ----------------------------------------------------------------------------
+# 5) Registro de charts. Aqui voy sumando charts nuevos: (id, titulo, sub, builder).
+#    El chart #2 (tabla) no usa un builder Plotly; se renderiza como HTML+JS directo.
+# ----------------------------------------------------------------------------
+CHARTS = [
+    ("pbi_primario_fen",
+     "PBI primario: el FEN 2023-24 anticipa una nueva contraccion en 2026",
+     "Variacion % anual del PBI de Sectores Primarios. Observado 1995-2025; "
+     "proyeccion RI Jun.26 (-1,6% en 2026 y +1,5% en 2027).",
+     chart_primary_fen),
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+]
+
+
+# ----------------------------------------------------------------------------
+# 6) Exportacion: dashboard HTML interactivo (Plotly + tabla JS).
+# ----------------------------------------------------------------------------
+def _logo_uri():
+    if not os.path.isfile(FILE_LOGO):
+        return ""
+    with open(FILE_LOGO, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+
+def _build_table_card():
+    """
+    Genero el HTML+JS de la tabla comparativa con slicer de sector.
+    El slicer permite elegir un unico sector a la vez (PBI primario por default).
+    La tabla se actualiza dinamicamente via JS; los datos de todos los sectores
+    ya estan embebidos en un JSON.
+    """
+    payload, sectors = build_all_sectors_payload()
+    data_json = json.dumps(payload, ensure_ascii=False)
+    options_html = "\n".join(
+        f'        <option value="{s}"{" selected" if s == "PBI primario" else ""}>{s}</option>'
+        for s in sectors)
+
+    return f"""
+      <figure class="card" id="card_tabla_fen">
+        <h3>Precision de las proyecciones del BCRP durante episodios FEN</h3>
+        <p class="sub">Comparacion entre la proyeccion del ultimo RI previo al FEN y el PBI % efectivo.
+        Magnitud segun alerta ENFEN pico del periodo.</p>
+        <div style="margin-bottom:10px; display:flex; align-items:center; gap:8px;">
+          <label style="font-size:12px; color:#002060; font-weight:600;">Sector:</label>
+          <select id="slicer_sector" style="font-size:12px; padding:3px 8px;
+            border:1px solid #C9CED6; border-radius:5px; color:#2B2B2B; background:#fff;
+            font-family:{FONT};">
+{options_html}
+          </select>
+        </div>
+        <div id="tabla_fen_wrap" style="overflow-x:auto;"></div>
+        <figcaption>Fuente: BCRP (Reportes de Inflacion) y ENFEN. Elaboracion propia.
+        "—" indica dato no disponible.</figcaption>
+      </figure>
+      <script>
+      (function(){{
+        const DATA = {data_json};
+        const NAVY = "#002060";
+        const TEAL = "#00AECB";
+
+        function fmt(v){{
+          if(v===null||v===undefined) return '<span style="color:#9AA3AF">—</span>';
+          const s = v.toFixed(1).replace(".",",");
+          return (v>0?"+":"")+s+"%";
+        }}
+        function diffColor(v){{
+          if(v===null||v===undefined) return "";
+          if(v>1) return "color:#C00000";
+          if(v<-1) return "color:#00B050";
+          return "color:#686868";
+        }}
+        function magColor(m){{
+          const map = {{"Extraordinario":"#7B2D26","Fuerte":"#C00000",
+                       "Moderada":"#ED7D31","Débil":"#FFC000","Neutra":"#9AA3AF"}};
+          return map[m] || "#9AA3AF";
+        }}
+
+        function render(sector){{
+          const d = DATA[sector];
+          if(!d) return;
+          const hdr = [""].concat(d.cols.map(String));
+          const rows = [
+            ["Proyeccion BCRP"].concat(d.proy.map(fmt)),
+            ["PBI %"].concat(d.pbi.map(fmt)),
+            ["Diferencia"].concat(d.diff.map(function(v,i){{
+              return '<span style="'+diffColor(v)+'">'+fmt(v)+'</span>';
+            }})),
+            ["Magnitud FEN"].concat(d.mag.map(function(m){{
+              if(m==="—") return '<span style="color:#9AA3AF">—</span>';
+              return '<span style="color:'+magColor(m)+';font-weight:600">'+m+'</span>';
+            }}))
+          ];
+          let h = '<table style="width:100%;border-collapse:collapse;font-size:13px;font-family:{FONT};">';
+          h += '<tr>';
+          hdr.forEach(function(c,i){{
+            const st = i===0
+              ? 'text-align:left;padding:7px 10px;font-weight:700;color:'+NAVY+';border-bottom:2px solid '+TEAL
+              : 'text-align:center;padding:7px 10px;font-weight:700;color:'+NAVY+';border-bottom:2px solid '+TEAL;
+            h += '<th style="'+st+'">'+c+'</th>';
+          }});
+          h += '</tr>';
+          rows.forEach(function(row,ri){{
+            h += '<tr>';
+            row.forEach(function(c,ci){{
+              const bg = ri%2===0 ? "#F8FBFD" : "#ffffff";
+              const st = ci===0
+                ? 'text-align:left;padding:6px 10px;font-weight:600;color:'+NAVY+';background:'+bg+';border-bottom:1px solid #E3F2ED'
+                : 'text-align:center;padding:6px 10px;color:#2B2B2B;background:'+bg+';border-bottom:1px solid #E3F2ED';
+              h += '<td style="'+st+'">'+c+'</td>';
+            }});
+            h += '</tr>';
+          }});
+          h += '</table>';
+          document.getElementById("tabla_fen_wrap").innerHTML = h;
+        }}
+
+        document.getElementById("slicer_sector").addEventListener("change", function(){{
+          render(this.value);
+        }});
+        render("PBI primario");
+
+        // Boton de descarga PNG usando html2canvas (inyecto el script si no existe).
+        function addDownloadBtn(){{
+          if(document.getElementById("dl_tabla")) return;
+          const card = document.getElementById("card_tabla_fen");
+          const btn = document.createElement("button");
+          btn.id = "dl_tabla";
+          btn.textContent = "\\u2B07 PNG";
+          btn.title = "Descargar como imagen";
+          btn.style.cssText = "position:absolute;top:10px;right:12px;font-size:11px;"+
+            "padding:3px 9px;border:1px solid #C9CED6;border-radius:4px;background:#fff;"+
+            "color:#002060;cursor:pointer;z-index:2;";
+          card.style.position = "relative";
+          card.appendChild(btn);
+          btn.addEventListener("click", function(){{
+            if(typeof html2canvas==="undefined"){{
+              const sc = document.createElement("script");
+              sc.src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
+              sc.onload = function(){{ capture(); }};
+              document.head.appendChild(sc);
+            }} else {{ capture(); }}
+          }});
+          function capture(){{
+            btn.style.display = "none";
+            html2canvas(card, {{scale:3, backgroundColor:"#fff"}}).then(function(canvas){{
+              btn.style.display = "";
+              const a = document.createElement("a");
+              a.download = "tabla_precision_fen.png";
+              a.href = canvas.toDataURL("image/png");
+              a.click();
+            }});
+          }}
+        }}
+        addDownloadBtn();
+      }})();
+      </script>"""
+
+
+def build_dashboard_html():
+    # Renderizo los charts Plotly.
+    cards = []
+    for chart_id, title, sub, builder in CHARTS:
+        fig = builder()
+        cfg = dict(CFG)
+        cfg["toImageButtonOptions"] = {**CFG["toImageButtonOptions"], "filename": chart_id}
+        frag = pio.to_html(fig, full_html=False, include_plotlyjs=False,
+                           config=cfg, div_id=chart_id)
+        cards.append(f"""
+      <figure class="card">
+        <h3>{title}</h3>
+        <p class="sub">{sub}</p>
+        {frag}
+        <figcaption>Fuente: BCRP y Memoria Anual 2023 BCRP. Elaboracion propia.</figcaption>
+      </figure>""")
+
+    # Agrego la tabla comparativa (chart #2).
+    cards.append(_build_table_card())
+
+    stamp = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    logo = _logo_uri()
+    logo_html = f'<img src="{logo}" alt="AFP Integra">' if logo else ""
+
+    html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Dashboard de Inversiones - AFP Integra</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  :root{{ --navy:#002060; --line:#E3F2ED; --soft:#686868; }}
+  *{{ box-sizing:border-box; }}
+  body{{ margin:0; font-family:{FONT}; color:#2B2B2B; background:#F6F9FB; }}
+  header{{ display:flex; align-items:center; justify-content:space-between;
+           background:#fff; padding:16px 26px; border-bottom:3px solid #00AECB; }}
+  header h1{{ margin:0; font-size:18px; color:var(--navy); }}
+  header p{{ margin:3px 0 0; font-size:12px; color:var(--soft); }}
+  header img{{ height:38px; width:auto; }}
+  .grid{{ display:grid; grid-template-columns:repeat(2,minmax(520px,1fr));
+          gap:18px; padding:20px 24px; }}
+  @media(max-width:1120px){{ .grid{{ grid-template-columns:1fr; }} }}
+  .card{{ margin:0; background:#fff; border:1px solid var(--line); border-radius:10px;
+          padding:14px 16px 10px; box-shadow:0 1px 3px rgba(0,0,0,.05); }}
+  .card h3{{ margin:0 0 2px; font-size:15px; color:var(--navy);
+             font-weight:700; line-height:1.25; }}
+  .card .sub{{ margin:0 0 6px; font-size:11.5px; color:var(--soft); line-height:1.3; }}
+  .card figcaption{{ margin-top:4px; font-size:10px; color:#9AA3AF; }}
+</style></head><body>
+<header>
+  <div><h1>Dashboard de Inversiones - Sectores Primarios &amp; FEN</h1>
+  <p>Mesa de Inversiones &middot; Actualizado {stamp}</p></div>
+  {logo_html}
+</header>
+<main class="grid">{''.join(cards)}</main>
+</body></html>"""
+
+    out = os.path.join(OUTPUT_DIR, "dashboard.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    return out
+
+
+# ----------------------------------------------------------------------------
+# 7) Orquestacion.
+# ----------------------------------------------------------------------------
+def main():
+    html_path = build_dashboard_html()
+    print(f"[OK] HTML -> {html_path}")
+
+
+if __name__ == "__main__":
+    main()
