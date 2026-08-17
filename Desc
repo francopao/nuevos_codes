@@ -1,0 +1,61 @@
+## 1. Bloque de código a agregar (exclusión Private Equity / Fondos de Inversión)
+
+**Dónde pegarlo (Ctrl+F / buscar):**
+Dentro de `load_exposicion_clase` (líneas 3174-3216), busca el texto exacto:
+
+```
+def clase_norm(c):
+```
+
+Pega el siguiente bloque **inmediatamente antes** de esa línea (es decir, justo después de la línea `df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0.0)`):
+
+```python
+    # --- Exclusión Private Equity / Fondos de Inversión (detección dinámica) ---
+    EXCLUIR_CLASIF_GENERAL = {"PRIVATE EQUITY", "FONDOS DE INVERSION"}
+    col_clas_gen = None
+    for c in df.columns:
+        nc = norm(c)
+        if "CLASIFICACION" in nc and "GENERAL" in nc:
+            col_clas_gen = c
+            break
+    if col_clas_gen is None:
+        idx_ab = column_letter_to_index("AB")
+        if idx_ab < len(df.columns):
+            col_clas_gen = df.columns[idx_ab]
+            log(f"Columna 'Clasificación General' no se halló por nombre; se usa "
+                f"respaldo por letra AB -> '{col_clas_gen}'.", "WARN")
+    if col_clas_gen is not None:
+        _clasgen_n = df[col_clas_gen].apply(norm)
+        _mask_excluir = _clasgen_n.apply(
+            lambda v: any(k in v for k in EXCLUIR_CLASIF_GENERAL))
+        if _mask_excluir.any():
+            log(f"load_exposicion_clase: excluidas {int(_mask_excluir.sum())} filas "
+                f"por 'Clasificación General' (Private Equity / Fondos de Inversión) "
+                f"en columna '{col_clas_gen}'.", "INFO")
+        df = df[~_mask_excluir].copy()
+    else:
+        log("load_exposicion_clase: no se halló columna 'Clasificación General' "
+            "(ni por nombre ni por letra AB); no se aplicó exclusión de "
+            "Private Equity / Fondos de Inversión.", "WARN")
+
+```
+
+Al insertarlo ahí, la exclusión ocurre **antes** de que se calculen tanto `aum_cartera` (línea 3200) como `exp_clase` (línea 3206), así que afecta a ambos.
+
+---
+
+## 2. Qué hace `ERR_OBJETIVO` (línea 6114) y sus implicancias
+
+`ERR_OBJETIVO` **no** interviene en el cálculo de AUM ni en la clasificación Renta Variable/Renta Fija que ves en el dashboard o en los Excel principales. Solo se usa dentro del bloque `try` de la hoja **"Cobertura"** (líneas 6107-6216), que es una hoja de auditoría/checklist adicional, no una fuente de los totales.
+
+Cómo se usa concretamente:
+- Filtra filas de "Valorización" cuya "Clasificación ERR" (columna AA) esté en ese set de 2 valores (línea 6125), para construir el **"universo esperado"** de esa hoja de cobertura.
+- Ese universo esperado solo determina qué nombres aparecen listados en la hoja "Cobertura" y si aparecen marcados "Sí"/"No".
+
+Los totales que sí importan (AUM, conteo de empresas, split Renta Variable/Renta Fija) vienen de otras rutas independientes:
+- `aum_emp_tot` (línea 5920) se construye desde `districts`, que a su vez viene del mapeo activo físico ↔ AUM (no depende de `ERR_OBJETIVO` en absoluto).
+- El split RV/RF que ves en dashboard/Excel sale de `load_exposicion_clase` → `clase_norm`, que clasifica por la columna `TIPO_RENTA` buscando "VARIABLE" o "FIJA" en el texto (línea 3191-3197), sin ningún filtro por `ERR_OBJETIVO`.
+
+**Entonces, implicancia real:** no hay impacto en AUM/dashboard/Excel principales. El único efecto de que `ERR_OBJETIVO` esté limitado a `"EQUITY DIRECTO - LOCAL"` y `"DEUDA CORPORATIVA DIRECTA - LOCAL"` es que la hoja **"Cobertura"** subestima su propio universo esperado: no va a listar (ni auditar) emisores cuya Clasificación ERR sea "Equity directo - Internacional", "Deuda corporativa directa - Internacional", "Titularización - Renta fija - Local", "Liquidez Local" o "Liquidez internacional". Es decir, esa hoja de auditoría queda incompleta como checklist, aunque no distorsiona ningún número del resto del reporte.
+
+Si quieres que te prepare el bloque de código para ampliar `ERR_OBJETIVO` a esas 5 categorías adicionales (mismo formato: solo código + ubicación con Ctrl+F), dímelo y te lo paso igual de directo.
