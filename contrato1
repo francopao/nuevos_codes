@@ -1,0 +1,235 @@
+Aplica los cambios **en este orden (de abajo hacia arriba)**. Así los números de línea de la parte superior no se mueven mientras editas. En cada uno: `Ctrl+F` la "línea inicial", selecciona hasta la "línea final" (ambas incluidas), borra y pega el reemplazo.
+
+Requisito antes de todo: en la terminal ejecuta `pip install plotly`.
+
+---
+
+**EDIT 1 — Sección 7 (líneas 391 a 405)**
+Inicial (línea 391): `def main():`
+Final (línea 405): `    main()`
+
+Reemplaza por:
+```python
+def main():
+    html_path = build_dashboard_html()
+    print(f"[OK] HTML -> {html_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+**EDIT 2 — Sección 6 (líneas 325 a 385)**
+Inicial (línea 325): `def _fig_to_png_bytes(fig):`
+Final (línea 385): `    return out`
+
+Reemplaza por:
+```python
+def _logo_uri():
+    if not os.path.isfile(FILE_LOGO):
+        return ""
+    with open(FILE_LOGO, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+
+def build_dashboard_html():
+    cards = []
+    for chart_id, title, sub, builder in CHARTS:
+        fig = builder()
+        cfg = dict(CFG)
+        cfg["toImageButtonOptions"] = {**CFG["toImageButtonOptions"], "filename": chart_id}
+        frag = pio.to_html(fig, full_html=False, include_plotlyjs=False,
+                           config=cfg, div_id=chart_id)
+        cards.append(f"""
+      <figure class="card">
+        <h3>{title}</h3>
+        <p class="sub">{sub}</p>
+        {frag}
+        <figcaption>Fuente: BCRP y Memoria Anual 2023 BCRP. Elaboracion propia.</figcaption>
+      </figure>""")
+
+    stamp = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    logo = _logo_uri()
+    logo_html = f'<img src="{logo}" alt="AFP Integra">' if logo else ""
+
+    html = f"""<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<title>Dashboard de Inversiones - AFP Integra</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+  :root{{ --navy:#002060; --line:#E3F2ED; --soft:#686868; }}
+  *{{ box-sizing:border-box; }}
+  body{{ margin:0; font-family:{FONT}; color:#2B2B2B; background:#F6F9FB; }}
+  header{{ display:flex; align-items:center; justify-content:space-between;
+           background:#fff; padding:16px 26px; border-bottom:3px solid #00AECB; }}
+  header h1{{ margin:0; font-size:18px; color:var(--navy); }}
+  header p{{ margin:3px 0 0; font-size:12px; color:var(--soft); }}
+  header img{{ height:38px; width:auto; }}
+  .grid{{ display:grid; grid-template-columns:repeat(2,minmax(520px,1fr));
+          gap:18px; padding:20px 24px; }}
+  @media(max-width:1120px){{ .grid{{ grid-template-columns:1fr; }} }}
+  .card{{ margin:0; background:#fff; border:1px solid var(--line); border-radius:10px;
+          padding:14px 16px 10px; box-shadow:0 1px 3px rgba(0,0,0,.05); }}
+  .card h3{{ margin:0 0 2px; font-size:15px; color:var(--navy);
+             font-weight:700; line-height:1.25; }}
+  .card .sub{{ margin:0 0 6px; font-size:11.5px; color:var(--soft); line-height:1.3; }}
+  .card figcaption{{ margin-top:4px; font-size:10px; color:#9AA3AF; }}
+</style></head><body>
+<header>
+  <div><h1>Dashboard de Inversiones - Sectores Primarios &amp; FEN</h1>
+  <p>Mesa de Inversiones &middot; Actualizado {stamp}</p></div>
+  {logo_html}
+</header>
+<main class="grid">{''.join(cards)}</main>
+</body></html>"""
+
+    out = os.path.join(OUTPUT_DIR, "dashboard.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    return out
+```
+
+---
+
+**EDIT 3 — Sección 5 (líneas 316 a 319)**
+Inicial (línea 316): `CHARTS = [`
+Final (línea 319): `]`
+
+Reemplaza por:
+```python
+CHARTS = [
+    ("pbi_primario_fen",
+     "PBI primario: el FEN 2023-24 anticipa una nueva contraccion en 2026",
+     "Variacion % anual del PBI de Sectores Primarios. Observado 1995-2025; proyeccion RI Jun.26 (-1,6% en 2026 y +1,5% en 2027).",
+     chart_primary_fen),
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+]
+```
+
+---
+
+**EDIT 4 — Secciones 3 y 4 (líneas 185 a 310)**
+Inicial (línea 185): es la línea de guiones `# ----...` que está **justo encima** de la línea 186 `# 3) Estilo: dejo el eje sobrio, sin grid horizontal, spines minimos.` (usa esa línea 186 como referencia con `Ctrl+F` y empieza a seleccionar una línea antes).
+Final (línea 310): `        pass`
+
+Reemplaza por:
+```python
+# ----------------------------------------------------------------------------
+# 3) Chart #1 en Plotly. Devuelvo un go.Figure interactivo, compacto y limpio.
+#    El titulo/subtitulo van en el HTML (Seccion 6), no dentro del plot, para
+#    evitar superposiciones y mantener el area del grafico despejada.
+# ----------------------------------------------------------------------------
+def chart_primary_fen():
+    years, vals = load_primary_annual()
+    fcst = load_forecast()
+    episodes = load_fen_episodes()
+
+    x0 = 1995
+    mask = years >= x0
+    yrs, vls = years[mask], vals[mask]
+    last_y, last_v = int(yrs[-1]), float(vls[-1])
+    fx = [last_y, 2026, 2027]
+    fv = [last_v, fcst[2026], fcst[2027]]
+
+    fig = go.Figure()
+
+    # Bandas FEN de mayor magnitud (contexto, al fondo)
+    for s, e, mag in episodes:
+        if e < x0:
+            continue
+        fig.add_vrect(x0=s, x1=e, fillcolor=COL_FEN,
+                      opacity=0.50 if mag == "Extraordinario" else 0.32,
+                      line_width=0, layer="below")
+
+    # Linea de 0% como unica referencia horizontal
+    fig.add_hline(y=0, line_color=COL_ZERO, line_width=1)
+
+    # Serie observada
+    fig.add_trace(go.Scatter(
+        x=yrs, y=vls, mode="lines", name="Observado",
+        line=dict(color=COL_OBS, width=2.6),
+        hovertemplate="<b>%{x}</b>   %{y:.1f}%<extra>Observado</extra>"))
+
+    # Proyeccion BCRP (discontinua + marcadores, color distinto)
+    fig.add_trace(go.Scatter(
+        x=fx, y=fv, mode="lines+markers", name="Proyeccion BCRP (RI Jun.26)",
+        line=dict(color=COL_FCST, width=2.6, dash="dot"),
+        marker=dict(size=7, color=COL_FCST),
+        hovertemplate="<b>%{x}</b>   %{y:.1f}%<extra>Proyeccion BCRP</extra>"))
+
+    # Annotations (posicionadas para no superponerse)
+    def yat(y):
+        return float(vls[np.where(yrs == y)[0][0]])
+
+    fig.add_annotation(x=1998, y=yat(1998) + 2.2, text="FEN 97-98",
+                       showarrow=False, font=dict(size=11, color=COL_TXT_SOFT))
+    fig.add_annotation(x=2020, y=yat(2020) - 2.4, text="COVID-19",
+                       showarrow=False, font=dict(size=11, color=COL_TXT_SOFT))
+    fig.add_annotation(x=2023.5, y=13.2, text="<b>FEN 2023-24</b>",
+                       showarrow=False, font=dict(size=11, color="#5B6E9E"))
+    fig.add_annotation(x=2026, y=fcst[2026], ay=34, ax=0,
+                       text="<b>{:+.1f}%<br>2026</b>".format(fcst[2026]).replace(".", ","),
+                       showarrow=True, arrowhead=0, arrowwidth=1.1,
+                       arrowcolor=COL_FCST, yanchor="top",
+                       font=dict(size=11.5, color=COL_FCST))
+    fig.add_annotation(x=2027, y=fcst[2027] + 2.6,
+                       text="<b>{:+.1f}%<br>2027</b>".format(fcst[2027]).replace(".", ","),
+                       showarrow=False, font=dict(size=11, color=COL_FCST))
+
+    ymin = min(vls.min(), min(fv)) - 3
+    ymax = max(vls.max(), max(fv)) + 3
+    fig.update_layout(
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(range=[x0 - 0.5, 2027.9], dtick=5, ticks="outside",
+                   tickfont=dict(size=10), showgrid=False,
+                   linecolor="#C9CED6", tickcolor="#C9CED6"),
+        yaxis=dict(range=[ymin, ymax], ticksuffix="%", dtick=5, ticks="outside",
+                   tickfont=dict(size=10), showgrid=False, zeroline=False,
+                   linecolor="#ffffff", tickcolor="#ffffff"))
+    return fig
+```
+
+---
+
+**EDIT 5 — final de Sección 1 (líneas 64 a 71)**
+Inicial (línea 64): `# Tipografia: busco una sans limpia y corporativa; si no esta, uso el default.`
+Final (línea 71): `RES_DPI = 300  # alta resolucion para PowerPoint / comite`
+
+Reemplaza por:
+```python
+# Tipografia corporativa que uso en todo el dashboard.
+FONT = "Segoe UI, Calibri, Arial, Helvetica, sans-serif"
+
+# Uso un gris mas claro para la linea de 0% (mejor jerarquia visual).
+COL_ZERO = "#9AA3AF"
+
+# Config comun de Plotly: sin logo de Plotly y descarga PNG en alta resolucion (scale=3).
+CFG = {
+    "displaylogo": False,
+    "responsive": True,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "toImageButtonOptions": {"format": "png", "scale": 3, "filename": "chart"},
+}
+```
+
+---
+
+**EDIT 6 — imports (líneas 18 a 23)**
+Inicial (línea 18): `import matplotlib`
+Final (línea 23): `import matplotlib.image as mpimg`
+
+Reemplaza por:
+```python
+import plotly.graph_objects as go
+import plotly.io as pio
+```
+
+(La línea 14 `from io import BytesIO` queda sin uso pero no molesta; puedes dejarla.)
+
+Guarda y ejecuta. Se genera `dashboard.html` en tu carpeta: ábrelo en el navegador, pasa el cursor para ver los datos y usa el ícono de cámara del chart para descargar el PNG.
