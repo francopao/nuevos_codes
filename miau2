@@ -1,0 +1,350 @@
+"""
+Dashboard FEN — Mesa de Inversiones.
+Chart #1: Termómetro FEN — PBI primario histórico, episodios FEN y proyección BCRP.
+"""
+
+import os
+from collections import defaultdict
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.image as mpimg
+import openpyxl
+
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
+
+BASE_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\Semestral - Trabajos\Renzo"
+ARCHIVO_BCRP = os.path.join(BASE_DIR, "BCRP data.xlsx")
+ARCHIVO_MEMORIA = os.path.join(BASE_DIR, "Memoria Anual 2023 BCRP.xlsx")
+ARCHIVO_LOGO = os.path.join(BASE_DIR, "Integra_logo.png")
+
+OUTPUT_DIR = os.path.join(BASE_DIR, "Output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Mi paleta institucional. Dejo también la de torta a la mano por si la necesito
+# para otro chart del dashboard más adelante.
+PALETA = [
+    "#00AECB", "#00C9EA", "#61E8FF", "#C5F7FF",
+    "#ACD7CA", "#C8E5DC", "#E3F2ED", "#B7EEFF",
+    "#AFC3E6", "#D4EAF3",
+]
+PALETA_PIE = [
+    "#3494BA", "#0070C0", "#AEC2E6", "#A1C6E7",
+    "#BAD5ED", "#C3D2ED", "#D8E7F5", "#D2EAE2",
+    "#E3F2ED", "#002060", "#686868", "#D9D9D9",
+]
+
+COLOR_LINEA = "#00AECB"
+COLOR_ZONA_FORECAST = "#E3F2ED"
+COLOR_BANDA_FEN = "#C5F7FF"
+COLOR_CERO = "#B7C4C2"
+COLOR_TEXTO_PRINCIPAL = "#002060"
+COLOR_TEXTO_SECUNDARIO = "#686868"
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Calibri", "Segoe UI", "Arial", "DejaVu Sans"]
+plt.rcParams["axes.edgecolor"] = COLOR_TEXTO_SECUNDARIO
+plt.rcParams["text.color"] = COLOR_TEXTO_PRINCIPAL
+plt.rcParams["axes.labelcolor"] = COLOR_TEXTO_SECUNDARIO
+plt.rcParams["xtick.color"] = COLOR_TEXTO_SECUNDARIO
+plt.rcParams["ytick.color"] = COLOR_TEXTO_SECUNDARIO
+
+MESES = {
+    "Ene": 1, "Feb": 2, "Mar": 3, "Abr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Ago": 8, "Set": 9, "Sep": 9, "Oct": 10, "Nov": 11, "Dic": 12,
+}
+
+
+# ============================================================
+# UTILIDADES DE LECTURA
+# ============================================================
+
+def _parse_valor(v):
+    """Convierto a float, porque varias celdas del BCRP vienen como texto con coma decimal."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def cargar_primario_mensual(path_bcrp):
+    """
+    Leo la hoja 'Mensuales' y me quedo con la columna de Sectores Primarios
+    (var. % interanual). La elijo como base porque es la única serie del archivo
+    que trae el dato de primario completo y sin huecos, desde 1995.
+    """
+    wb = openpyxl.load_workbook(path_bcrp, data_only=True)
+    ws = wb["Mensuales"]
+
+    datos = []
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        etiqueta = row[0]
+        if not etiqueta:
+            continue
+        mes_txt, anio_txt = etiqueta[:3], etiqueta[3:]
+        if mes_txt not in MESES:
+            continue
+        anio = int(anio_txt)
+        anio = 2000 + anio if anio < 50 else 1900 + anio
+        primario = _parse_valor(row[2])
+        if primario is not None:
+            datos.append((anio, MESES[mes_txt], primario))
+    return datos
+
+
+def construir_serie_anual_primario(datos_mensuales):
+    """
+    El archivo del BCRP no trae un agregado anual de PBI primario después de 1952
+    (la hoja 'anual' deja de traer esa columna justo ahí), así que reconstruyo el
+    dato anual como el promedio simple de las 12 variaciones interanuales mensuales
+    de cada año. Solo calculo el promedio en años con los 12 meses completos, para
+    no mezclar un año cerrado con uno parcial.
+    """
+    por_anio = defaultdict(list)
+    for anio, _mes, valor in datos_mensuales:
+        por_anio[anio].append(valor)
+
+    serie = {anio: sum(vals) / len(vals) for anio, vals in por_anio.items() if len(vals) == 12}
+    return dict(sorted(serie.items()))
+
+
+def cargar_proyeccion_ri2026(path_bcrp):
+    """
+    Leo la fila de PBI primario del Reporte de Inflación 2026: el dato 2025 ya
+    cerrado y la proyección más reciente del BCRP (RI Jun.26) para 2026 y 2027,
+    que es la que uso para el tramo forecast del chart.
+    """
+    wb = openpyxl.load_workbook(path_bcrp, data_only=True)
+    ws = wb["Reporte de Inflacion 2026"]
+
+    encabezados = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+
+    fila_primario = None
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] and "primario" in str(row[0]).lower():
+            fila_primario = row
+            break
+    if fila_primario is None:
+        raise ValueError("No encontré la fila de PBI primario en 'Reporte de Inflacion 2026'.")
+
+    valores = {encabezados[i]: _parse_valor(fila_primario[i]) for i in range(1, len(encabezados))}
+
+    return {
+        2025: valores.get(2025),
+        2026: valores.get("2026 RI Jun.26*"),
+        2027: valores.get("2027 RI Jun.26*"),
+    }
+
+
+def cargar_episodios_fen(path_memoria):
+    """
+    Leo el catálogo de FEN de la Memoria (hoja p41) y me quedo solo con los
+    episodios Fuerte y Extraordinario: son los que de verdad mueven la aguja
+    del PBI primario y los que quiero sombrear en el chart, sin saturarlo con
+    los episodios Débil/Moderado que casi no dejan huella en la serie.
+    """
+    wb = openpyxl.load_workbook(path_memoria, data_only=True)
+    ws = wb["p41"]
+
+    episodios = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        anio_ini, mes_ini, anio_fin, mes_fin, _duracion, magnitud = row
+        if magnitud not in ("Fuerte", "Extraordinario"):
+            continue
+        inicio_dec = anio_ini + (mes_ini - 1) / 12
+        fin_dec = anio_fin + (mes_fin - 1) / 12
+        etiqueta_anios = f"{anio_ini}" if anio_ini == anio_fin else f"{anio_ini}-{str(anio_fin)[-2:]}"
+        episodios.append({
+            "inicio": inicio_dec,
+            "fin": fin_dec,
+            "magnitud": magnitud,
+            "label": f"FEN {magnitud}\n{etiqueta_anios}",
+        })
+    return episodios
+
+
+# ============================================================
+# CHART #1 — TERMÓMETRO FEN
+# ============================================================
+
+def construir_chart_termometro_fen(serie_anual, proyeccion, episodios, ax, anio_inicio=1995):
+    """
+    Grafico el PBI primario: línea sólida con el histórico observado (reconstruido
+    a partir del promedio de las variaciones mensuales interanuales), sombreado en
+    los años de FEN Fuerte/Extraordinario dentro del rango de datos, y un tramo
+    final punteado con la proyección del BCRP (RI Jun.26) para 2026-2027.
+    """
+    fig = ax.figure
+
+    anios_obs = [a for a in serie_anual if a >= anio_inicio]
+    valores_obs = [serie_anual[a] for a in anios_obs]
+
+    # Para el año 2025 uso la cifra oficial que publica el propio Reporte de
+    # Inflación (columna '2025'), en vez de mi promedio mensual: así el tramo
+    # forecast arranca exactamente del mismo ancla que usa el BCRP.
+    if proyeccion.get(2025) is not None and 2025 in anios_obs:
+        valores_obs[anios_obs.index(2025)] = proyeccion[2025]
+
+    ultimo_anio_obs = anios_obs[-1]
+    anios_fc = [ultimo_anio_obs, 2026, 2027]
+    valores_fc = [valores_obs[-1], proyeccion[2026], proyeccion[2027]]
+
+    # Sombreo los episodios FEN primero, para que queden detrás de la línea.
+    # axvspan usa coordenadas de ejes en el eje Y, así que cubre todo el alto
+    # del chart sin que me importe todavía cuál va a ser el ylim final.
+    for ep in episodios:
+        ini, fin = max(ep["inicio"], anio_inicio), min(ep["fin"], 2027.4)
+        if fin <= anio_inicio:
+            continue
+        ax.axvspan(ini, fin, color=COLOR_BANDA_FEN, alpha=0.7, zorder=1, lw=0)
+
+    # Zona de forecast, para separar visualmente lo observado de la proyección.
+    ax.axvspan(ultimo_anio_obs, 2027.4, color=COLOR_ZONA_FORECAST, alpha=0.6, zorder=0, lw=0)
+
+    ax.axhline(0, color=COLOR_CERO, linewidth=0.9, zorder=2)
+
+    ax.plot(anios_obs, valores_obs, color=COLOR_LINEA, linewidth=2.2,
+             zorder=3, solid_capstyle="round", label="Observado")
+    ax.plot(anios_fc, valores_fc, color=COLOR_LINEA, linewidth=2.2,
+             linestyle=(0, (4, 2)), zorder=3, solid_capstyle="round", label="Proyección BCRP")
+    ax.scatter([2026, 2027], [proyeccion[2026], proyeccion[2027]],
+                color=COLOR_LINEA, s=26, zorder=4)
+
+    ax.set_xlim(anio_inicio - 0.5, 2027.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.grid(False)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.tick_params(axis="both", which="both", length=0, labelsize=8.5)
+
+    # Dejo espacio arriba para las etiquetas de los episodios FEN y las
+    # anotaciones de la proyección, una vez que matplotlib ya autoescaló el eje Y.
+    fig.canvas.draw()
+    ymin, ymax = ax.get_ylim()
+    margen_top = (ymax - ymin) * 0.30
+    ax.set_ylim(ymin - (ymax - ymin) * 0.04, ymax + margen_top)
+    y_label_fen = ymax + margen_top * 0.42
+
+    for ep in episodios:
+        ini, fin = max(ep["inicio"], anio_inicio), min(ep["fin"], 2027.4)
+        if fin <= anio_inicio:
+            continue
+        ax.text((ini + fin) / 2, y_label_fen, ep["label"], ha="center", va="bottom",
+                 fontsize=7.2, color=COLOR_TEXTO_SECUNDARIO, linespacing=1.25)
+
+    ax.annotate(
+        f"{proyeccion[2026]:+.1f}%",
+        xy=(2026, proyeccion[2026]), xytext=(2026, proyeccion[2026] - (ymax - ymin) * 0.16),
+        ha="center", va="top", fontsize=9, color=COLOR_TEXTO_PRINCIPAL, fontweight="bold",
+    )
+    ax.annotate(
+        f"{proyeccion[2027]:+.1f}%",
+        xy=(2027, proyeccion[2027]), xytext=(2027, proyeccion[2027] + (ymax - ymin) * 0.13),
+        ha="center", va="bottom", fontsize=9, color=COLOR_TEXTO_PRINCIPAL, fontweight="bold",
+    )
+
+    ax.set_title(
+        "PBI primario: intensamente cíclico al ritmo del FEN",
+        fontsize=12, color=COLOR_TEXTO_PRINCIPAL, fontweight="bold", loc="left", pad=28,
+    )
+    ax.text(
+        0, 1.03,
+        "El BCRP proyecta una nueva contracción en 2026 y recuperación en 2027, tras el FEN 2023-24",
+        transform=ax.transAxes, fontsize=9, color=COLOR_TEXTO_SECUNDARIO, ha="left", va="bottom",
+    )
+    ax.text(
+        1, -0.14,
+        "Var. % interanual, anual  ·  sombreado: FEN Fuerte/Extraordinario  ·  punteado: proyección BCRP (RI Jun.26)",
+        transform=ax.transAxes, fontsize=7, color=COLOR_TEXTO_SECUNDARIO, ha="right", va="top",
+    )
+
+    return ax
+
+
+# ============================================================
+# REGISTRO DE CHARTS DEL DASHBOARD
+# Voy agregando acá cada chart nuevo como una entrada más, sin tocar
+# la función que arma la grilla del dashboard.
+# ============================================================
+
+def _chart_termometro_fen(ax):
+    datos_mensuales = cargar_primario_mensual(ARCHIVO_BCRP)
+    serie_anual = construir_serie_anual_primario(datos_mensuales)
+    proyeccion = cargar_proyeccion_ri2026(ARCHIVO_BCRP)
+    episodios = cargar_episodios_fen(ARCHIVO_MEMORIA)
+    construir_chart_termometro_fen(serie_anual, proyeccion, episodios, ax)
+
+
+CHARTS_DASHBOARD = {
+    "termometro_fen": _chart_termometro_fen,
+    # Acá agrego los siguientes charts del dashboard cuando los tenga listos,
+    # por ejemplo: "descomposicion_sectorial": _chart_descomposicion_sectorial,
+}
+
+
+def _agregar_logo(fig):
+    """Pego el logo de Integra en la esquina si el archivo existe; si no, sigo sin él."""
+    if not os.path.isfile(ARCHIVO_LOGO):
+        return
+    try:
+        logo = mpimg.imread(ARCHIVO_LOGO)
+        ax_logo = fig.add_axes([0.90, 0.90, 0.09, 0.09], anchor="NE", zorder=10)
+        ax_logo.imshow(logo)
+        ax_logo.axis("off")
+    except Exception:
+        pass
+
+
+def ensamblar_dashboard(nombres_charts, filas=1, columnas=1, figsize_por_chart=(10, 5)):
+    """
+    Armo la grilla del dashboard a partir de los nombres registrados en
+    CHARTS_DASHBOARD. Con un solo chart hoy me basta 1x1, pero la grilla ya
+    queda lista para cuando agregue más y solo tenga que ajustar filas/columnas.
+    """
+    ancho = figsize_por_chart[0] * columnas
+    alto = figsize_por_chart[1] * filas
+    fig, axes = plt.subplots(filas, columnas, figsize=(ancho, alto), dpi=170)
+
+    if filas * columnas == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+
+    for nombre, ax in zip(nombres_charts, axes):
+        CHARTS_DASHBOARD[nombre](ax)
+
+    for ax_sobrante in axes[len(nombres_charts):]:
+        ax_sobrante.axis("off")
+
+    _agregar_logo(fig)
+    fig.patch.set_facecolor("white")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    return fig
+
+
+def exportar_png(fig, nombre_archivo):
+    """Exporto en alta resolución, listo para pegar directo en PowerPoint."""
+    ruta = os.path.join(OUTPUT_DIR, nombre_archivo)
+    fig.savefig(ruta, dpi=300, bbox_inches="tight", facecolor="white")
+    return ruta
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    fig = ensamblar_dashboard(["termometro_fen"])
+    ruta_exportada = exportar_png(fig, "01_termometro_fen.png")
+    print(f"Chart exportado en: {ruta_exportada}")
+    plt.show()
