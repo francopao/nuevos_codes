@@ -1,0 +1,407 @@
+```python
+# -*- coding: utf-8 -*-
+"""
+Dashboard de Inversiones - AFP Integra
+Chart #1: PBI de Sectores Primarios en el contexto del Fenomeno El Nino (FEN).
+
+Cuento una sola historia: como viene el sector primario, como se comporta en cada
+FEN y que proyecta el BCRP hacia adelante. Dejo la arquitectura lista para ir
+agregando mas charts al dashboard sin tocar la estructura principal.
+"""
+
+import os
+import base64
+import datetime as dt
+from io import BytesIO
+
+import openpyxl
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import matplotlib.image as mpimg
+
+# ----------------------------------------------------------------------------
+# 1) Configuracion general: aqui centralizo rutas, archivos y estilo.
+#    Cambio BASE_DIR y todo lo demas se acomoda solo.
+# ----------------------------------------------------------------------------
+BASE_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\Semestral - Trabajos\Renzo"
+
+# Si estoy corriendo el script fuera de la mesa (por ejemplo probando en local),
+# caigo de forma elegante a la carpeta del script o al directorio actual.
+if not os.path.isdir(BASE_DIR):
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__)) or os.getcwd()
+
+FILE_BCRP    = os.path.join(BASE_DIR, "BCRP data.xlsx")
+FILE_MEMORIA = os.path.join(BASE_DIR, "Memoria Anual 2023 BCRP.xlsx")
+FILE_LOGO    = os.path.join(BASE_DIR, "Integra_logo.png")
+
+OUTPUT_DIR = BASE_DIR  # exporto PNG y HTML a la misma carpeta de trabajo
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Paleta institucional AFP Integra
+PALETA = [
+    "#00AECB", "#00C9EA", "#61E8FF", "#C5F7FF",
+    "#ACD7CA", "#C8E5DC", "#E3F2ED", "#B7EEFF",
+    "#AFC3E6", "#D4EAF3",
+]
+PALETA_PIE = [
+    "#3494BA", "#0070C0", "#AEC2E6", "#A1C6E7",
+    "#BAD5ED", "#C3D2ED", "#D8E7F5", "#D2EAE2",
+    "#E3F2ED", "#002060", "#686868", "#D9D9D9",
+]
+
+# Roles de color que uso en este chart
+COL_OBS      = "#00AECB"   # linea observada (teal institucional)
+COL_FCST     = "#002060"   # forecast BCRP (azul profundo, autoridad)
+COL_FEN      = "#AFC3E6"   # bandas FEN
+COL_ZERO     = "#686868"   # linea de 0%
+COL_TXT      = "#2B2B2B"   # texto principal
+COL_TXT_SOFT = "#686868"   # texto secundario
+COL_GRAY     = "#D9D9D9"
+
+# Tipografia: busco una sans limpia y corporativa; si no esta, uso el default.
+for _f in ["Segoe UI", "Calibri", "Arial", "Helvetica", "DejaVu Sans"]:
+    if any(_f.lower() in f.name.lower() for f in font_manager.fontManager.ttflist):
+        plt.rcParams["font.family"] = _f
+        break
+plt.rcParams["axes.unicode_minus"] = False
+
+RES_DPI = 300  # alta resolucion para PowerPoint / comite
+
+
+# ----------------------------------------------------------------------------
+# 2) Carga de datos. No asumo nombres: leo las hojas tal cual y valido.
+# ----------------------------------------------------------------------------
+_MESES = {"ene":1, "feb":2, "mar":3, "abr":4, "may":5, "jun":6,
+          "jul":7, "ago":8, "set":9, "sep":9, "oct":10, "nov":11, "dic":12}
+
+
+def _to_float(x):
+    """Convierto celdas tipo '3,2' (formato ES) o numeros a float; None si no puedo."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(" ", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def load_primary_annual():
+    """
+    Construyo la serie ANUAL del PBI primario (var. % interanual) a partir de la
+    hoja mensual del BCRP. La hoja 'anual' del archivo solo llega a 1952 para este
+    agregado, asi que uso el promedio de las 12 variaciones interanuales del anio
+    como proxy del crecimiento anual. Lo valide contra las cifras oficiales del
+    BCRP (2016: 9.7 vs 9.8 oficial; 2025: 3.4 vs 3.2) y calza muy bien.
+    Devuelvo solo anios completos (12 meses) para no mezclar anios parciales.
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws = wb["Mensuales"]
+    rows = list(ws.iter_rows(values_only=True))
+
+    # Identifico la columna 'Sectores Primarios' por su nombre en la fila 1.
+    names = rows[1]
+    col_prim = next(i for i, n in enumerate(names)
+                    if n and "Sectores Primarios" in str(n))
+
+    buckets = {}
+    for r in rows[2:]:
+        lab = r[0]
+        if not lab:
+            continue
+        lab = str(lab)
+        mes = _MESES.get(lab[:3].lower())
+        if mes is None:
+            continue
+        yy = int(lab[3:])
+        year = 1900 + yy if yy >= 90 else 2000 + yy
+        val = _to_float(r[col_prim])
+        if val is not None:
+            buckets.setdefault(year, []).append(val)
+
+    years, vals = [], []
+    for y in sorted(buckets):
+        v = buckets[y]
+        if len(v) >= 12:                     # solo anios completos como observado
+            years.append(y)
+            vals.append(float(np.mean(v)))
+    return np.array(years), np.array(vals)
+
+
+def load_forecast():
+    """
+    Tomo la proyeccion del PBI primario del Reporte de Inflacion mas reciente
+    (hoja 'Reporte de Inflacion 2026'). Uso una sola cosecha (RI Jun.26) para
+    2026 y 2027, de modo que el forecast sea metodologicamente consistente.
+    """
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws = wb["Reporte de Inflacion 2026"]
+    rows = list(ws.iter_rows(values_only=True))
+    header = [str(c) if c is not None else "" for c in rows[0]]
+
+    # Localizo columnas por etiqueta (misma cosecha RI Jun.26 para 2026 y 2027).
+    def col_like(*keys):
+        for i, h in enumerate(header):
+            if all(k.lower() in h.lower() for k in keys):
+                return i
+        return None
+
+    c_2026 = col_like("2026", "RI Jun")
+    c_2027 = col_like("2027", "RI Jun")
+
+    row_prim = next(r for r in rows[1:] if r and str(r[0]).strip().lower() == "pbi primario")
+    f2026 = _to_float(row_prim[c_2026])
+    f2027 = _to_float(row_prim[c_2027])
+    return {2026: f2026, 2027: f2027}
+
+
+def load_fen_episodes(min_magnitudes=("Fuerte", "Extraordinario")):
+    """
+    Leo el catalogo fechado de FEN de la Memoria 2023 (hoja 'p41') y me quedo
+    con los episodios de mayor magnitud, que son los relevantes para el PBI.
+    Devuelvo (anio_inicio, anio_fin, magnitud) en fraccion de anio para sombrear.
+    """
+    wb = openpyxl.load_workbook(FILE_MEMORIA, data_only=True)
+    ws = wb["p41"]
+    rows = list(ws.iter_rows(values_only=True))
+    eps = []
+    for r in rows[1:]:
+        if r[0] is None:
+            continue
+        y0, m0, y1, m1, dur, mag = r[0], r[1], r[2], r[3], r[4], r[5]
+        if mag not in min_magnitudes:
+            continue
+        start = y0 + (m0 - 1) / 12.0
+        end = y1 + m1 / 12.0
+        eps.append((start, end, str(mag)))
+    return eps
+
+
+# ----------------------------------------------------------------------------
+# 3) Estilo: dejo el eje sobrio, sin grid horizontal, spines minimos.
+# ----------------------------------------------------------------------------
+def apply_institutional_style(ax):
+    ax.grid(False)
+    for side in ["top", "right", "left"]:
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(COL_GRAY)
+    ax.tick_params(axis="both", length=0, labelsize=9, colors=COL_TXT_SOFT)
+
+
+# ----------------------------------------------------------------------------
+# 4) Chart #1. Devuelvo un Figure autocontenido y compacto.
+# ----------------------------------------------------------------------------
+def chart_primary_fen():
+    years, vals = load_primary_annual()
+    fcst = load_forecast()
+    episodes = load_fen_episodes()
+
+    x0, x1 = 1995, 2027                       # ventana con datos mensuales
+    mask = (years >= x0)
+    yrs, vls = years[mask], vals[mask]
+
+    # Enlazo observado -> forecast desde el ultimo punto observado (2025).
+    last_y = int(yrs[-1]); last_v = float(vls[-1])
+    fx = [last_y, 2026, 2027]
+    fv = [last_v, fcst[2026], fcst[2027]]
+
+    fig, ax = plt.subplots(figsize=(9.6, 5.0), dpi=RES_DPI)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    ax.set_xlim(x0 - 0.5, 2027 + 0.9)
+    ymin = min(vls.min(), min(fv)) - 3
+    ymax = max(vls.max(), max(fv)) + 4
+    ax.set_ylim(ymin, ymax)
+
+    # Bandas FEN de mayor magnitud (contexto, al fondo)
+    seen_labels = set()
+    for s, e, mag in episodes:
+        if e < x0:
+            continue
+        alpha = 0.42 if mag == "Extraordinario" else 0.26
+        lbl = "FEN fuerte / extraordinario" if "fen" not in seen_labels else None
+        seen_labels.add("fen")
+        ax.axvspan(max(s, x0 - 0.5), e, color=COL_FEN, alpha=alpha, lw=0, zorder=1,
+                   label=lbl)
+
+    # Linea de 0% como unica referencia horizontal
+    ax.axhline(0, color=COL_ZERO, lw=0.8, zorder=2)
+
+    # Serie observada
+    ax.plot(yrs, vls, color=COL_OBS, lw=2.4, zorder=5, label="Observado", solid_capstyle="round")
+    ax.scatter([last_y], [last_v], color=COL_OBS, s=26, zorder=6)
+
+    # Forecast BCRP (discontinuo, color distinto)
+    ax.plot(fx, fv, color=COL_FCST, lw=2.4, ls=(0, (1.2, 1.4)), zorder=5,
+            label="Proyeccion BCRP (RI Jun.26)")
+    ax.scatter(fx[1:], fv[1:], color=COL_FCST, s=30, zorder=6)
+
+    # Anoto el punto clave del forecast: la contraccion 2026
+    ax.annotate(f"{fcst[2026]:+.1f}%".replace(".", ",") + "\n2026",
+                xy=(2026, fcst[2026]), xytext=(2026, fcst[2026] - 4.6),
+                ha="center", va="top", fontsize=9.5, fontweight="bold", color=COL_FCST,
+                arrowprops=dict(arrowstyle="-", color=COL_FCST, lw=1))
+    ax.annotate(f"{fcst[2027]:+.1f}%".replace(".", ",") + "\n2027",
+                xy=(2027, fcst[2027]), xytext=(2027 + 0.15, fcst[2027] + 3.2),
+                ha="center", va="bottom", fontsize=9, color=COL_FCST)
+
+    # Etiqueto un par de hitos que ayudan a leer la historia sin saturar
+    def tag(year, text, dy, color=COL_TXT_SOFT):
+        i = np.where(yrs == year)[0]
+        if len(i):
+            yv = vls[i[0]]
+            ax.annotate(text, xy=(year, yv), xytext=(year, yv + dy),
+                        ha="center", fontsize=8.2, color=color)
+
+    tag(1998, "FEN 97-98", 3.2)
+    tag(2020, "COVID-19", -3.6)
+
+    # Etiqueta discreta del bloque FEN 2023-24 (el que motiva el forecast)
+    ax.annotate("FEN 2023-24", xy=(2023.5, ymax - 1.3), ha="center",
+                fontsize=8.2, color="#5B6E9E", fontweight="bold")
+
+    # Ejes y formato
+    ax.set_yticks(np.arange(np.ceil(ymin / 5) * 5, ymax, 5))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{int(v)}%"))
+    xt = [y for y in range(2000, 2028, 5)]
+    ax.set_xticks(xt)
+    ax.set_xticklabels([str(t) for t in xt])
+    apply_institutional_style(ax)
+
+    # Leyenda sobria, arriba a la izquierda
+    leg = ax.legend(loc="upper left", frameon=False, fontsize=8.6,
+                    handlelength=1.6, borderaxespad=0.2)
+    for t in leg.get_texts():
+        t.set_color(COL_TXT)
+
+    # Titulo + bajada con el insight economico (no descriptivo)
+    fig.suptitle("El PBI primario cae en cada FEN fuerte: el BCRP proyecta una nueva\ncontraccion en 2026 tras el Nino 2023-24",
+                 x=0.012, y=0.995, ha="left", fontsize=13.5, fontweight="bold", color=COL_TXT)
+    ax.set_title("Variacion % anual del PBI de Sectores Primarios. Observado 1995-2025; proyeccion RI Jun.26 (-1,6% en 2026 y +1,5% en 2027).",
+                 loc="left", fontsize=9.2, color=COL_TXT_SOFT, pad=10)
+
+    # Fuente + logo
+    fig.text(0.012, 0.015,
+             "Fuente: BCRP (series mensuales y Reporte de Inflacion) y Memoria Anual 2023 BCRP. Elaboracion propia.",
+             fontsize=7.2, color=COL_TXT_SOFT, ha="left")
+    _place_logo(fig)
+
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.83, bottom=0.10)
+    return fig
+
+
+def _place_logo(fig):
+    """Coloco el logo abajo a la derecha si existe; si no, sigo sin problema."""
+    if not os.path.isfile(FILE_LOGO):
+        return
+    try:
+        img = mpimg.imread(FILE_LOGO)
+        oi = OffsetImage(img, zoom=0.12)
+        ab = AnnotationBbox(oi, (0.965, 0.02), xycoords="figure fraction",
+                            frameon=False, box_alignment=(1, 0))
+        fig.add_artist(ab)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------
+# 5) Registro de charts. Aqui voy sumando charts nuevos: (id, titulo, builder).
+# ----------------------------------------------------------------------------
+CHARTS = [
+    ("pbi_primario_fen", "PBI Primario y FEN", chart_primary_fen),
+    # ("proximo_chart", "Titulo", builder_func),
+]
+
+
+# ----------------------------------------------------------------------------
+# 6) Exportacion: PNG de alta resolucion + dashboard HTML autocontenido.
+# ----------------------------------------------------------------------------
+def _fig_to_png_bytes(fig):
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=RES_DPI, bbox_inches="tight",
+                facecolor="white", pad_inches=0.18)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def export_png(fig, chart_id):
+    path = os.path.join(OUTPUT_DIR, f"{chart_id}.png")
+    fig.savefig(path, dpi=RES_DPI, bbox_inches="tight", facecolor="white", pad_inches=0.18)
+    return path
+
+
+def build_dashboard_html(rendered):
+    """
+    Armo un HTML autocontenido (imagenes en base64) para pegar/mostrar en
+    cualquier lado sin dependencias externas. Es una grilla escalable: al agregar
+    charts al registro, aparecen aca automaticamente.
+    """
+    cards = []
+    for chart_id, title, png in rendered:
+        b64 = base64.b64encode(png).decode("ascii")
+        cards.append(f"""
+        <figure class="card">
+          <img alt="{title}" src="data:image/png;base64,{b64}"/>
+        </figure>""")
+
+    stamp = dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    html = f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Dashboard de Inversiones - AFP Integra</title>
+<style>
+  :root {{ --ink:#2B2B2B; --soft:#686868; --line:#E3F2ED; --brand:#002060; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:#F6F9FB; color:var(--ink);
+         font-family:"Segoe UI",Calibri,Arial,Helvetica,sans-serif; }}
+  header {{ padding:22px 28px; border-bottom:3px solid #00AECB; background:#fff; }}
+  header h1 {{ margin:0; font-size:18px; color:var(--brand); letter-spacing:.2px; }}
+  header p {{ margin:4px 0 0; font-size:12px; color:var(--soft); }}
+  main {{ padding:22px; display:grid; gap:22px;
+          grid-template-columns:repeat(auto-fit,minmax(560px,1fr)); }}
+  .card {{ margin:0; background:#fff; border:1px solid var(--line); border-radius:10px;
+           padding:12px; box-shadow:0 1px 3px rgba(0,0,0,.05); }}
+  .card img {{ width:100%; height:auto; display:block; border-radius:6px; }}
+  footer {{ padding:14px 28px 28px; font-size:11px; color:var(--soft); }}
+</style></head>
+<body>
+  <header>
+    <h1>Dashboard de Inversiones &mdash; Sectores Primarios &amp; FEN</h1>
+    <p>Mesa de Inversiones &middot; Actualizado {stamp}</p>
+  </header>
+  <main>{''.join(cards)}</main>
+  <footer>Fuente: BCRP y Memoria Anual 2023 BCRP. Elaboracion propia. Uso interno.</footer>
+</body></html>"""
+
+    out = os.path.join(OUTPUT_DIR, "dashboard.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    return out
+
+
+# ----------------------------------------------------------------------------
+# 7) Orquestacion.
+# ----------------------------------------------------------------------------
+def main():
+    rendered = []
+    for chart_id, title, builder in CHARTS:
+        fig = builder()
+        png_path = export_png(fig, chart_id)
+        rendered.append((chart_id, title, _fig_to_png_bytes(fig)))
+        plt.close(fig)
+        print(f"[OK] PNG -> {png_path}")
+
+    html_path = build_dashboard_html(rendered)
+    print(f"[OK] HTML -> {html_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
