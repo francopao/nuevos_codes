@@ -1,0 +1,39 @@
+El problema de fondo: Plotly ve "1998", "2017", "2023" y los trata como números pase lo que pase. La solución definitiva es que **ningún valor del eje X parezca un número**.
+
+Abre este HTML. Si ves 7 barras, el edit en tu script `new_ye3.txt` es:
+
+`Ctrl+F` → busca exactamente:
+
+```
+    labs = ["1998", "2017", "2023", "BCRP", "Larrain", "Macrocap.", "Apoyo"]
+```
+
+Reemplázalo por:
+
+```python
+    labs = ["FEN 1998", "FEN 2017", "FEN 2023", "BCRP\n2026*", "Larrain\n2026*", "Macrocap.\n2026*", "Apoyo\n2026*"]
+```
+
+Y también actualiza las annotations. `Ctrl+F` → busca exactamente:
+
+```
+            fig.add_annotation(x=l, y=v + 0.04, yanchor="bottom", showarrow=False,
+```
+
+Esa línea está dentro del loop `for i, (l, v) in enumerate(zip(labs, vals))` así que las annotations usarán automáticamente los nuevos labels. No necesitas cambiar más.
+
+Solo asegúrate de que el `add_vline` también matchee. `Ctrl+F` → busca exactamente:
+
+```
+    fig.add_vline(x=2.5, line_dash="dot", line_color="#C9CED6", line_width=1)
+    fig.add_annotation(x=0.8, y=max(v for v in vals if v) * 1.20, showarrow=False,
+```
+
+Reemplázalo por:
+
+```python
+    fig.add_vline(x=2.5, line_dash="dot", line_color="#C9CED6", line_width=1)
+    fig.add_annotation(x=1, y=max(v for v in vals if v) * 1.20, showarrow=False,
+```
+
+(Cambié `x=0.8` a `x=1` para centrar mejor el texto "Observado (BCRP)" sobre las 3 primeras barras.)
