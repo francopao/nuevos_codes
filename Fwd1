@@ -1,0 +1,39 @@
+He revisado el documento página por página para ubicar exactamente de dónde sale cada dato. Aquí el mapeo completo, con el número de página de "Cartera de Proyectos Mineros 2026 v2":
+
+## Datos usados para actualizar tus charts existentes
+
+| Dato / chart a actualizar | Página(s) en el PDF de MINEM | Tabla / Gráfico / Sección |
+|---|---|---|
+| 66 proyectos, US$64,075M (total) | **p. 8-12** y **p. 28** | Tabla 01 (fila TOTAL) + intro sección 4.4 |
+| San Gabriel sale de la cartera (graduó a operación) | **p. 18** | Sección 4.1, narrativa |
+| 2025: 3 proyectos iniciaron ejecución (Raura, Ferrobamba, Tía María), US$3,634M | **p. 18** | Sección 4.1, narrativa |
+| 2026: 7 proyectos, US$4,366M (San Rafael, Huarón, Colquijirca, Esperanza, Cerro Verde, Huancapetí, Corani) | **p. 19** | Sección 4.1, narrativa |
+| 2027: 7 proyectos, US$6,014M (Coroccohuayco, Pampa de Pongo, Trapiche, Los Calatos, Mina Justa, Carahuacra-San Cristóbal, Atacocha-El Porvenir) | **p. 19** | Sección 4.1, narrativa |
+| 2029: 2 proyectos, US$2,098M (Coimolache Sulfuros, La Arena Sulfuros) | **p. 19** | Sección 4.1, narrativa |
+| 44 proyectos sin fecha (P.D.), US$44,910M, 70.1% | **p. 19** | Sección 4.1, narrativa |
+| Visual del bubble/timeline de inicio de ejecución | **p. 20** | Gráfico 02 |
+| Fechas "P.D." de Zafranal, Amp. Cuajone, Amp. Huachocolpa | **p. 8-12** | Tabla 01 (columna "Inicio/fin ejecución") |
+| 8 proyectos en etapa Ejecución (para el mapa "en construcción") | **p. 30** | Sección 4.5, narrativa |
+| US$1,936M ejecutado hasta 2025, ejecución anualizada 2026-2029 (US$1,612M / US$3,237M / US$3,522M / US$2,353M) — usado para reconstruir el "83.9% después de 2028" | **p. 37-39** | Secc. 5.1, Tabla 06, Secc. 5.2, Gráfico 12 |
+
+## Para el chart nuevo que ya armé (etapa de avance)
+
+| Dato | Página | Fuente |
+|---|---|---|
+| Ejecución 8 proy / US$7,121M / 11.1% | **p. 30** | Sección 4.5, narrativa |
+| Ingeniería de Detalle 6 proy / US$7,530M / 11.8% | **p. 30** | Sección 4.5, narrativa |
+| Factibilidad 15 proy / US$16,523M / 25.8% | **p. 30** | Sección 4.5, narrativa |
+| Pre-factibilidad 26 proy / US$21,876M / 34.1% | **p. 30** | Sección 4.5, narrativa |
+| Conceptual 11 proy / US$11,026M / 17.2% | **p. 30** | Sección 4.5, narrativa |
+| Visual de referencia (Gráfico 07) | **p. 31** | Gráfico 07 |
+
+## Para los otros 4 charts que propuse (aún no construidos)
+
+| Chart propuesto | Página(s) | Tabla / Gráfico |
+|---|---|---|
+| B. Fuente de abastecimiento de agua | **p. 31-33** | Sección 4.6, Tabla 05, Gráfico 08 |
+| C. Mix por mineral (cobre 70.9%, etc.) | **p. 35-36** | Sección 4.8, Gráfico 10 |
+| D. País de origen del inversionista | **p. 24-27** | Sección 4.3, Gráfico 05 |
+| E. Concentración por macrorregión | **p. 23-24** | Sección 4.2, Gráfico 04 |
+
+Añadí este mismo mapeo como anexo al documento de referencia para que lo tengas a mano al editar el PPT.Un detalle honesto: Tabla 01 (el listado completo de los 66 proyectos) es un bloque continuo en la extracción del PDF sin marcadores de salto de página internos, así que el rango p. 8-12 es una aproximación razonable, no exacto fila por fila. El resto de las páginas (secciones narrativas y gráficos con su caption) sí están ancladas con precisión porque cada una tiene su marcador de encabezado/pie de página explícito en el documento.
