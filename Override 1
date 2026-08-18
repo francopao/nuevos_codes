@@ -1,0 +1,65 @@
+Abre este HTML. Cambié 3 cosas clave: `type="category"` explícito en el eje X (para que 1998/2017/2023/2026* se traten como categorías y no como números), `offsetgroup` por institución, y quité `hovermode="x unified"` (que con barras dispersas rompía el render).
+
+Si aquí sí ves las barras, aplica este edit en tu script:
+
+`Ctrl+F` → busca exactamente:
+
+```python
+    # Trace BCRP: tiene dato en los 4 periodos
+    fig.add_trace(go.Bar(
+        x=all_x,
+        y=[hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023), proy_2026.get("BCRP")],
+        name="BCRP", marker_color=_INST_COLORS["BCRP"],
+        hovertemplate="<b>%{x}</b><br>Costo PBI: %{y:.1f} pp<extra>BCRP</extra>"))
+
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen dato en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=all_x,
+            y=[0, 0, 0, proy_2026.get(inst)],
+            name=inst, marker_color=_INST_COLORS[inst],
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: %{{y:.1f}} pp<extra>{inst}</extra>"))
+```
+
+Reemplázalo por:
+
+```python
+    # Trace BCRP: tiene dato en los 4 periodos
+    fig.add_trace(go.Bar(
+        x=all_x,
+        y=[hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023), proy_2026.get("BCRP")],
+        name="BCRP", marker_color=_INST_COLORS["BCRP"], offsetgroup="BCRP",
+        hovertemplate="<b>%{x}</b><br>Costo PBI: %{y:.1f} pp<extra>BCRP</extra>"))
+
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen barra en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=["2026*"],
+            y=[proy_2026.get(inst)],
+            name=inst, marker_color=_INST_COLORS[inst], offsetgroup=inst,
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: %{{y:.1f}} pp<extra>{inst}</extra>"))
+```
+
+Y un segundo edit, `Ctrl+F` → busca exactamente:
+
+```python
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11),
+                   categoryorder="array", categoryarray=all_x),
+```
+
+Reemplázalo por:
+
+```python
+        bargap=0.25, bargroupgap=0.05,
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11), type="category",
+                   categoryorder="array", categoryarray=all_x),
+```
+
+(Nota: este segundo edit es solo dentro de `chart_fen_cost`; hay `hovermode="x unified"` en otros charts, no los toques — ubícate por el bloque que tiene `categoryarray=all_x` justo debajo.)
