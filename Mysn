@@ -1,0 +1,19 @@
+¡Ahora veo el problema real! Plotly interpreta "1998", "2017", "2023" como **números** (eje numérico de 1995 a 2025), no como categorías. Por eso "BCRP", "Larrain", etc. desaparecen — no son números y no caben en un eje numérico.
+
+La solución es una sola palabra: `type: "category"` en el xaxis.
+
+Confirma que ves las 7 barras. Si sí, el edit en tu script es:
+
+`Ctrl+F` → busca exactamente (dentro de `chart_fen_cost`, no toques los otros charts):
+
+```
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+```
+
+Reemplázalo por:
+
+```python
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11), type="category"),
+```
