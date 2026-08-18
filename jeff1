@@ -1,0 +1,150 @@
+Now let me find the exact current script lines for insertion points:Como no tengo tu script exacto después de los edits que hiciste, voy a darte las instrucciones basadas en textos exactos para `Ctrl+F`. Son 2 edits, aplícalos **de abajo hacia arriba**.
+
+---
+
+**EDIT 1 — Registrar el chart en CHARTS**
+
+`Ctrl+F` → busca exactamente:
+
+```
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+]
+```
+
+Selecciona **solo esas 2 líneas** y reemplázalas por:
+
+```python
+    ("costo_pbi_fen",
+     "Costo estimado del FEN sobre el PBI: consenso apunta a -1,0 pp si es fuerte en 2026",
+     "Costo en pp del PBI total por episodio FEN. Historico (BCRP) vs. proyecciones 2026 bajo escenario Fuerte.",
+     chart_fen_cost),
+    # ("id", "Titulo (insight)", "Subtitulo", builder_func),
+]
+```
+
+---
+
+**EDIT 2 — Agregar la función `chart_fen_cost`**
+
+`Ctrl+F` → busca exactamente:
+
+```
+# 4) Chart
+```
+
+Eso es el inicio de la sección 4 (la tabla comparativa). Posiciona el cursor **justo antes** de esa línea (en la línea vacía de arriba) e inserta todo este bloque:
+
+```python
+# ----------------------------------------------------------------------------
+# 3c) Chart — Costo del FEN sobre el PBI: historico vs. proyecciones 2026.
+#     Para 1998, 2017 y 2023 uso la perdida observada (Memoria BCRP p44).
+#     Para 2026 uso las proyecciones de 4 instituciones bajo escenario Fuerte.
+# ----------------------------------------------------------------------------
+_INST_COLORS = {
+    "BCRP":           "#002060",
+    "Larrain":        "#A50034",
+    "Macrocapitales":  "#1B5E20",
+    "Apoyo":          "#C62828",
+}
+
+
+def chart_fen_cost():
+    # --- Historico: p44 de la Memoria 2023 ---
+    wb_mem = openpyxl.load_workbook(FILE_MEMORIA, data_only=True)
+    ws44 = wb_mem["p44"]
+    rows44 = list(ws44.iter_rows(values_only=True))
+    header44 = rows44[0]
+    pbi_row = next(r for r in rows44[1:] if r[0] and "PBI total" in str(r[0]))
+
+    hist_years = [1998, 2017, 2023]
+    hist_vals = {}
+    for y in hist_years:
+        ci = next(i for i, h in enumerate(header44) if isinstance(h, (int, float)) and int(h) == y)
+        v = _to_float(pbi_row[ci])
+        hist_vals[y] = -abs(v) if v is not None else None  # muestro como perdida (negativo)
+
+    # --- Proyecciones 2026: hoja "Proyeccion 2026-2027", filtro Fuerte ---
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws_proy = wb["Proyeccion 2026-2027"]
+    rows_proy = list(ws_proy.iter_rows(values_only=True))
+    instituciones = ["BCRP", "Larrain", "Macrocapitales", "Apoyo"]
+    proy_2026 = {}
+    for r in rows_proy[1:]:
+        yr = r[0]
+        mag = str(r[1]).strip().lower() if r[1] else ""
+        inst = str(r[2]).strip() if r[2] else ""
+        val = _to_float(r[3])
+        if yr == 2026 and "fuerte" in mag and inst in instituciones:
+            proy_2026[inst] = val
+
+    fig = go.Figure()
+
+    # --- Barras historicas: una barra BCRP por año ---
+    for y in hist_years:
+        v = hist_vals.get(y)
+        if v is None:
+            continue
+        fig.add_trace(go.Bar(
+            x=[str(y)], y=[v], name="BCRP" if y == hist_years[0] else None,
+            marker_color=_INST_COLORS["BCRP"], width=0.45,
+            showlegend=(y == hist_years[0]),
+            legendgroup="BCRP",
+            hovertemplate=f"<b>{y}</b><br>Costo PBI: {{y:.1f}} pp<extra>BCRP (observado)</extra>"))
+
+    # --- Barras 2026: una barra por institucion ---
+    for inst in instituciones:
+        v = proy_2026.get(inst)
+        if v is None:
+            continue
+        fig.add_trace(go.Bar(
+            x=["2026*"], y=[v], name=inst,
+            marker_color=_INST_COLORS[inst], width=0.45,
+            showlegend=(inst != "BCRP"),
+            legendgroup=inst,
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: {{y:.1f}} pp<extra>{inst}</extra>"))
+
+    # --- Annotations sobre cada barra ---
+    for y in hist_years:
+        v = hist_vals.get(y)
+        if v is not None:
+            fig.add_annotation(
+                x=str(y), y=v - 0.12, yanchor="top", showarrow=False,
+                text="<b>{:.1f}</b>".format(v).replace(".", ","),
+                font=dict(size=11, color=_INST_COLORS["BCRP"]))
+
+    # Para 2026 anoto el valor del BCRP como referencia
+    bcrp_26 = proy_2026.get("BCRP")
+    if bcrp_26 is not None:
+        fig.add_annotation(
+            x="2026*", y=min(proy_2026.values()) - 0.15, yanchor="top", showarrow=False,
+            text="Consenso: ~ {:.1f} pp".format(np.mean(list(proy_2026.values()))).replace(".", ","),
+            font=dict(size=10, color=COL_TXT_SOFT))
+
+    ymin = min(list(hist_vals.values()) + list(proy_2026.values())) * 1.45
+    fig.update_layout(
+        barmode="group",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11),
+                   categoryorder="array", categoryarray=["1998", "2017", "2023", "2026*"]),
+        yaxis=dict(range=[ymin, 0.3],
+                   title=dict(text="Puntos porcentuales del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10), zeroline=True,
+                   zerolinecolor=COL_ZERO, zerolinewidth=1,
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+
+
+```
+
+(Asegúrate de que quede una línea en blanco entre el cierre de `chart_fen_cost` y el `# 4) Chart` que ya existía.)
+
+---
+
+Eso es todo. Guarda y ejecuta. El dashboard ahora muestra 4 cards: el chart de línea del PBI primario, el chart de barras del gasto fiscal, el nuevo chart de costo del FEN sobre el PBI, y la tabla comparativa con slicer.
