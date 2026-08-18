@@ -1,0 +1,29 @@
+Data y CDN están correctos ahora. El problema es el `barmode="group"` con traces que tienen `null` en 3 de 4 categorías: en plotly.js 3.x, un grupo con un solo miembro no-nulo colapsa el ancho de barra a casi cero. Voy a cambiar el enfoque: uso `None` pero fuerzo el ancho y el modo de grupo correctamente reemplazando `null` por valores que rendericen.
+
+Déjame verificar la solución real:
+
+Can't render images here. Let me build both as HTML and reason about the fix. The real issue with `null` in grouped bars: plotly.js 3.x still reserves 4 slots per group even when only one has data, making each bar 1/4 width and often clipped. The robust fix is to replace `None` with `0` — but that draws a zero-height bar which is fine, or better, use a single categorical grouping. Let me test the cleanest fix:
+
+Confirma si en este HTML ves las 4 barras del BCRP (1998, 2017, 2023, 2026*) más las 3 barras de Larrain/Macrocapitales/Apoyo agrupadas en 2026*. Si se ven bien, este es el edit:
+
+`Ctrl+F` → busca exactamente:
+
+```python
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen dato en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=all_x,
+            y=[None, None, None, proy_2026.get(inst)],
+```
+
+Reemplaza esas 4 líneas por:
+
+```python
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen dato en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=all_x,
+            y=[0, 0, 0, proy_2026.get(inst)],
+```
+
+El único cambio es `[None, None, None, ...]` → `[0, 0, 0, ...]`. En plotly.js 3.x los `null` en barras agrupadas colapsan el ancho de todas las barras; con `0` cada barra rinde con su ancho correcto (las de valor 0 son invisibles de todos modos).
