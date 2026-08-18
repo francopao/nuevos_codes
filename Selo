@@ -1,0 +1,66 @@
+El chart que funciona (`chart_fen_fiscal`) tiene un patrón claro: cada trace es una **lista completa** sobre las mismas etiquetas, con `width` explícito, y **sin** los extras que yo te fui agregando (`type="category"`, `offsetgroup`, `categoryorder`, `categoryarray`). Esos extras míos eran justamente lo que rompía el render. Vamos a replicar el patrón de fiscal tal cual.
+
+Primero verifica este HTML aislado (mismo recipe que fiscal, con los datos de costo):
+
+Confirma si aquí ves las barras. Si funciona, este es el edit único.
+
+`Ctrl+F` → busca exactamente:
+
+```python
+    # --- Todos los traces comparten las mismas 4 categorias X ---
+    all_x = ["1998", "2017", "2023", "2026*"]
+
+    # Trace BCRP: tiene dato en los 4 periodos
+    fig.add_trace(go.Bar(
+        x=all_x,
+        y=[hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023), proy_2026.get("BCRP")],
+        name="BCRP", marker_color=_INST_COLORS["BCRP"], offsetgroup="BCRP",
+        hovertemplate="<b>%{x}</b><br>Costo PBI: %{y:.1f} pp<extra>BCRP</extra>"))
+
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen barra en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=["2026*"],
+            y=[proy_2026.get(inst)],
+            name=inst, marker_color=_INST_COLORS[inst], offsetgroup=inst,
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: %{{y:.1f}} pp<extra>{inst}</extra>"))
+```
+
+Reemplázalo por:
+
+```python
+    # Mismo patron que chart_fen_fiscal: x = labs y cada trace es una lista
+    # completa sobre las mismas 4 etiquetas, con width explicito. Donde no hay
+    # dato uso None (asi la barra simplemente no aparece).
+    labs = ["1998", "2017", "2023", "2026*"]
+
+    series = {
+        "BCRP":           [hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023), proy_2026.get("BCRP")],
+        "Larrain":        [None, None, None, proy_2026.get("Larrain")],
+        "Macrocapitales": [None, None, None, proy_2026.get("Macrocapitales")],
+        "Apoyo":          [None, None, None, proy_2026.get("Apoyo")],
+    }
+
+    for inst, vals in series.items():
+        fig.add_trace(go.Bar(
+            x=labs, y=vals, name=inst,
+            marker_color=_INST_COLORS[inst], width=0.20,
+            hovertemplate="<b>%{x}</b><br>" + inst + ": %{y:.1f} pp<extra></extra>"))
+```
+
+Segundo edit (quitar los extras que rompían el eje). `Ctrl+F` → busca exactamente:
+
+```python
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11), type="category",
+                   categoryorder="array", categoryarray=all_x),
+```
+
+Reemplázalo por:
+
+```python
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+```
+
+Y si en ese mismo bloque `update_layout` tienes la línea `bargap=0.25, bargroupgap=0.05,` (que te agregué antes), bórrala — el patrón de fiscal no la usa.
