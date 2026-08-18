@@ -1,0 +1,105 @@
+Encontré los 2 problemas:
+
+1. **Valores negativos** — las barras van para abajo (y=-1.7, -0.8, etc.) y el rango del eje Y es `[-2.47, 0.3]`, así que el chart muestra barras apuntando hacia abajo que son difíciles de ver. Tú quieres todo **positivo**.
+2. **Traces históricos con `name=None`** — los años 2017 y 2023 tienen `name=None` lo cual causa problemas en la leyenda de Plotly (se muestra "trace" vacío).
+
+Un solo edit. `Ctrl+F` → busca exactamente:
+
+```python
+def chart_fen_cost():
+```
+
+Selecciona desde esa línea hasta el `return fig` de esa misma función (incluido). El `return fig` correcto es el que está **justo antes** de la línea `# 4) Chart`. Reemplaza todo ese bloque por:
+
+```python
+def chart_fen_cost():
+    # --- Historico: p44 de la Memoria 2023 ---
+    wb_mem = openpyxl.load_workbook(FILE_MEMORIA, data_only=True)
+    ws44 = wb_mem["p44"]
+    rows44 = list(ws44.iter_rows(values_only=True))
+    header44 = rows44[0]
+    pbi_row = next(r for r in rows44[1:] if r[0] and "PBI total" in str(r[0]))
+
+    hist_years = [1998, 2017, 2023]
+    hist_vals = {}
+    for y in hist_years:
+        ci = next(i for i, h in enumerate(header44) if isinstance(h, (int, float)) and int(h) == y)
+        v = _to_float(pbi_row[ci])
+        hist_vals[y] = abs(v) if v is not None else None  # siempre positivo
+
+    # --- Proyecciones 2026: hoja "Proyeccion 2026-2027", filtro Fuerte ---
+    wb = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws_proy = wb["Proyeccion 2026-2027"]
+    rows_proy = list(ws_proy.iter_rows(values_only=True))
+    instituciones = ["BCRP", "Larrain", "Macrocapitales", "Apoyo"]
+    proy_2026 = {}
+    for r in rows_proy[1:]:
+        yr = r[0]
+        mag = str(r[1]).strip().lower() if r[1] else ""
+        inst = str(r[2]).strip() if r[2] else ""
+        val = _to_float(r[3])
+        if yr == 2026 and "fuerte" in mag and inst in instituciones:
+            proy_2026[inst] = abs(val) if val is not None else None  # siempre positivo
+
+    fig = go.Figure()
+
+    # --- Barras historicas: una barra BCRP por anio ---
+    hist_x = [str(y) for y in hist_years]
+    hist_y = [hist_vals.get(y) for y in hist_years]
+    fig.add_trace(go.Bar(
+        x=hist_x, y=hist_y, name="BCRP",
+        marker_color=_INST_COLORS["BCRP"], width=0.45,
+        legendgroup="BCRP",
+        hovertemplate="<b>%{x}</b><br>Costo PBI: %{y:.1f} pp<extra>BCRP (observado)</extra>"))
+
+    # --- Barras 2026: una barra por institucion ---
+    for inst in instituciones:
+        v = proy_2026.get(inst)
+        if v is None:
+            continue
+        fig.add_trace(go.Bar(
+            x=["2026*"], y=[v], name=inst,
+            marker_color=_INST_COLORS[inst], width=0.45,
+            showlegend=(inst != "BCRP"),
+            legendgroup=inst,
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: {{y:.1f}} pp<extra>{inst}</extra>"))
+
+    # --- Annotations sobre cada barra historica ---
+    for y in hist_years:
+        v = hist_vals.get(y)
+        if v is not None:
+            fig.add_annotation(
+                x=str(y), y=v + 0.08, yanchor="bottom", showarrow=False,
+                text="<b>{:.1f}</b>".format(v).replace(".", ","),
+                font=dict(size=11, color=_INST_COLORS["BCRP"]))
+
+    # Para 2026 anoto el consenso como referencia
+    if proy_2026:
+        vals_26 = [v for v in proy_2026.values() if v is not None]
+        fig.add_annotation(
+            x="2026*", y=max(vals_26) + 0.08, yanchor="bottom", showarrow=False,
+            text="Consenso: ~ {:.1f} pp".format(np.mean(vals_26)).replace(".", ","),
+            font=dict(size=10, color=COL_TXT_SOFT))
+
+    all_vals = [v for v in list(hist_vals.values()) + list(proy_2026.values()) if v is not None]
+    ymax = max(all_vals) * 1.35
+    fig.update_layout(
+        barmode="group",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11),
+                   categoryorder="array", categoryarray=["1998", "2017", "2023", "2026*"]),
+        yaxis=dict(range=[0, ymax],
+                   title=dict(text="Puntos porcentuales del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10), zeroline=False,
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
+
+Los 3 fixes: valores siempre `abs()` (positivos), las barras históricas van en un solo trace (leyenda limpia con un solo "BCRP"), y el eje Y arranca en 0 con rango hacia arriba.
