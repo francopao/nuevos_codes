@@ -1,0 +1,61 @@
+Ese error no viene de lo que agregamos — el traceback nunca llega a `PresentacionBuilder`. Revienta antes, en `run_pipeline_bd1s`, al leer el Excel `BD1_S_Huella.xlsx` y buscar la columna `"Afp"` (línea 4151). Es decir: en ese archivo, la columna no se llama exactamente `Afp` (puede ser `AFP`, `afp`, o con espacio).
+
+**Paso 1 — diagnóstico rápido (ejecuta esto solo, antes de tocar el script):**
+```python
+import pandas as pd
+df_chk = pd.read_excel(str(ruta_bd1s), engine="openpyxl")
+print(df_chk.columns.tolist())
+```
+Fíjate cómo aparece literalmente la columna de AFP en esa lista (y de paso confirma que `Fondo`, `TC_USD`, `Weight`, `AUM` también estén escritos igual — si esa columna cambió de nombre, es posible que otra también haya cambiado).
+
+**Paso 2 — fix permanente (case/espacio-insensible), para que no vuelva a pasar si el nombre de columna varía entre versiones del archivo fuente:**
+
+Buscar (Ctrl+F):
+```
+def _cargar_bd1s_huella(ruta_bd1s: str, afp: str = "Integra",
+```
+Agregar **justo antes** de esa línea:
+```python
+def _col_ci(df: pd.DataFrame, *candidatos: str) -> str:
+    """Devuelve el nombre REAL de columna que matchee (case/espacio-insensible)
+    alguno de los candidatos. Si no hay match, lanza KeyError mostrando las
+    columnas disponibles para poder diagnosticar rápido."""
+    norm = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidatos:
+        real = norm.get(cand.strip().lower())
+        if real is not None:
+            return real
+    raise KeyError(f"No se encontró ninguna de {candidatos} en columnas: {list(df.columns)}")
+
+
+```
+
+Buscar (Ctrl+F):
+```
+    df = pd.read_excel(ruta_bd1s, engine="openpyxl")
+
+    # --- Filtrar por AFP y solo F1/F2/F3 (excluir Multifondos) ----
+    df = df[df["Afp"] == afp].copy()
+```
+Reemplazar por:
+```python
+    df = pd.read_excel(ruta_bd1s, engine="openpyxl")
+    df = df.rename(columns={_col_ci(df, "Afp", "AFP", "afp"): "Afp"})
+
+    # --- Filtrar por AFP y solo F1/F2/F3 (excluir Multifondos) ----
+    df = df[df["Afp"] == afp].copy()
+```
+
+Buscar (Ctrl+F):
+```
+    df_full = pd.read_excel(ruta_bd1s, engine="openpyxl")
+    available = sorted(df_full["Afp"].unique())
+```
+Reemplazar por:
+```python
+    df_full = pd.read_excel(ruta_bd1s, engine="openpyxl")
+    df_full = df_full.rename(columns={_col_ci(df_full, "Afp", "AFP", "afp"): "Afp"})
+    available = sorted(df_full["Afp"].unique())
+```
+
+Si el diagnóstico del Paso 1 muestra que el nombre real no es ninguna variante de "Afp" (por ejemplo `"Administradora"`), avísame el nombre exacto y agrego ese candidato a `_col_ci(...)` en las dos líneas de arriba.
