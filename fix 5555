@@ -1,0 +1,72 @@
+Ahí está el problema. Tu script **no tiene mi último fix aplicado**. El HTML muestra que el trace BCRP tiene `x=["1998","2017","2023"]` separado de los traces de 2026* — que es exactamente el bug. Con mi fix todos los traces deberían tener `x=["1998","2017","2023","2026*"]`.
+
+Necesito ver tu función actual para darte el Ctrl+F exacto. Déjame buscar qué texto tienes:Confirmado: tu script no tiene ninguno de mis fixes aplicados. Todavía tiene el código original con `x=[str(y)]` en un loop y `range=[ymin, 0.3]`. Vamos de nuevo con `Ctrl+F` exacto.
+
+---
+
+`Ctrl+F` → busca exactamente este texto (cópialo tal cual):
+
+```
+    # --- Barras historicas: una barra BCRP por año ---
+```
+
+Selecciona desde ahí hasta la línea que dice `    return fig` de esa función (es la siguiente aparición de `return fig` que encuentres hacia abajo). Borra todo ese bloque y pega esto:
+
+```python
+    # --- Todos los traces comparten las mismas 4 categorias X ---
+    all_x = ["1998", "2017", "2023", "2026*"]
+
+    # Trace BCRP: tiene dato en los 4 periodos
+    fig.add_trace(go.Bar(
+        x=all_x,
+        y=[hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023), proy_2026.get("BCRP")],
+        name="BCRP", marker_color=_INST_COLORS["BCRP"],
+        hovertemplate="<b>%{x}</b><br>Costo PBI: %{y:.1f} pp<extra>BCRP</extra>"))
+
+    # Traces Larrain, Macrocapitales, Apoyo: solo tienen dato en 2026*
+    for inst in ["Larrain", "Macrocapitales", "Apoyo"]:
+        fig.add_trace(go.Bar(
+            x=all_x,
+            y=[None, None, None, proy_2026.get(inst)],
+            name=inst, marker_color=_INST_COLORS[inst],
+            hovertemplate=f"<b>2026* (Fuerte)</b><br>Costo PBI: %{{y:.1f}} pp<extra>{inst}</extra>"))
+
+    # --- Annotations sobre cada barra historica ---
+    for y in hist_years:
+        v = hist_vals.get(y)
+        if v is not None:
+            fig.add_annotation(
+                x=str(y), y=v + 0.06, yanchor="bottom", showarrow=False,
+                text="<b>{:.1f}</b>".format(v).replace(".", ","),
+                font=dict(size=11, color=_INST_COLORS["BCRP"]))
+
+    # Consenso 2026
+    if proy_2026:
+        vals_26 = [v for v in proy_2026.values() if v is not None]
+        fig.add_annotation(
+            x="2026*", y=max(vals_26) + 0.06, yanchor="bottom", showarrow=False,
+            text="Consenso: ~ {:.1f} pp".format(np.mean(vals_26)).replace(".", ","),
+            font=dict(size=10, color=COL_TXT_SOFT))
+
+    all_vals = [v for v in list(hist_vals.values()) + list(proy_2026.values()) if v is not None]
+    ymax = max(all_vals) * 1.35
+    fig.update_layout(
+        barmode="group",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11),
+                   categoryorder="array", categoryarray=all_x),
+        yaxis=dict(range=[0, ymax],
+                   title=dict(text="Puntos porcentuales del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10), zeroline=False,
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
+
+Los 3 cambios clave vs. lo que tienes ahora: (1) `all_x` compartido por todos los traces con `None` donde no hay dato, (2) `range=[0, ymax]` en vez de `[ymin, 0.3]` para que las barras positivas se vean, (3) annotations con `y + 0.06` (arriba de la barra) en vez de `y - 0.12` (abajo, fuera del rango visible).
