@@ -1,0 +1,138 @@
+Aquí tienes los 5 bloques, en orden de aplicación. Los 2 primeros van en el archivo Python (motor de pivots), los 3 siguientes en el bloque `JS_DASHBOARD` (string JS embebido) y en la lista de `tarjetas`.
+
+---
+
+**Bloque 1 — Nuevo pivot `Contrib_Fondos` (Intensidad por Fondo + Weight)**
+
+Buscar (Ctrl+F):
+```
+        return full, full.head(top_n).reset_index(drop=True)
+```
+Esta línea aparece una sola vez, dentro de `contribuyentes_general()`. Agregar el siguiente método **justo después** (antes del comentario `# PivotTables 10/13/14/16/17`):
+
+```python
+    def contribuyentes_fondos(self, top_n: int = 15) -> pd.DataFrame:
+        """Intensidad por emisor desglosada en columnas F1/F2/F3 (aporte de
+        cada fondo a la Intensidad total del emisor) + Weight (%) del emisor
+        agregado en toda la cartera (multifondos). Alimenta el chart
+        'Contribuyentes' del dashboard (barras apiladas + marcador Weight).
+        """
+        _map = {"IN-FONDO1": "F1", "IN-FONDO2": "F2", "IN-FONDO3": "F3"}
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra"])].copy()
+        d["_Fondo"] = d[COL["portafolio"]].map(_map)
+        d = d[d["_Fondo"].notna()]
+
+        piv = (d.groupby([COL["nombre"], "_Fondo"])[COL["intensidad"]]
+                 .sum().unstack("_Fondo", fill_value=0.0))
+        piv.columns.name = None
+        for f in ["F1", "F2", "F3"]:
+            if f not in piv.columns:
+                piv[f] = 0.0
+        piv = piv[["F1", "F2", "F3"]]
+        piv["_Intensidad_Total"] = piv.sum(axis=1)
+
+        # Weight (%) = Inv MM$ del emisor (todos sus fondos) / AUM total del universo d
+        inv_emisor = d.groupby(COL["nombre"])[COL["inv"]].sum()
+        aum_total = d[COL["inv"]].sum()
+        piv["Weight"] = np.where(
+            aum_total, inv_emisor.reindex(piv.index).fillna(0.0) / aum_total, 0.0)
+
+        out = (piv.sort_values("_Intensidad_Total", ascending=False)
+                  .head(top_n)
+                  .drop(columns="_Intensidad_Total")
+                  .reset_index()
+                  .rename(columns={COL["nombre"]: "Nombre"}))
+        return out
+```
+
+---
+
+**Bloque 2 — Registrar el pivot en `build_all()`**
+
+Buscar (Ctrl+F):
+```
+            "Contrib_General_Peores": peores_gen,
+```
+Agregar inmediatamente después:
+```python
+            "Contrib_Fondos": self.contribuyentes_fondos(),
+```
+
+Con esto, `to_long()` y `HistoricoExporter` lo absorben automáticamente (usan detección genérica de dims/métricas: `Nombre` queda como DIM_1, y `F1/F2/F3/Weight` como METRICA). No hay que tocar nada más en el pipeline de cálculo.
+
+---
+
+**Bloque 3 — Reemplazar la función JS `topEmisoresMultiAfp` por `contribuyentesFondos`**
+
+Buscar (Ctrl+F):
+```
+function topEmisoresMultiAfp(div, corte){
+```
+Selecciona desde esa línea hasta el `}` de cierre de la función (justo antes de las líneas en blanco que preceden a `function render(){`) y reemplaza todo el bloque por:
+
+```javascript
+// --- Chart Contribuyentes: Intensidad por Fondo (F1/F2/F3) apilada +
+// Weight (%) del emisor en eje secundario (marcador oscuro sobre cada barra) --
+const COLOR_FONDOS = {F1:'#00AECB', F2:'#516FED', F3:'#ACD7CA'};
+const COLOR_WEIGHT_MARKER = '#0B3C5D';
+
+function contribuyentesFondos(div, corte, topN){
+  topN = topN || 15;
+  const f1 = agg('Contrib_Fondos','F1',corte), f2 = agg('Contrib_Fondos','F2',corte),
+        f3 = agg('Contrib_Fondos','F3',corte), w  = agg('Contrib_Fondos','Weight',corte);
+  let keys = [...new Set([...f1.keys(), ...f2.keys(), ...f3.keys()])].filter(k=>k);
+  keys.sort((a,b)=> ((f1.get(b)||0)+(f2.get(b)||0)+(f3.get(b)||0))
+                   - ((f1.get(a)||0)+(f2.get(a)||0)+(f3.get(a)||0)));
+  keys = keys.slice(0, topN);
+
+  const traces = [
+    {type:'bar', name:'F1', x:keys, y:keys.map(k=>f1.get(k)||0), marker:{color:COLOR_FONDOS.F1}},
+    {type:'bar', name:'F2', x:keys, y:keys.map(k=>f2.get(k)||0), marker:{color:COLOR_FONDOS.F2}},
+    {type:'bar', name:'F3', x:keys, y:keys.map(k=>f3.get(k)||0), marker:{color:COLOR_FONDOS.F3}},
+    {type:'scatter', mode:'markers', name:'Weight (%)', yaxis:'y2', showlegend:false,
+     x:keys, y:keys.map(k=>(w.get(k)||0)*100),
+     marker:{color:COLOR_WEIGHT_MARKER, size:10, line:{color:'white',width:1}}}
+  ];
+  const lay = LAYOUT();
+  lay.barmode = 'stack';
+  lay.yaxis.title = 'Intensidad';
+  lay.yaxis2 = {overlaying:'y', side:'right', showgrid:false, zeroline:false, title:'Weight (%)'};
+  lay.xaxis.type = 'category';
+  lay.xaxis.tickangle = -90;
+  lay.margin = {l:60,r:60,t:20,b:130};
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+---
+
+**Bloque 4 — Actualizar la llamada en `render()`**
+
+Buscar (Ctrl+F):
+```
+  safe('gTopMulti',     () => topEmisoresMultiAfp('gTopMulti', cAct));
+```
+Reemplazar por:
+```javascript
+  safe('gContribFondos', () => contribuyentesFondos('gContribFondos', cAct));
+```
+
+---
+
+**Bloque 5 — Actualizar la entrada en la lista `tarjetas` (Python)**
+
+Buscar (Ctrl+F):
+```
+        ("gTopMulti", "Top emisores del sistema — desglose por AFP", True),
+```
+Reemplazar por:
+```python
+        ("gContribFondos", "Mayores contribuyentes — Intensidad por Fondo (F1/F2/F3) y Weight (%)", True),
+```
+
+---
+
+Notas rápidas:
+- El eje X queda vertical (`tickangle:-90`), estilo apilado y doble eje replican la estética de tu imagen; no hay ratings porque tu data no los trae.
+- Si quieres más/menos de 15 emisores, cambia `topN` en el Bloque 4 (`contribuyentesFondos('gContribFondos', cAct, 20)`).
+- El denominador de Weight es el AUM del mismo universo usado para Intensidad (excluye Cash y Cuestionario Integra). Si prefieres que incluya Cash, dímelo y ajusto el Bloque 1.
