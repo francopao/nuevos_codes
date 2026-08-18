@@ -1,0 +1,64 @@
+Abre este HTML. Usa exactamente el mismo patrón que `chart_fen_fiscal`: un solo trace, `barmode="overlay"`, `width=0.55`, sin `categoryorder` ni `barmode="group"`. Si se ve bien, aplica este edit:
+
+`Ctrl+F` → busca exactamente:
+
+```
+    # Todos los traces deben compartir las mismas 4 categorias X para que
+```
+
+Selecciona desde esa línea hasta `return fig` de esa función (incluido). Reemplaza todo por:
+
+```python
+    # Un solo trace con colores por barra — mismo patron que chart_fen_fiscal.
+    labs = ["1998", "2017", "2023", "BCRP", "Larrain", "Macrocap.", "Apoyo"]
+    vals = [
+        hist_vals.get(1998), hist_vals.get(2017), hist_vals.get(2023),
+        proy_2026.get("BCRP"), proy_2026.get("Larrain"),
+        proy_2026.get("Macrocapitales"), proy_2026.get("Apoyo"),
+    ]
+    colors = [
+        _INST_COLORS["BCRP"], _INST_COLORS["BCRP"], _INST_COLORS["BCRP"],
+        _INST_COLORS["BCRP"], _INST_COLORS["Larrain"],
+        _INST_COLORS["Macrocapitales"], _INST_COLORS["Apoyo"],
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=labs, y=vals, marker_color=colors, width=0.55,
+        showlegend=False,
+        hovertemplate="<b>%{x}</b><br>%{y:.1f} pp<extra></extra>"))
+
+    # Valor sobre cada barra
+    for i, (l, v) in enumerate(zip(labs, vals)):
+        if v is not None:
+            fig.add_annotation(x=l, y=v + 0.04, yanchor="bottom", showarrow=False,
+                text="<b>{:.1f}</b>".format(v).replace(".", ","),
+                font=dict(size=11, color=colors[i]))
+
+    # Separador visual entre historico y proyecciones
+    fig.add_vline(x=2.5, line_dash="dot", line_color="#C9CED6", line_width=1)
+    fig.add_annotation(x=0.8, y=max(v for v in vals if v) * 1.20, showarrow=False,
+        text="<b>Observado (BCRP)</b>",
+        font=dict(size=10, color=_INST_COLORS["BCRP"]))
+    fig.add_annotation(x=4.8, y=max(v for v in vals if v) * 1.20, showarrow=False,
+        text="<b>Proyeccion 2026* (Esc. Fuerte)</b>",
+        font=dict(size=10, color=COL_TXT_SOFT))
+
+    ymax = max(v for v in vals if v is not None) * 1.35
+    fig.update_layout(
+        barmode="overlay",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+        yaxis=dict(range=[0, ymax],
+                   title=dict(text="Puntos porcentuales del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10),
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
