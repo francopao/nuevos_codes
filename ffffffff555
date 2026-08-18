@@ -1,0 +1,15 @@
+Encontrado. Tu Python genera JSON para **plotly.js v3.7.0** pero tu dashboard carga **plotly.js v2.35.2** del CDN. Esa incompatibilidad es la que rompe el chart.
+
+Un solo edit. `Ctrl+F` → busca exactamente:
+
+```
+https://cdn.plot.ly/plotly-2.35.2.min.js
+```
+
+Reemplázalo por:
+
+```
+https://cdn.plot.ly/plotly-3.7.0.min.js
+```
+
+Eso está dentro de la función `build_dashboard_html`, en la línea del `<script src=...>`. Guarda y ejecuta.
