@@ -1,0 +1,109 @@
+Confirma que ves las barras apiladas (teal abajo = PBI efectivo, colores arriba = costo FEN). Si se ve bien, aplica estos 2 edits en tu script:
+
+---
+
+**EDIT 1** — Agregar lectura del PBI efectivo. `Ctrl+F` → busca exactamente:
+
+```python
+    # --- Proyecciones 2026: hoja "Proyeccion 2026-2027", filtro Fuerte ---
+```
+
+**Justo ANTES** de esa línea, inserta:
+
+```python
+    # --- PBI efectivo: columna H de la hoja "anual" ---
+    ws_anual = wb_mem.parent if False else openpyxl.load_workbook(FILE_BCRP, data_only=True)["anual"]
+    rows_anual = list(ws_anual.iter_rows(values_only=True))
+    names_anual = rows_anual[1]
+    pbi_col = next(i for i, n in enumerate(names_anual) if n and "PBI (variaci" in str(n))
+    pbi_efec = {}
+    for r in rows_anual[2:]:
+        y = r[0]
+        if y in hist_years:
+            v = _to_float(r[pbi_col])
+            if v is not None:
+                pbi_efec[y] = round(v, 1)
+    PBI_PROY_2026 = 3.4  # celda E14 de "Reporte de Inflacion 2026"
+
+```
+
+---
+
+**EDIT 2** — Reemplazar la construcción del chart. `Ctrl+F` → busca exactamente:
+
+```python
+    # Un solo trace con colores por barra — mismo patron que chart_fen_fiscal.
+```
+
+Selecciona desde ahí hasta `return fig` de esa función (incluido). Reemplaza todo por:
+
+```python
+    # Barras apiladas: PBI efectivo/proyectado (base) + costo FEN (encima).
+    labs = ["FEN 1998", "FEN 2017", "FEN 2023",
+            "BCRP\n2026*", "Larrain\n2026*", "Macrocap.\n2026*", "Apoyo\n2026*"]
+
+    pbi_vals = [
+        pbi_efec.get(1998, 0), pbi_efec.get(2017, 0), pbi_efec.get(2023, 0),
+        PBI_PROY_2026, PBI_PROY_2026, PBI_PROY_2026, PBI_PROY_2026,
+    ]
+    cost_vals = [
+        hist_vals.get(1998, 0), hist_vals.get(2017, 0), hist_vals.get(2023, 0),
+        proy_2026.get("BCRP", 0), proy_2026.get("Larrain", 0),
+        proy_2026.get("Macrocapitales", 0), proy_2026.get("Apoyo", 0),
+    ]
+    cost_colors = [
+        _INST_COLORS["BCRP"], _INST_COLORS["BCRP"], _INST_COLORS["BCRP"],
+        _INST_COLORS["BCRP"], _INST_COLORS["Larrain"],
+        _INST_COLORS["Macrocapitales"], _INST_COLORS["Apoyo"],
+    ]
+
+    fig = go.Figure()
+
+    # Capa 1 — PBI efectivo / proyectado (base de la barra, teal)
+    fig.add_trace(go.Bar(
+        x=labs, y=pbi_vals, name="PBI efectivo / proyectado",
+        marker_color=COL_OBS, width=0.55,
+        hovertemplate="<b>%{x}</b><br>PBI: %{y:.1f}%<extra></extra>"))
+
+    # Capa 2 — Costo FEN (apilado encima, colores por institucion)
+    fig.add_trace(go.Bar(
+        x=labs, y=cost_vals, name="Costo FEN (pp)",
+        marker_color=cost_colors, width=0.55,
+        hovertemplate="<b>%{x}</b><br>Costo FEN: %{y:.1f} pp<extra></extra>"))
+
+    # Annotations: valor del costo sobre cada barra apilada
+    for i, (l, p, c) in enumerate(zip(labs, pbi_vals, cost_vals)):
+        if c is not None and c > 0:
+            fig.add_annotation(x=l, y=p + c + 0.08, yanchor="bottom", showarrow=False,
+                text="<b>{:.1f}</b>".format(c).replace(".", ","),
+                font=dict(size=10.5, color=cost_colors[i]))
+
+    # Separador visual entre historico y proyecciones
+    fig.add_vline(x=2.5, line_dash="dot", line_color="#C9CED6", line_width=1)
+    fig.add_annotation(x=1, y=max(p + c for p, c in zip(pbi_vals, cost_vals)) * 1.12,
+        showarrow=False, text="<b>Observado (BCRP)</b>",
+        font=dict(size=10, color=_INST_COLORS["BCRP"]))
+    fig.add_annotation(x=4.8, y=max(p + c for p, c in zip(pbi_vals, cost_vals)) * 1.12,
+        showarrow=False, text="<b>Proyeccion 2026* (Esc. Fuerte)</b>",
+        font=dict(size=10, color=COL_TXT_SOFT))
+
+    ymin = min(pbi_vals) - 0.5
+    ymax = max(p + c for p, c in zip(pbi_vals, cost_vals)) * 1.25
+    fig.update_layout(
+        barmode="stack",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+        yaxis=dict(range=[ymin, ymax],
+                   title=dict(text="Var. % del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10), zeroline=True,
+                   zerolinecolor=COL_ZERO, zerolinewidth=1,
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
