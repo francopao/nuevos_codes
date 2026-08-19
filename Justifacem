@@ -1,0 +1,33 @@
+Ya revisé tu script. El problema tiene dos partes: (1) el diccionario de cada punto que arma la tabla de detalle no guarda el "tema", así que no puedes filtrar por tema al momento de imprimir el Word, y (2) el texto de la votación simplemente imprime `pto["decision"]` tal cual, por eso sale "Cabecera" literal.
+
+El orden ya no lo necesitas tocar: `sorted(sub, key=lambda x: (..., x["punto"]))` en `agregar()` ya deja "06" antes que "06.01" porque en comparación de strings un prefijo más corto ordena primero. Y `_filtrar_y_renumerar` ya conserva la fila Cabecera porque su decisión no está vacía. Solo faltan estos dos cambios:
+
+**Cambio 1 — guardar el tema en cada punto**
+Busca (Ctrl+F) dentro de `agregar()`, cerca de la construcción de `detalle`:
+```python
+        detalle[r["empresa"]][clave_f].append({
+            "punto": r["punto"], "texto": r["texto_agenda"], "decision": r["decision"],
+            "justificación": r["justificación"], "motivo": r["motivo"],
+        })
+```
+Agrega `"tema": r["tema"],` dentro de ese dict (por ejemplo justo después de `"punto": r["punto"],`).
+
+**Cambio 2 — dejar en blanco la votación solo para esa cabecera**
+Busca dentro de `generar_word()`, en el bloque donde arma `voto`:
+```python
+                    voto = pto["decision"]
+                    if pto["decision"] == "En Contra" and pto["motivo"]:
+```
+Reemplázalo por algo como:
+```python
+                    es_cabecera_dir = (
+                        pto.get("tema") == "Elección y Numero de Directores"
+                        and pto["decision"] == "Cabecera"
+                        and "." not in str(pto["punto"])
+                    )
+                    voto = "" if es_cabecera_dir else pto["decision"]
+                    if pto["decision"] == "En Contra" and pto["motivo"]:
+```
+(el resto del bloque, con `voto +=` y `r2.font.color.rgb`, queda igual — como "Cabecera" nunca es "En Contra", no entra a ese `if`, y el color se queda en `NAV` normal).
+
+Una sola verificación antes de aplicarlo: confirma que el texto exacto del tema en tu hoja `Catalogos`/`Registro` sea literalmente `"Elección y Numero de Directores"` (mayúsculas, tildes y "Numero" sin tilde tal como lo escribiste) — la comparación es un `==` exacto, así que cualquier diferencia de tilde o mayúscula rompe el filtro silenciosamente.
