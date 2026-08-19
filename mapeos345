@@ -1,0 +1,414 @@
+Necesito entender primero qué valores reales tienen las columnas del G&P que vamos a mapear a tus categorías. Déjame inspeccionar.Perfecto, ya veo la data real. Antes de escribir código necesito validar el mapeo de categorías contra tus columnas del G&P:Ahora tengo todo lo que necesito. Voy a hacer los 6 cambios en mi copia de trabajo, validar, y luego darte solo los bloques con anchors.Ahora el nuevo método pivot + constante de mapeo:Ahora verifico que `to_long()` exporta el nuevo OBJETO correctamente:`FECHA_CORTE` se inserta automáticamente. Y `to_long()` mapea las columnas no-numéricas a DIM_1/DIM_2/DIM_3 en orden. Para `TopSubCat_Asset`, las columnas serán: `FECHA_CORTE`, `Bloque` (DIM_1), `SubCat` (DIM_2), `Nombre` (DIM_3), `Intensidad` (numérica), `Mgmt` (string → DIM_4... pero solo hay 3 dims). Necesito que Mgmt sea DIM_3 y Nombre vaya en otra posición, o simplemente asegurar el orden correcto.Ahora la función JS y la tarjeta del dashboard:Ahora agregar la llamada en `render()` y la tarjeta HTML:Ahora genero dashboard completo y valido JS:Todo validado. Ahora te doy los bloques quirúrgicos con anchors de Ctrl+F.
+
+---
+
+## BLOQUE 1 — Constantes G&P (arriba del script)
+
+**Buscar:**
+```
+GYP_COL_SBS_TIPO = "U"
+GYP_HEADER_ROWS = 1
+```
+
+**Reemplazar por:**
+```python
+GYP_COL_SBS_TIPO = "U"
+GYP_COL_MERCADO = "G"
+GYP_COL_CAT = "H"
+GYP_COL_AC_DIR = "P"
+GYP_COL_A_P = "S"
+GYP_HEADER_ROWS = 1
+```
+
+---
+
+## BLOQUE 2 — Constante del mapeo de subcategorías
+
+**Buscar:**
+```
+GYP_ASSET_CLASS_VALIDOS = {"Renta Fija", "Renta Variable"}
+```
+
+**Reemplazar por:**
+```python
+GYP_ASSET_CLASS_VALIDOS = {"Renta Fija", "Renta Variable"}
+
+# Mapeo para chart "Asset Performance por AFP": Bloque → lista de
+# (nombre_subcat, campo_filtro, set_de_valores).
+# - "CAT" filtra sobre GyP_CAT
+# - "AC_DIR_contains" filtra sobre GyP_AC_DIR con substring match
+# - "MERCADO" filtra sobre GyP_MERCADO
+GYP_ASSET_PERF_MAP = [
+    ("Equities", [
+        ("Asia",       "CAT",  {"Asia"}),
+        ("Europe",     "CAT",  {"Europa"}),
+        ("US",         "CAT",  {"US"}),
+        ("LATAM",      "CAT",  {"LATAM"}),
+        ("Government", "CAT",  {"Gobierno"}),
+    ]),
+    ("Fixed Income", [
+        ("HY", "AC_DIR_contains", {"HY"}),
+        ("IG", "AC_DIR_contains", {"IG"}),
+    ]),
+    ("Market Exposure", [
+        ("DM",          "MERCADO", {"DM"}),
+        ("EM",          "MERCADO", {"EM"}),
+        ("Commodities", "MERCADO", {"Commodities"}),
+    ]),
+]
+```
+
+---
+
+## BLOQUE 3 — Constructor de GyPDetalladoLoader (4 columnas nuevas)
+
+**Buscar:**
+```
+                 col_sbs_tipo: str = GYP_COL_SBS_TIPO, header_rows: int = GYP_HEADER_ROWS):
+        self.config = config
+        self.verbose = verbose
+        self.path = getattr(config, "path_gyp", None)
+        self._cols = {
+            "SBS": _col_letter_to_idx(col_sbs),
+            "NOMBRE": _col_letter_to_idx(col_nombre),
+            "ASSET_CLASS": _col_letter_to_idx(col_asset_class),
+            "RANK_RT": _col_letter_to_idx(col_rank_rt),
+            "SBS_TIPO": _col_letter_to_idx(col_sbs_tipo),
+        }
+```
+
+**Reemplazar por:**
+```python
+                 col_sbs_tipo: str = GYP_COL_SBS_TIPO,
+                 col_mercado: str = GYP_COL_MERCADO,
+                 col_cat: str = GYP_COL_CAT,
+                 col_ac_dir: str = GYP_COL_AC_DIR,
+                 col_a_p: str = GYP_COL_A_P,
+                 header_rows: int = GYP_HEADER_ROWS):
+        self.config = config
+        self.verbose = verbose
+        self.path = getattr(config, "path_gyp", None)
+        self._cols = {
+            "SBS": _col_letter_to_idx(col_sbs),
+            "NOMBRE": _col_letter_to_idx(col_nombre),
+            "ASSET_CLASS": _col_letter_to_idx(col_asset_class),
+            "RANK_RT": _col_letter_to_idx(col_rank_rt),
+            "SBS_TIPO": _col_letter_to_idx(col_sbs_tipo),
+            "MERCADO": _col_letter_to_idx(col_mercado),
+            "CAT": _col_letter_to_idx(col_cat),
+            "AC_DIR": _col_letter_to_idx(col_ac_dir),
+            "A_P": _col_letter_to_idx(col_a_p),
+        }
+```
+
+---
+
+## BLOQUE 4 — Lectura de fila en GyPDetalladoLoader.build()
+
+**Buscar:**
+```
+                registros.append({
+                    "SBS": sbs,
+                    "NOMBRE": row[offsets["NOMBRE"]] if offsets["NOMBRE"] < len(row) else None,
+                    "ASSET_CLASS": row[offsets["ASSET_CLASS"]] if offsets["ASSET_CLASS"] < len(row) else None,
+                    "RANK_RT": row[offsets["RANK_RT"]] if offsets["RANK_RT"] < len(row) else None,
+                    "SBS_TIPO": row[offsets["SBS_TIPO"]] if offsets["SBS_TIPO"] < len(row) else None,
+                })
+        finally:
+            wb.close()
+        df = pd.DataFrame(registros, columns=["SBS", "NOMBRE", "ASSET_CLASS", "RANK_RT", "SBS_TIPO"])
+```
+
+**Reemplazar por:**
+```python
+                registros.append({
+                    "SBS": sbs,
+                    "NOMBRE": row[offsets["NOMBRE"]] if offsets["NOMBRE"] < len(row) else None,
+                    "ASSET_CLASS": row[offsets["ASSET_CLASS"]] if offsets["ASSET_CLASS"] < len(row) else None,
+                    "RANK_RT": row[offsets["RANK_RT"]] if offsets["RANK_RT"] < len(row) else None,
+                    "SBS_TIPO": row[offsets["SBS_TIPO"]] if offsets["SBS_TIPO"] < len(row) else None,
+                    "MERCADO": row[offsets["MERCADO"]] if offsets["MERCADO"] < len(row) else None,
+                    "CAT": row[offsets["CAT"]] if offsets["CAT"] < len(row) else None,
+                    "AC_DIR": row[offsets["AC_DIR"]] if offsets["AC_DIR"] < len(row) else None,
+                    "A_P": row[offsets["A_P"]] if offsets["A_P"] < len(row) else None,
+                })
+        finally:
+            wb.close()
+        df = pd.DataFrame(registros, columns=["SBS", "NOMBRE", "ASSET_CLASS", "RANK_RT", "SBS_TIPO",
+                                               "MERCADO", "CAT", "AC_DIR", "A_P"])
+```
+
+---
+
+## BLOQUE 5 — Merge G&P en ValorizacionBuilder.build() (ramas if y else)
+
+**Buscar:**
+```python
+        if self.gyp_lookup:
+            df["GyP_SBS_TIPO"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("SBS_TIPO"))
+            df["GyP_ASSET_CLASS"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("ASSET_CLASS"))
+            df["GyP_UNIVERSO_VALIDO"] = (
+```
+
+**Reemplazar por:**
+```python
+        if self.gyp_lookup:
+            df["GyP_SBS_TIPO"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("SBS_TIPO"))
+            df["GyP_ASSET_CLASS"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("ASSET_CLASS"))
+            df["GyP_MERCADO"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("MERCADO"))
+            df["GyP_CAT"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("CAT"))
+            df["GyP_AC_DIR"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("AC_DIR"))
+            df["GyP_A_P"] = sbs.map(lambda s: (self.gyp_lookup.get(s) or {}).get("A_P"))
+            df["GyP_UNIVERSO_VALIDO"] = (
+```
+
+*(Lo que sigue después — las 2 líneas del filtro `isin(...)` — NO se tocan.)*
+
+**Buscar también el else correspondiente:**
+```python
+        else:
+            df["GyP_SBS_TIPO"] = None
+            df["GyP_ASSET_CLASS"] = None
+            df["GyP_UNIVERSO_VALIDO"] = False
+```
+
+**Reemplazar por:**
+```python
+        else:
+            df["GyP_SBS_TIPO"] = None
+            df["GyP_ASSET_CLASS"] = None
+            df["GyP_MERCADO"] = None
+            df["GyP_CAT"] = None
+            df["GyP_AC_DIR"] = None
+            df["GyP_A_P"] = None
+            df["GyP_UNIVERSO_VALIDO"] = False
+```
+
+---
+
+## BLOQUE 6 — Nuevo método pivot en PresentacionBuilder
+
+**Buscar (el final de `contribuyentes_gyp_afp`):**
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+```
+
+**Reemplazar por** (agrega el método nuevo inmediatamente después):
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Para cada subcategoría de GYP_ASSET_PERF_MAP, devuelve el instrumento
+        con mayor Intensidad. Incluye Bloque, SubCat, Nombre, Intensidad,
+        Mgmt (Active/Passive)."""
+        d = self.df.copy()
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            return pd.DataFrame()
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        d = _sin_huella_cero(d)
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        filas = []
+        for bloque, subcats in GYP_ASSET_PERF_MAP:
+            for nombre_sub, tipo_filtro, valores in subcats:
+                if tipo_filtro == "CAT":
+                    sub = d[d["GyP_CAT"].isin(valores)]
+                elif tipo_filtro == "AC_DIR_contains":
+                    kw = list(valores)[0]
+                    sub = d[d["GyP_AC_DIR"].astype(str).str.contains(kw, na=False)]
+                elif tipo_filtro == "MERCADO":
+                    sub = d[d["GyP_MERCADO"].isin(valores)]
+                else:
+                    continue
+                if sub.empty:
+                    continue
+                agg = _agg(sub, [COL["nombre"]], [COL["intensidad"]])
+                if agg.empty:
+                    continue
+                top = agg.iloc[0]
+                top_rows = sub[sub[COL["nombre"]] == top[COL["nombre"]]]
+                mgmt = "A"
+                if not top_rows.empty and "GyP_A_P" in top_rows.columns:
+                    raw = str(top_rows["GyP_A_P"].iloc[0]).strip()
+                    mgmt = raw if raw in ("A", "P") else "A"
+                filas.append({
+                    "Bloque": bloque,
+                    "SubCat": nombre_sub,
+                    COL["nombre"]: top[COL["nombre"]],
+                    COL["intensidad"]: float(top[COL["intensidad"]]),
+                    "Mgmt": mgmt,
+                })
+        out = pd.DataFrame(filas)
+        if out.empty:
+            return out
+        out["Mgmt_Nombre"] = out["Mgmt"] + "|" + out[COL["nombre"]]
+        return out[["Bloque", "SubCat", "Mgmt_Nombre", COL["intensidad"]]]
+```
+
+---
+
+## BLOQUE 7 — Registrar nuevo OBJETO en build_all()
+
+**Buscar:**
+```python
+            "Contrib_GyP_AFP": self.contribuyentes_gyp_afp(),
+```
+
+**Reemplazar por:**
+```python
+            "Contrib_GyP_AFP": self.contribuyentes_gyp_afp(),
+            "TopSubCat_Asset": self.top_por_subcat_asset(),
+```
+
+---
+
+## BLOQUE 8 — Función JS del Chart 3 en el dashboard
+
+**Buscar (el cierre de `contribuyentesGyPIntensidad` justo antes de `function render()`):**
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+**Reemplazar por:**
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+// --- Chart 3: "Asset Performance por AFP" — barras verticales agrupadas
+//     en 3 bloques (Equities / Fixed Income / Market Exposure). 1 barra por
+//     subcategoría = instrumento con mayor Intensidad. Color = Active / Passive.
+const MGMT_COLOR = {A: '#0B3C5D', P: '#C0392B'};
+const MGMT_LABEL = {A: 'Active', P: 'Passive'};
+
+function assetPerformanceAfp(div, corte){
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte) ||
+       r.METRICA!=='Intensidad') continue;
+    const parts = (r.DIM_3||'').split('|');
+    const mgmt = parts[0] || 'A';
+    const nombre = parts.slice(1).join('|') || '';
+    filas.push({bloque:r.DIM_1, subcat:r.DIM_2, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||''});
+  }
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  const best = new Map();
+  for(const f of filas){
+    const k = f.bloque+'||'+f.subcat;
+    if(!best.has(k) || f.val > best.get(k).val) best.set(k, f);
+  }
+  const bloqueOrden = ['Equities','Fixed Income','Market Exposure'];
+  const sub = [...best.values()].sort((a,b) => {
+    const ia = bloqueOrden.indexOf(a.bloque), ib = bloqueOrden.indexOf(b.bloque);
+    return ia !== ib ? ia - ib : b.val - a.val;
+  });
+  const esc = _escalaEje(sub.map(s=>s.val));
+  const xLabels = sub.map(s=>s.subcat);
+  const yVals = sub.map(s=>s.val / esc.div);
+  const colores = sub.map(s => MGMT_COLOR[s.mgmt] || '#666');
+  const customdata = sub.map(s=>s.nombre);
+  const bloques = [];
+  let cursor = 0;
+  bloqueOrden.forEach(bNombre => {
+    const items = sub.filter(s=>s.bloque===bNombre);
+    if(!items.length) return;
+    const start = cursor; cursor += items.length;
+    bloques.push({nombre:bNombre, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  const traces = [
+    {type:'bar', x:xLabels, y:yVals, showlegend:false,
+     marker:{color:colores},
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto},
+     customdata, hovertemplate:'%{customdata}<br>%{y:.1f}<extra></extra>'}
+  ];
+  const mgmtPresentes = [...new Set(sub.map(s=>s.mgmt))].sort();
+  mgmtPresentes.forEach(m => {
+    traces.push({type:'scatter', mode:'markers', x:[null], y:[null],
+      name: MGMT_LABEL[m]||m, marker:{color:MGMT_COLOR[m]||'#666', size:10}});
+  });
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:''};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.22, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:60, r:30, t:55, b:80};
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'y domain',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:b.centro, xref:'x', y:1, yref:'y domain', yshift:14,
+    text:'<b>'+b.nombre+'</b>', showarrow:false,
+    font:{size:12, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+---
+
+## BLOQUE 9 — Llamada en render()
+
+**Buscar:**
+```
+  safe('gContribGyPIntensidad',() => contribuyentesGyPIntensidad('gContribGyPIntensidad', cAct));
+}
+```
+
+**Reemplazar por:**
+```
+  safe('gContribGyPIntensidad',() => contribuyentesGyPIntensidad('gContribGyPIntensidad', cAct));
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct));
+}
+```
+
+---
+
+## BLOQUE 10 — Tarjeta HTML en la lista de tarjetas
+
+**Buscar:**
+```python
+        ("gContribGyPIntensidad", "Mayores contribuyentes de Intensidad por AFP — universo AFO líquido (G&P)", True),
+    ]
+```
+
+**Reemplazar por:**
+```python
+        ("gContribGyPIntensidad", "Mayores contribuyentes de Intensidad por AFP — universo AFO líquido (G&P)", True),
+        ("gAssetPerf", "Asset Performance — top instrumento por subcategoría (Active vs Passive)", True),
+    ]
+```
+
+---
+
+**Resumen del mapeo que usé** (basado en los valores reales de tu G&P):
+
+| Bloque | SubCat | Columna G&P | Valores que matchea |
+|---|---|---|---|
+| Equities | Asia | GyP_CAT | `Asia` |
+| Equities | Europe | GyP_CAT | `Europa` |
+| Equities | US | GyP_CAT | `US` |
+| Equities | LATAM | GyP_CAT | `LATAM` |
+| Equities | Government | GyP_CAT | `Gobierno` |
+| Fixed Income | HY | GyP_AC_DIR | contiene `HY` (→ DMHY, 76 instrumentos) |
+| Fixed Income | IG | GyP_AC_DIR | contiene `IG` (→ DMIG, 11 instrumentos) |
+| Market Exposure | DM | GyP_MERCADO | `DM` (261) |
+| Market Exposure | EM | GyP_MERCADO | `EM` (151) |
+| Market Exposure | Commodities | GyP_MERCADO | `Commodities` (28) |
+
+Active = col S del G&P = `A` (401 instrumentos) → azul oscuro `#0B3C5D`
+Passive = col S del G&P = `P` (240 instrumentos) → rojo `#C0392B`
+
+Si algún mapeo no te convence (por ejemplo, querés que Japón entre en Asia, o que Government venga de otra columna), solo hay que editar la constante `GYP_ASSET_PERF_MAP` — es la única pieza que controla las agrupaciones.
