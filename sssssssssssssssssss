@@ -1,0 +1,147 @@
+Ahora agrego el metric `Weight` (peso combinado F1+F2+F3) usando `self.aum_total_mm`, ya disponible en la clase:Ahora valido todo el pipeline (Python compila, JS sintaxis + smoke test funcional con datos sintéticos incluyendo `Ex_Integra` y `Weight`):Ahora la parte JS — genero un dashboard de prueba con `Ex_Integra` de por medio y nombres repetidos entre AFPs (el caso que rompía con ejes categóricos planos), y corro el smoke test:Todo validado (Python + JS, con datos sintéticos que incluían nombres repetidos entre AFPs, `Ex_Integra`, y distintos órdenes de magnitud). Estos son los 3 bloques que necesitas pegar en tu script, en este orden:
+
+## Bloque 1 — Módulo 10, método `contribuyentes_gyp_afp`
+
+**Buscar** (dentro de `PresentacionBuilder`):
+```python
+    def contribuyentes_gyp_afp(self, top_n: int = 25) -> pd.DataFrame:
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra"])]
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True] if "GyP_UNIVERSO_VALIDO" in d.columns else d.iloc[0:0]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad"], COL["inv"]])
+        if full.empty:
+            return full
+        full["Ranking"] = full[COL["huella"]].rank(ascending=False, method="first").astype(int)
+        return full.head(top_n).reset_index(drop=True)
+```
+
+**Reemplazar por:**
+```python
+    def contribuyentes_gyp_afp(self) -> pd.DataFrame:
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra"])]
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True] if "GyP_UNIVERSO_VALIDO" in d.columns else d.iloc[0:0]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad"], COL["inv"]])
+        if full.empty:
+            return full
+        full["Ranking"] = full[COL["huella"]].rank(ascending=False, method="first").astype(int)
+        # Weight = Inv MM$ del emisor / AUM combinado F1+F2+F3 de la AFP en curso
+        # (self.aum_total_mm ya llega así, ver ctx["aum_multifondos_mm"] en ambas rutas).
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+```
+*(Quité el parámetro `top_n`: ahora exporta el universo completo por AFP y el recorte top-N lo hace JS por métrica, para no sesgar por ordenar-antes-de-cortar con la métrica equivocada.)*
+
+## Bloque 2 — Dashboard JS, reemplazo completo de `contribuyentesGyPHuella`
+
+**Buscar** (bloque completo, desde `function contribuyentesGyPHuella` hasta su `}` de cierre — es el que sigue inmediatamente después de `function _gypDatosPorAfp(...){...}`):
+```python
+function contribuyentesGyPHuella(div, corte){
+  const filas = _gypDatosPorAfp(corte, 'Huella', 6);
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  const xAfp = filas.map(f=>f.afp), xNombre = filas.map(f=>f.nombre);
+  const yBar = filas.map(f=>f.bar), yMk = filas.map(f=>f.marker);
+  const colores = filas.map(f => CAFP2[f.afp] || '#666');
+  const traces = [
+    {type:'bar', name:'Huella (Tn CO2)', x:[xAfp,xNombre], y:yBar,
+     marker:{color:colores}, text:yBar.map(fmt), textposition:'outside',
+     cliponaxis:false, textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Intensidad (Tn CO2 / USD MM)',
+     x:[xAfp,xNombre], y:yMk, yaxis:'y2',
+     marker:{size:12, color:'#fff', line:{width:2,color:C_ACC}}}
+  ];
+  const lay = LAYOUT();
+  lay.xaxis = {type:'multicategory', tickangle:-90, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:''};
+  lay.yaxis.title = 'Huella (Tn CO2)';
+  lay.yaxis2 = {overlaying:'y', side:'right', showgrid:false, zeroline:false,
+                title:'Intensidad'};
+  // Leyenda arriba del área de ploteo: no compite con el eje X de 2 niveles.
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:60, r:60, t:55, b:150};
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Reemplazar por:**
+```python
+// --- Chart 1: 4 bloques por AFP en orden fijo (excluye Ex_Integra a
+//     propósito). Barras = Intensidad; marcador = Weight combinado F1+F2+F3
+//     (eje Y2, %). Separadores punteados SOLO en límites entre AFP; nombre
+//     de la AFP centrado arriba de cada bloque. -----------------------------
+const AFP_ORDEN_CHART1 = ['Integra', 'Profuturo', 'Prima', 'Habitat'];
+
+function _gypDatosChart1(corte, topPorAfp){
+  const ZWSP = '\u200B';   // disambigua nombres repetidos entre bloques de AFP
+                           // sin usar tickvals/ticktext (ver nota Módulo 14).
+  const nombres = [], afpFila = [], barVals = [], mkVals = [], bloques = [];
+  let cursor = 0;
+  AFP_ORDEN_CHART1.forEach((afp, bi) => {
+    const bar = new Map(), mk = new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Contrib_GyP_AFP' || String(r.FECHA_CORTE)!==String(corte) ||
+         r.AFP!==afp || !r.DIM_1) continue;
+      if(r.METRICA==='Intensidad') bar.set(r.DIM_1, (bar.get(r.DIM_1)||0) + (+r.VALOR||0));
+      if(r.METRICA==='Weight') mk.set(r.DIM_1, (mk.get(r.DIM_1)||0) + (+r.VALOR||0));
+    }
+    const top = [...bar.keys()].sort((a,b)=>(bar.get(b)||0)-(bar.get(a)||0)).slice(0, topPorAfp);
+    if(!top.length) return;
+    const start = cursor;
+    top.forEach(n => {
+      nombres.push(n + ZWSP.repeat(bi)); afpFila.push(afp);
+      barVals.push(bar.get(n)||0); mkVals.push(mk.get(n)||0);
+      cursor++;
+    });
+    bloques.push({afp, start, end: cursor-1, centro: (start+cursor-1)/2});
+  });
+  return {nombres, afpFila, barVals, mkVals, bloques};
+}
+
+// Elige el mayor divisor (1 / mil / millón / mil millones) tal que el
+// máximo escalado siga siendo >= 1, para dejar como máximo ~2 dígitos.
+function _escalaEje(valores){
+  const max = Math.max(0, ...valores.map(v => Math.abs(v||0)));
+  const niveles = [[1,''], [1e3,'Miles'], [1e6,'Millones'], [1e9,'Miles de millones']];
+  let elegido = niveles[0];
+  for(const nivel of niveles){ if(max / nivel[0] >= 1) elegido = nivel; }
+  return {div: elegido[0], suf: elegido[1]};
+}
+
+function contribuyentesGyPHuella(div, corte){
+  const {nombres, afpFila, barVals, mkVals, bloques} = _gypDatosChart1(corte, 6);
+  if(!nombres.length){ document.getElementById(div).innerHTML=''; return; }
+  const esc = _escalaEje(barVals);
+  const barEsc = barVals.map(v => v / esc.div);
+  const colores = afpFila.map(afp => CAFP2[afp] || '#666');
+  const traces = [
+    {type:'bar', name:'Intensidad (Tn CO2 / USD MM)', x:nombres, y:barEsc,
+     marker:{color:colores}, text:barEsc.map(v => v.toFixed(1)), textposition:'outside',
+     cliponaxis:false, textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:nombres, y:mkVals, yaxis:'y2',
+     marker:{size:12, color:'#fff', line:{width:2,color:C_ACC}}}
+  ];
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:-90, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:''};
+  lay.yaxis.title = 'Intensidad (Tn CO2 / USD MM)' + (esc.suf ? ' — ' + esc.suf : '');
+  lay.yaxis2 = {overlaying:'y', side:'right', showgrid:false, zeroline:false,
+                title:'Weight', tickformat:'.0%'};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.16, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:60, r:60, t:70, b:150};
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'y domain',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:b.centro, xref:'x', y:1, yref:'y domain', yshift:14,
+    text:'<b>'+b.afp+'</b>', showarrow:false,
+    font:{size:12, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+*(`_gypDatosPorAfp` y `contribuyentesGyPIntensidad`, justo debajo, **no se tocan** — el chart 2 sigue igual.)*
+
+Dos notas técnicas rápidas: usé `'\u200B'` (espacio de ancho cero, invisible) para diferenciar nombres repetidos entre bloques de AFP en vez de `tickvals`/`ticktext`, porque ese patrón ya rompió `apiladoPorCorte` en tu dashboard antes. Y dejé `type:'category'` (no `multicategory`) porque pediste el título de AFP **arriba** del bloque — el nativo de Plotly lo pone abajo — así que ahora es 100% manual vía `shapes`+`annotations`.
