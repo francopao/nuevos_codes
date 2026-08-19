@@ -1,0 +1,149 @@
+Now I have all the context. Let me apply the changes:
+
+Now Chart 2 (contribuyentesGyPIntensidad): complete rewrite — exclude Ex_Integra, bars=Intensidad with 2-decimal labels, X axis = Weight, no x2, paleta corporativa:
+
+Chart 3 (assetPerformanceAfp): paleta corporativa:
+
+Todo validado. Aquí van los bloques:
+
+---
+
+## BLOQUE 1 — Chart 1 (contribuyentesGyPHuella): colores paleta corporativa
+
+**Buscar:**
+```
+  const colores = afpFila.map(afp => CAFP2[afp] || '#666');
+  const traces = [
+    {type:'bar', name:'Intensidad (Tn CO2 / USD MM)', x:nombres, y:barEsc,
+     marker:{color:colores}, text:barEsc.map(v => v.toFixed(1)), textposition:'outside',
+     cliponaxis:false, textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:nombres, y:mkVals, yaxis:'y2',
+     marker:{size:12, color:'#fff', line:{width:2,color:C_ACC}}}
+  ];
+```
+
+**Reemplazar por:**
+```
+  const colores = afpFila.map((afp,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', name:'Intensidad (Tn CO2 / USD MM)', x:nombres, y:barEsc,
+     marker:{color:colores}, text:barEsc.map(v => v.toFixed(1)), textposition:'outside',
+     cliponaxis:false, textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:nombres, y:mkVals, yaxis:'y2',
+     marker:{size:12, color:'#fff', line:{width:2,color:C_ACC}}}
+  ];
+```
+
+---
+
+## BLOQUE 2 — Chart 2 (contribuyentesGyPIntensidad): reemplazo completo
+
+**Buscar** (desde el comentario hasta el cierre `}`):
+```
+// --- Chart 2: barras horizontales agrupadas por AFP (eje Y jerárquico),
+//     ordenadas de mayor a menor Intensidad dentro de cada AFP; marcador
+//     circular de Huella superpuesto (eje secundario). ----------------------
+function contribuyentesGyPIntensidad(div, corte){
+  const filas = _gypDatosPorAfp(corte, 'Intensidad', 8);
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  // Plotly dibuja barras horizontales de abajo hacia arriba: se invierte el
+  // orden para que el mayor contribuyente de cada AFP quede arriba del bloque.
+  const orden = filas.slice().reverse();
+  const yAfp = orden.map(f=>f.afp), yNombre = orden.map(f=>f.nombre);
+  const xBar = orden.map(f=>f.bar), xMk = orden.map(f=>f.marker);
+  const colores = orden.map(f => CAFP2[f.afp] || '#666');
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad (Tn CO2 / USD MM)',
+     x:xBar, y:[yAfp,yNombre], marker:{color:colores},
+     text:xBar.map(fmt), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Huella (Tn CO2)',
+     x:xMk, y:[yAfp,yNombre], xaxis:'x2',
+     marker:{size:12, color:'#fff', line:{width:2,color:C_ACC}}}
+  ];
+  const lay = LAYOUT();
+  lay.yaxis = {type:'multicategory', showgrid:false, showline:false, ticks:''};
+  lay.xaxis.title = 'Intensidad (Tn CO2 / USD MM)';
+  lay.xaxis2 = {overlaying:'x', side:'top', showgrid:false, zeroline:false,
+                title:'Huella'};
+  // Leyenda arriba: no interfiere con encabezados de AFP ni nombres a la izq.
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:160, r:40, t:55, b:45};
+  lay.height = Math.max(CFG.alto, orden.length*26 + 120);
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Reemplazar por:**
+```
+// --- Chart 2: barras horizontales por AFP. Barra = Intensidad (label 2 dec).
+//     Eje X = Weight (suma F1+F2+F3, %). Sin eje x2. Paleta corporativa.
+//     Excluye Ex_Integra. Bloques por AFP con separadores. -----------------
+function contribuyentesGyPIntensidad(div, corte){
+  const ZWSP = '\u200B';
+  const afpOrden = ['Integra','Profuturo','Prima','Habitat'];
+  const nombres=[], afpFila=[], intVals=[], wVals=[], bloques=[];
+  let cursor=0;
+  afpOrden.forEach((afp,bi) => {
+    const intMap=new Map(), wMap=new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Contrib_GyP_AFP' || String(r.FECHA_CORTE)!==String(corte) ||
+         r.AFP!==afp || !r.DIM_1) continue;
+      if(r.METRICA==='Intensidad') intMap.set(r.DIM_1,(intMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+      if(r.METRICA==='Weight') wMap.set(r.DIM_1,(wMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+    }
+    const top=[...intMap.keys()].sort((a,b)=>(intMap.get(b)||0)-(intMap.get(a)||0)).slice(0,8);
+    if(!top.length) return;
+    const start=cursor;
+    top.reverse().forEach(n=>{
+      nombres.push(n+ZWSP.repeat(bi)); afpFila.push(afp);
+      intVals.push(intMap.get(n)||0); wVals.push(wMap.get(n)||0);
+      cursor++;
+    });
+    bloques.push({afp, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  if(!nombres.length){ document.getElementById(div).innerHTML=''; return; }
+  const colores = afpFila.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad (Tn CO2 / USD MM)',
+     x:wVals, y:nombres, marker:{color:colores},
+     text:intVals.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}}
+  ];
+  const lay = LAYOUT();
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:'',
+               automargin:true};
+  lay.xaxis = {title:'Weight (F1+F2+F3)', tickformat:'.1%', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:180, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, nombres.length*26 + 120);
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x domain', yref:'y',
+    x0:0, x1:1, y0:b.start-0.5, y1:b.start-0.5,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:-0.01, xref:'x domain', y:b.centro, yref:'y', xanchor:'right',
+    text:'<b>'+b.afp+'</b>', showarrow:false,
+    font:{size:11, color:CFG.color_texto}
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+---
+
+## BLOQUE 3 — Chart 3 (assetPerformanceAfp): colores paleta corporativa
+
+**Buscar:**
+```
+const MGMT_COLOR = {A: '#0B3C5D', P: '#C0392B'};
+```
+
+**Reemplazar por:**
+```
+const MGMT_COLOR = {A: '#00AECB', P: '#002060'};
+```
