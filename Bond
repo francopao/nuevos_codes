@@ -1,0 +1,23 @@
+El error es clásico de Python cuando una variable se usa antes de haber sido inicializada dentro de la misma función — normalmente pasa porque, al insertar la línea nueva, se borró o se desindentó por accidente la línea que crea `detalle` antes del bucle.
+
+Busca (Ctrl+F) dentro de la función `agregar()`, un poco antes de donde pusiste el cambio, esta línea:
+
+```python
+detalle = defaultdict(lambda: defaultdict(list))
+```
+
+Debe estar **exactamente así**, sin sangría de más ni de menos, en el mismo nivel que la línea `for r in sorted(sub, ...)` que va justo debajo. Es decir, el bloque completo correcto es:
+
+```python
+    detalle = defaultdict(lambda: defaultdict(list))
+    for r in sorted(sub, key=lambda x: (x["empresa"], x["fecha"] or date.min, x["punto"])):
+        clave_f = r["fecha"].strftime("%d/%m/%Y") if isinstance(r["fecha"], (datetime, date)) else "s/f"
+        detalle[r["empresa"]][clave_f].append({
+            "punto": r["punto"], "tema": r["tema"], "texto": r["texto_agenda"], "decision": r["decision"],
+            "justificación": r["justificación"], "motivo": r["motivo"],
+        })
+```
+
+Si esa línea `detalle = defaultdict(...)` no aparece, o quedó movida dentro de un `if` o después del `for`, ese es el bug — Python "ve" que `detalle` se usa como variable local en la función, pero no encuentra la asignación antes de llegar a esa línea.
+
+Para darte la corrección exacta línea por línea (sin que tengas que adivinar), ¿puedes subir tu script actual (el .py con tu cambio ya aplicado)? Así te indico el número de línea preciso y el texto exacto a corregir, en vez de que tengas que buscarlo tú mismo.
