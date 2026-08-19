@@ -1,0 +1,29 @@
+Ahí está el problema. Las líneas 365–368 son un bloque suelto que pegaste **antes** de que `detalle` se cree en la línea 370. Ese bloque sobra — es un duplicado de las líneas 373–376 que ya están correctas.
+
+Ahora verifiquemos si el segundo cambio (el de `generar_word`) también necesita ajuste:
+
+El cambio 2 (en `generar_word`, líneas 1258–1263) está perfecto. El único problema es el bloque duplicado suelto.
+
+**Instrucción exacta — borra las líneas 365 a 368:**
+
+Abre tu `.py`, ve a la **línea 365** y elimina estas 4 líneas completas (incluyendo la línea en blanco que quede):
+
+```python
+    detalle[r["empresa"]][clave_f].append({
+        "punto": r["punto"], "tema": r["tema"], "texto": r["texto_agenda"], "decision": r["decision"],
+        "justificación": r["justificación"], "motivo": r["motivo"],
+    })
+```
+
+Después de borrarlas, tu código debe quedar así (lo que antes era línea 369 pasa a ser 365):
+
+```python
+    experiencia = [{"esp": e, "n": n}
+                   for e, n in sorted(c_exp.items(), key=lambda kv: (-kv[1], orden_e.get(kv[0], 999)))]
+
+    # -- Tabla de detalle (equivalente al rango B85:B257)
+    detalle = defaultdict(lambda: defaultdict(list))
+    for r in sorted(sub, key=lambda x: (x["empresa"], x["fecha"] or date.min, x["punto"])):
+```
+
+Ese bloque suelto que pegaste usa `detalle` y `r` y `clave_f` antes de que existan — por eso Python te da `UnboundLocalError`. Las líneas 370–376 (que ya tienen `"tema": r["tema"]` incluido) son las correctas y ya hacen todo el trabajo.
