@@ -1,0 +1,133 @@
+Now update Chart 2 JS to use the new OBJETO and restore markers:
+
+Todo validado. Aquí van los bloques:
+
+---
+
+## BLOQUE 1 — Nuevo método Python `contribuyentes_intensidad_afp`
+
+**Buscar** (final de `contribuyentes_gyp_afp`):
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def top_por_subcat_asset
+```
+
+**Reemplazar por:**
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def contribuyentes_intensidad_afp(self) -> pd.DataFrame:
+        """Ranking de intensidad para Chart 2 horizontal: universo amplio
+        (TD + BU + GOB, todos los emisores que NO sean Proxies ni Cash).
+        No filtra por GyP_UNIVERSO_VALIDO para no restringir a solo FM/ETF."""
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra", "Proxies"])]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad"], COL["inv"]])
+        if full.empty:
+            return full
+        full["Ranking"] = full[COL["intensidad"]].rank(ascending=False, method="first").astype(int)
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def top_por_subcat_asset
+```
+
+---
+
+## BLOQUE 2 — Registrar nuevo OBJETO en `build_all()`
+
+**Buscar:**
+```python
+            "Contrib_GyP_AFP": self.contribuyentes_gyp_afp(),
+            "TopSubCat_Asset": self.top_por_subcat_asset(),
+```
+
+**Reemplazar por:**
+```python
+            "Contrib_GyP_AFP": self.contribuyentes_gyp_afp(),
+            "Contrib_Intensidad_AFP": self.contribuyentes_intensidad_afp(),
+            "TopSubCat_Asset": self.top_por_subcat_asset(),
+```
+
+---
+
+## BLOQUE 3 — Reemplazo completo de `contribuyentesGyPIntensidad` (JS)
+
+**Buscar** (todo el bloque, desde el comentario hasta el `}` de cierre):
+```
+// --- Chart 2: barras horizontales por AFP. Barra = Intensidad (label 2 dec).
+//     Eje X = Weight (suma F1+F2+F3, %). Sin eje x2. Paleta corporativa.
+//     Excluye Ex_Integra. Bloques por AFP con separadores. -----------------
+function contribuyentesGyPIntensidad(div, corte){
+```
+...hasta...
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+*(el `}` que cierra justo antes del comentario `// --- Chart 3:`)*
+
+**Reemplazar por:**
+```
+// --- Chart 2: barras horizontales por AFP. Universo amplio (TD+BU+GOB,
+//     sin proxies). Top 5 por Intensidad. Barra = Intensidad (label 2 dec).
+//     Eje X = Weight (F1+F2+F3, %). Marcadores circulares = Weight (#002060).
+//     Excluye Ex_Integra. Paleta corporativa. --------------------------------
+function contribuyentesGyPIntensidad(div, corte){
+  const ZWSP = '\u200B';
+  const afpOrden = ['Integra','Profuturo','Prima','Habitat'];
+  const nombres=[], afpFila=[], intVals=[], wVals=[], bloques=[];
+  let cursor=0;
+  afpOrden.forEach((afp,bi) => {
+    const intMap=new Map(), wMap=new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Contrib_Intensidad_AFP' || String(r.FECHA_CORTE)!==String(corte) ||
+         r.AFP!==afp || !r.DIM_1) continue;
+      if(r.METRICA==='Intensidad') intMap.set(r.DIM_1,(intMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+      if(r.METRICA==='Weight') wMap.set(r.DIM_1,(wMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+    }
+    const top=[...intMap.keys()].sort((a,b)=>(intMap.get(b)||0)-(intMap.get(a)||0)).slice(0,5);
+    if(!top.length) return;
+    const start=cursor;
+    top.reverse().forEach(n=>{
+      nombres.push(n+ZWSP.repeat(bi)); afpFila.push(afp);
+      intVals.push(intMap.get(n)||0); wVals.push(wMap.get(n)||0);
+      cursor++;
+    });
+    bloques.push({afp, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  if(!nombres.length){ document.getElementById(div).innerHTML=''; return; }
+  const colores = afpFila.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad (Tn CO2 / USD MM)',
+     x:wVals, y:nombres, marker:{color:colores},
+     text:intVals.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:wVals, y:nombres,
+     marker:{size:14, color:'#fff', line:{width:2.5, color:'#002060'}}}
+  ];
+  const lay = LAYOUT();
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:'',
+               automargin:true};
+  lay.xaxis = {title:'Weight (F1+F2+F3)', tickformat:'.1%', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:180, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, nombres.length*26 + 120);
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x domain', yref:'y',
+    x0:0, x1:1, y0:b.start-0.5, y1:b.start-0.5,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:-0.01, xref:'x domain', y:b.centro, yref:'y', xanchor:'right',
+    text:'<b>'+b.afp+'</b>', showarrow:false,
+    font:{size:11, color:CFG.color_texto}
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
