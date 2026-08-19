@@ -1,0 +1,140 @@
+Confirma que ves esto: 1998 y 2023 con la barra verde menta bajando de 0 (PBI negativo) y una barra azul subiendo de 0 (lo que hubiese crecido sin FEN). Si se ve bien, aplica estos edits:
+
+---
+
+**EDIT 1** — Colores del chart fiscal. `Ctrl+F` → busca exactamente:
+
+```
+        marker_color="#AFC3E6", width=0.50, opacity=0.85,
+```
+
+Reemplázalo por:
+
+```python
+        marker_color="#3494BA", width=0.50, opacity=0.35,
+```
+
+Y `Ctrl+F` → busca exactamente:
+
+```
+        marker_color=COL_OBS, width=0.50,
+        hovertemplate="<b>%{x}</b><br>Ejecutado: S/ %{y:.2f} mil MM<extra></extra>"))
+```
+
+Reemplázalo por:
+
+```python
+        marker_color="#ACD7CA", width=0.50,
+        hovertemplate="<b>%{x}</b><br>Ejecutado: S/ %{y:.2f} mil MM<extra></extra>"))
+```
+
+---
+
+**EDIT 2** — Reescribir el bloque de construcción del chart de costo. `Ctrl+F` → busca exactamente:
+
+```
+    # --- PBI efectivo: columna H de la hoja "anual" ---
+```
+
+Selecciona desde ahí hasta `return fig` de esa función (incluido). Reemplaza todo por:
+
+```python
+    # --- PBI efectivo: columna H de la hoja "anual" ---
+    wb_bcrp = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws_anual = wb_bcrp["anual"]
+    rows_anual = list(ws_anual.iter_rows(values_only=True))
+    names_anual = rows_anual[1]
+    pbi_col = next(i for i, n in enumerate(names_anual) if n and "PBI (variaci" in str(n))
+    pbi_efec = {}
+    for r in rows_anual[2:]:
+        y = r[0]
+        if y in hist_years:
+            v = _to_float(r[pbi_col])
+            if v is not None:
+                pbi_efec[y] = round(v, 1)
+    PBI_PROY_2026 = 3.4
+
+    # --- Proyecciones 2026: hoja "Proyeccion 2026-2027", filtro Fuerte ---
+    ws_proy = wb_bcrp["Proyeccion 2026-2027"]
+    rows_proy = list(ws_proy.iter_rows(values_only=True))
+    instituciones = ["BCRP", "Larrain", "Macrocapitales", "Apoyo"]
+    proy_2026 = {}
+    for r in rows_proy[1:]:
+        yr = r[0]
+        mag = str(r[1]).strip().lower() if r[1] else ""
+        inst = str(r[2]).strip() if r[2] else ""
+        val = _to_float(r[3])
+        if yr == 2026 and "fuerte" in mag and inst in instituciones:
+            proy_2026[inst] = abs(val) if val is not None else None
+
+    # Unifico Larrain/Macrocapitales/Apoyo en "Consultoras" (mismo valor: 1.0 pp).
+    cost_consultoras = proy_2026.get("Larrain", proy_2026.get("Macrocapitales",
+                       proy_2026.get("Apoyo")))
+
+    # Armo las series: 5 barras (3 historicas + BCRP 2026 + Consultoras 2026).
+    labs = ["FEN 1998", "FEN 2017", "FEN 2023", "BCRP\n2026*", "Consultoras\n2026*"]
+    pbi_vals = [
+        pbi_efec.get(1998, 0), pbi_efec.get(2017, 0), pbi_efec.get(2023, 0),
+        PBI_PROY_2026, PBI_PROY_2026,
+    ]
+    cost_vals = [
+        hist_vals.get(1998, 0), hist_vals.get(2017, 0), hist_vals.get(2023, 0),
+        proy_2026.get("BCRP", 0), cost_consultoras if cost_consultoras else 0,
+    ]
+
+    # "Sin FEN" = PBI + costo (lo que hubiese crecido la economia sin el FEN).
+    sin_fen = [p + c for p, c in zip(pbi_vals, cost_vals)]
+
+    # Colores del costo (porcion expuesta): azules historicos, acento para 2026.
+    cost_colors = ["#3494BA", "#3494BA", "#3494BA", "#002060", "#516FED"]
+
+    fig = go.Figure()
+
+    # Capa 1 (detras): barra "sin FEN" desde 0 hacia arriba.
+    fig.add_trace(go.Bar(
+        x=labs, y=sin_fen, name="Costo FEN (pp)",
+        marker_color=cost_colors, width=0.55,
+        hovertemplate="<b>%{x}</b><br>Sin FEN: %{y:.1f}%<extra></extra>"))
+
+    # Capa 2 (delante): PBI efectivo desde 0 (puede ser negativo).
+    fig.add_trace(go.Bar(
+        x=labs, y=pbi_vals, name="PBI efectivo / proyectado",
+        marker_color="#ACD7CA", width=0.55,
+        hovertemplate="<b>%{x}</b><br>PBI: %{y:.1f}%<extra></extra>"))
+
+    # Annotations: costo FEN sobre la parte expuesta de cada barra.
+    for i, (l, sf, c) in enumerate(zip(labs, sin_fen, cost_vals)):
+        fig.add_annotation(x=l, y=sf + 0.10, yanchor="bottom", showarrow=False,
+            text="<b>{:.1f} pp</b>".format(c).replace(".", ","),
+            font=dict(size=10.5, color=cost_colors[i]))
+
+    # Separador visual entre historico y proyecciones.
+    fig.add_vline(x=2.5, line_dash="dot", line_color="#C9CED6", line_width=1)
+    ytop = max(sin_fen) * 1.15
+    fig.add_annotation(x=1, y=ytop, showarrow=False,
+        text="<b>Observado (BCRP)</b>",
+        font=dict(size=10, color="#002060"))
+    fig.add_annotation(x=3.5, y=ytop, showarrow=False,
+        text="<b>Proyeccion 2026* (Esc. Fuerte)</b>",
+        font=dict(size=10, color=COL_TXT_SOFT))
+
+    ymin = min(pbi_vals) - 0.5
+    ymax = max(sin_fen) * 1.30
+    fig.update_layout(
+        barmode="overlay",
+        height=340, margin=dict(l=40, r=16, t=6, b=52),
+        plot_bgcolor="#fff", paper_bgcolor="#fff",
+        font=dict(family=FONT, size=11, color=COL_TXT),
+        hovermode="x unified",
+        legend=dict(orientation="h", x=0, xanchor="left", y=-0.16, yanchor="top",
+                    font=dict(size=10.5), bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(showgrid=False, linecolor="#C9CED6", tickcolor="#C9CED6",
+                   tickfont=dict(size=11)),
+        yaxis=dict(range=[ymin, ymax],
+                   title=dict(text="Var. % del PBI", font=dict(size=10)),
+                   showgrid=False, tickfont=dict(size=10), zeroline=True,
+                   zerolinecolor=COL_ZERO, zerolinewidth=1,
+                   linecolor="#ffffff", tickcolor="#ffffff"),
+    )
+    return fig
+```
