@@ -1,0 +1,130 @@
+Ahora veo el panorama completo. `ISIN_Origen` **existe en BD1_S** pero **no se lee ni se pasa** al `ValorizacionBuilder`. Necesito: (1) pasarla al DataFrame de Valorización, y (2) usarla en `contribuyentes_esg_benchmark` para filtrar solo `VP`.`ISIN_Origen` ya está en el DataFrame `df` que se pasa a `ValorizacionBuilder` (porque no se borra — el rename solo renombra 4 columnas, las demás sobreviven). Solo necesito verificar que llega a `PresentacionBuilder.df`:`_base()` solo filtra filas (PORTAFOLIOS_VALIDOS) y convierte tipos, **no borra columnas extra**. Entonces `ISIN_Origen` ya está disponible en `PresentacionBuilder.df` para la ruta BD1_S. Para la ruta Integra directa, la columna no existirá (viene del workbook, no de BD1_S), pero eso es seguro — el método lo maneja con un check.
+
+Ahora implemento los 2 cambios quirúrgicos:Now update JS: since now ALL VP emitters are in HIST (not just the 17 from BU), the JS should show ALL of them as bars, and only add benchmark markers for those that have a match in EMISOR_PROXY:10 barras (top 10 VP), 5 marcadores de benchmark (solo los que matchean), el top emisor arriba. Aquí van los 2 bloques:
+
+---
+
+## BLOQUE 1 — Python: filtrar por `ISIN_Origen='VP'`
+
+**Buscar:**
+```python
+    def contribuyentes_esg_benchmark(self) -> pd.DataFrame:
+        """Emisores con cobertura ESG propia (no proxy), ordenados por Intensidad
+        desc. Incluye Weight y nombre del proxy benchmark para cada emisor."""
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra", "Proxies"])]
+```
+
+*(o si ya habías aplicado mi bloque anterior, buscar lo que tengas ahí)*
+
+**Reemplazar todo el método hasta `return full.reset_index(drop=True)` por:**
+```python
+    def contribuyentes_esg_benchmark(self) -> pd.DataFrame:
+        """Emisores con cobertura ESG propia (ISIN_Origen='VP' en BD1_S),
+        ordenados por Intensidad desc. Incluye Weight para cálculo de
+        benchmark en JS. Si ISIN_Origen no existe en el DataFrame (ruta
+        Integra workbook), exporta todos los no-Cash como fallback."""
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra"])]
+        # Filtro principal: solo VP (cobertura ESG propia, no proxy)
+        if "ISIN_Origen" in d.columns:
+            d = d[d["ISIN_Origen"] == "VP"]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad"], COL["inv"]])
+        if full.empty:
+            return full
+        full["Ranking"] = full[COL["intensidad"]].rank(ascending=False, method="first").astype(int)
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+```
+
+---
+
+## BLOQUE 2 — JS: mostrar todos los VP, benchmark solo donde matchea
+
+**Buscar** (todo el bloque desde el comentario hasta el `}` de cierre):
+```
+// --- Chart 4: "Emisores con cobertura ESG vs Benchmark" -------------------
+```
+...hasta...
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Reemplazar por:**
+```
+// --- Chart 4: "Emisores con cobertura ESG vs Benchmark" -------------------
+// Barras horizontales = Intensidad de todos los emisores VP (cobertura propia).
+// Marcadores = benchmark (FCE × weight) solo para los que tienen proxy en BU.
+const EMISOR_PROXY = __EMISOR_PROXY__;
+
+function _normName(s){
+  return (s||'').replace(/\*+/g,'').replace(/\s+S\.A\..*$/i,'').replace(/\s+/g,' ').trim().toLowerCase();
+}
+function _findProxy(nombre){
+  const ne = _normName(nombre);
+  for(const k of Object.keys(EMISOR_PROXY)){
+    const nk = _normName(k);
+    if(ne===nk || ne.includes(nk) || nk.includes(ne)) return EMISOR_PROXY[k];
+  }
+  return null;
+}
+
+function emisoresEsgBenchmark(div, corte, afpSel){
+  const afp = afpSel || 'Integra';
+  const emisores = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='Contrib_ESG_Benchmark' || String(r.FECHA_CORTE)!==String(corte) ||
+       (r.AFP||'')!==afp) continue;
+    if(!r.DIM_1) continue;
+    let e = emisores.find(x=>x.nombre===r.DIM_1);
+    if(!e){ e={nombre:r.DIM_1}; emisores.push(e); }
+    if(r.METRICA==='Intensidad') e.intens = +r.VALOR||0;
+    if(r.METRICA==='Weight') e.weight = +r.VALOR||0;
+  }
+  if(!emisores.length){
+    document.getElementById(div).innerHTML=
+      '<p style="color:#8A99A8;text-align:center">Sin emisores VP para '+afp+'</p>';
+    return;
+  }
+  // Ordenar desc por Intensidad, top 10
+  emisores.sort((a,b)=>(b.intens||0)-(a.intens||0));
+  const top = emisores.slice(0, 10);
+  const sorted = top.slice().reverse();
+  const yNames = sorted.map(s=>s.nombre.replace(/\*+/g,'').trim());
+  const xIntens = sorted.map(s=>s.intens||0);
+  // Benchmark: solo para emisores que matchean en EMISOR_PROXY
+  const xBench = sorted.map(s => {
+    const proxy = _findProxy(s.nombre);
+    if(!proxy) return null;
+    return proxy.fce * (s.weight||0);
+  });
+  const colores = sorted.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad emisor',
+     x:xIntens, y:yNames, marker:{color:colores}, showlegend:false,
+     text:xIntens.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}}
+  ];
+  // Marcadores de benchmark solo donde hay dato (no null)
+  const benchX = [], benchY = [];
+  xBench.forEach((v,i) => { if(v!==null){ benchX.push(v); benchY.push(yNames[i]); } });
+  if(benchX.length){
+    traces.push({type:'scatter', mode:'markers', name:'Benchmark',
+     x:benchX, y:benchY,
+     marker:{size:11, color:'#E74C3C', symbol:'circle',
+             line:{width:1.5, color:'#fff'}},
+     hovertemplate:'%{y}<br>Benchmark: %{x:.2f}<extra></extra>'});
+  }
+  const lay = LAYOUT();
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:'',
+               automargin:true, tickfont:{size:10}};
+  lay.xaxis = {title:'Intensidad (Tn CO2 / USD MM)', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:200, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, sorted.length*28 + 100);
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Resumen del problema raíz**: el filtro anterior (`Plus != 'Proxies'`) era incorrecto porque `Plus` indica el *método de cálculo en la Valorización*, no si el emisor tiene cobertura ESG propia. Un emisor con cobertura ESG propia (como Ferreyros) podía tener `Plus='Portafolio'` o `Plus='Proxies'` dependiendo de cómo se procesó. El campo correcto es `ISIN_Origen='VP'` que viene directamente de BD1_S y significa que los datos ESG del instrumento vinieron del proveedor (MSCI) y no de un proxy sectorial. Con este cambio, los ~245 emisores únicos VP de Integra ya están disponibles para el chart (top 10 por Intensidad), y los marcadores de benchmark aparecen solo en los que además tienen un proxy asignado en la hoja BU de Lista Proxies.
