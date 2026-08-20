@@ -1,0 +1,398 @@
+El archivo ya está referenciado en el script (`SUBDIR_PROXIES` + `FNAME_PROXIES`). Ahora necesito:
+
+1. Leer los benchmarks de la hoja YYYYMM de ese archivo
+2. Agregar subcategorías (Mercado/AC_Dir) al output de `top_por_subcat_asset`
+3. Computar intensidades F1/F2/F3 como opciones de benchmark
+4. JS: slicer + subcategorías + re-render
+
+Esto es un bloque grande. Voy a implementar todo contra mi copia de trabajo, validar, y darte los bloques finales.Now modify `top_por_subcat_asset` to include subcategory and per-fund intensities:Now add the benchmark loader function and wire it into the dashboard:I need to add benchmarks FFMM to `cfg_js` so JS can access them. Let me add a loader function and inject the data:Now inject benchmark data into JS config and add `__BENCHMARKS_FFMM__` placeholder:Now rewrite `assetPerformanceAfp` JS with slicer, subcategories, and benchmark options:Now update the `render()` call and add the slicer HTML:Now add the slicer HTML inside the card for gAssetPerf. Let me find the card generation logic:I need to customize the card for `gAssetPerf` to include a slicer. Let me modify the card generation:The `_agg` output only includes columns from the `metricas` list. I need to include `Inv MM$` in the agg:Now full end-to-end with dashboard + JS validation:The FFMM benchmark test returned `Active` instead of the fund name — because `BENCH_FFMM` is empty (file not found on this server). The logic is correct but the test env doesn't have the file. Let me verify the JS code handles it properly by simulating BENCH_FFMM with data:Todo perfecto: `95.74 × 0.10 = 9.574` y `95.74 × 0.11 = 10.5314`. Aquí van los bloques:
+
+---
+
+## BLOQUE 1 — Constante nueva (después de `FNAME_PROXIES`)
+
+**Buscar:**
+```python
+FNAME_PROXIES = "Lista Proxies - Huella y Comite mensual ASG.xlsx"
+```
+
+**Reemplazar por:**
+```python
+FNAME_PROXIES = "Lista Proxies - Huella y Comite mensual ASG.xlsx"
+# Ruta completa para leer benchmarks FFMM (FUND_FINANCED_CARBON_EMISSIONS)
+RUTA_BENCHMARKS_FFMM = str(FsPath(SUBDIR_PROXIES) / FNAME_PROXIES)
+```
+
+---
+
+## BLOQUE 2 — Reemplazo completo de `top_por_subcat_asset` (Python)
+
+**Buscar** (método completo, desde `def top_por_subcat_asset` hasta justo antes de `# PivotTables 10/13/14`):
+
+El bloque original empieza con:
+```python
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Top 5 FFMM/ETFs por Intensidad para cada bloque
+```
+y termina con:
+```python
+        return pd.concat([result, bench], ignore_index=True)
+```
+
+**Reemplazar por:**
+```python
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Top 5 FFMM/ETFs por Intensidad para Equities (RV) y Fixed Income (RF).
+        Incluye SubCat (Mercado para RV, AC_Dir para RF), Mgmt, y benchmarks:
+        Intensidad promedio cartera, F1, F2, F3."""
+        d = self.df.copy()
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            return pd.DataFrame()
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        d = _sin_huella_cero(d)
+        for c in [COL["intensidad"], COL["huella"], COL["inv"]]:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+        # Intensidad promedio por fondo (F1/F2/F3) y total
+        total_inv = d[COL["inv"]].sum()
+        intens_total = d[COL["huella"]].sum() / total_inv if total_inv else 0.0
+        intens_por_fondo = {}
+        if COL["portafolio"] in d.columns:
+            for pf in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+                sf = d[d[COL["portafolio"]] == pf]
+                inv_f = sf[COL["inv"]].sum()
+                intens_por_fondo[pf] = sf[COL["huella"]].sum() / inv_f if inv_f else 0.0
+        AC_MAP = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+        # SubCat: Mercado para RV (DM/EM/Commodities), AC_Dir para RF (HY/IG/...)
+        def _subcat(row, bloque):
+            if bloque == "Equities":
+                return str(row.get("GyP_MERCADO", "") or "")
+            else:
+                raw = str(row.get("GyP_AC_DIR", "") or "")
+                if "HY" in raw: return "HY"
+                if "IG" in raw: return "IG"
+                if "EM" in raw: return "EM"
+                return raw
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"], COL["inv"]])
+            if agg_df.empty:
+                continue
+            for _, row in agg_df.head(5).iterrows():
+                nombre = row[COL["nombre"]]
+                top_rows = sub[sub[COL["nombre"]] == nombre]
+                mgmt = "A"
+                sc = ""
+                if not top_rows.empty:
+                    if "GyP_A_P" in top_rows.columns:
+                        raw = str(top_rows["GyP_A_P"].iloc[0]).strip()
+                        mgmt = raw if raw in ("A", "P") else "A"
+                    sc = _subcat(top_rows.iloc[0], bloque)
+                # Weight del emisor (para calcular intensidad del benchmark)
+                wt = (row[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0 if COL["inv"] in row.index else 0.0
+                filas.append({
+                    "Bloque": bloque, "SubCat": sc, "Mgmt": mgmt,
+                    COL["nombre"]: nombre,
+                    COL["intensidad"]: float(row[COL["intensidad"]]),
+                    "Weight": float(wt),
+                })
+        out = pd.DataFrame(filas)
+        if out.empty:
+            return out
+        # Codificar en DIM_2 = Mgmt|Nombre, DIM_3 = SubCat
+        out["Mgmt_Nombre"] = out["Mgmt"] + "|" + out[COL["nombre"]]
+        result = out[["Bloque", "Mgmt_Nombre", "SubCat", COL["intensidad"], "Weight"]].copy()
+        # Filas especiales de benchmark
+        benchmarks = [
+            ("_BENCH_", "Total_Integra", intens_total),
+            ("_BENCH_", "F1_Integra", intens_por_fondo.get("IN-FONDO1", 0.0)),
+            ("_BENCH_", "F2_Integra", intens_por_fondo.get("IN-FONDO2", 0.0)),
+            ("_BENCH_", "F3_Integra", intens_por_fondo.get("IN-FONDO3", 0.0)),
+        ]
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        return pd.concat([result, bench_df], ignore_index=True)
+```
+
+---
+
+## BLOQUE 3 — Loader de benchmarks FFMM (justo antes de `def construir_dashboard`)
+
+**Buscar:**
+```python
+def construir_dashboard(ruta_historico, ruta_salida) -> str:
+```
+
+**Insertar ANTES de esa línea:**
+```python
+def _cargar_benchmarks_ffmm(anio: str, mes: str) -> dict:
+    """Lee FUND_NAME y FUND_FINANCED_CARBON_EMISSIONS de la hoja YYYYMM
+    de 'Lista Proxies - Huella y Comite mensual ASG.xlsx'. Devuelve
+    {fund_name: huella_carbono}."""
+    ruta = RUTA_BENCHMARKS_FFMM
+    hoja = f"{anio}{mes}"
+    if not FsPath(ruta).exists():
+        print(f"  [Benchmarks FFMM] No encontrado: {ruta}")
+        return {}
+    try:
+        wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+        if hoja not in wb.sheetnames:
+            print(f"  [Benchmarks FFMM] Hoja '{hoja}' no encontrada en {ruta}")
+            wb.close()
+            return {}
+        ws = wb[hoja]
+        hdr = list(ws.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+        idx_name = None
+        idx_fce = None
+        for i, v in enumerate(hdr):
+            if v == "FUND_NAME": idx_name = i
+            if v == "FUND_FINANCED_CARBON_EMISSIONS": idx_fce = i
+        if idx_name is None or idx_fce is None:
+            print(f"  [Benchmarks FFMM] Columnas no encontradas en hoja {hoja}")
+            wb.close()
+            return {}
+        result = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            name = row[idx_name] if idx_name < len(row) else None
+            fce = row[idx_fce] if idx_fce < len(row) else None
+            if name and fce is not None:
+                try:
+                    result[str(name)] = float(fce)
+                except (ValueError, TypeError):
+                    pass
+        wb.close()
+        print(f"  [Benchmarks FFMM] {len(result)} benchmarks cargados de hoja {hoja}")
+        return result
+    except Exception as e:
+        print(f"  [Benchmarks FFMM] Error: {e}")
+        return {}
+
+
+```
+
+---
+
+## BLOQUE 4 — Inyectar benchmarks en el JS del dashboard
+
+**Buscar** (dentro de `construir_dashboard`):
+```python
+          .replace("__COLORES_AFP_CONTRIB__", json.dumps(COLORES_AFP_CONTRIB, ensure_ascii=False)))
+```
+
+**Reemplazar por:**
+```python
+          .replace("__COLORES_AFP_CONTRIB__", json.dumps(COLORES_AFP_CONTRIB, ensure_ascii=False)))
+
+    # Benchmarks FFMM reales (FUND_FINANCED_CARBON_EMISSIONS de Lista Proxies)
+    _anio = corte_actual[:4] if len(corte_actual) >= 6 else "2026"
+    _mes = corte_actual[4:6] if len(corte_actual) >= 6 else "06"
+    bench_ffmm = _cargar_benchmarks_ffmm(_anio, _mes)
+    js = js.replace("__BENCHMARKS_FFMM__", json.dumps(bench_ffmm, ensure_ascii=False))
+```
+
+---
+
+## BLOQUE 5 — Slicer HTML en la tarjeta del chart
+
+**Buscar:**
+```python
+    cards = "".join(
+        f'<div class="card{" full" if full else ""}"><h3>{titulo}</h3>'
+        f'<div id="{cid}" class="plot"></div></div>'
+        for cid, titulo, full in tarjetas)
+```
+
+**Reemplazar por:**
+```python
+    # Opciones del slicer de benchmark para Chart 3
+    bench_options = [
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+        ("F1_Integra", "Intensidad F1 Integra"),
+        ("F2_Integra", "Intensidad F2 Integra"),
+        ("F3_Integra", "Intensidad F3 Integra"),
+    ]
+    for fname in sorted(bench_ffmm.keys()):
+        bench_options.append((f"FFMM:{fname}", fname))
+    bench_opts_html = "".join(
+        f'<option value="{val}">{label}</option>' for val, label in bench_options)
+
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}"><h3>{titulo}</h3>'
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'Benchmark: </label><select id="selBenchAssetPerf" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{bench_opts_html}</select></div>' if cid == "gAssetPerf" else "")
+         + f'<div id="{cid}" class="plot"></div></div>')
+        for cid, titulo, full in tarjetas)
+```
+
+---
+
+## BLOQUE 6 — Reemplazo completo del Chart 3 JS
+
+**Buscar** (desde el comentario del Chart 3 hasta justo antes de `function render(){`):
+```
+// --- Chart 3: "Asset Performance" — 2 bloques
+```
+...hasta...
+```
+}
+
+
+
+function render(){
+```
+
+**Reemplazar por:**
+```
+// --- Chart 3: "Asset Performance" — 2 bloques (Equities / Fixed Income).
+//     Top 5 FFMM/ETFs por Intensidad. SubCat bajo nombres. Slicer de benchmark.
+const MGMT_COLOR = {A: '#00AECB', P: '#002060'};
+const MGMT_LABEL = {A: 'Active', P: 'Passive'};
+const BENCH_FFMM = __BENCHMARKS_FFMM__;
+
+function _wrapName(txt, maxChars){
+  if(!txt || txt.length <= maxChars) return txt||'';
+  const words = txt.split(/\s+/);
+  const lines = []; let cur = '';
+  for(const w of words){
+    if(cur && (cur.length + 1 + w.length) > maxChars){ lines.push(cur); cur = w; }
+    else { cur = cur ? cur + ' ' + w : w; }
+  }
+  if(cur) lines.push(cur);
+  return lines.join('<br>');
+}
+
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(r.METRICA==='Intensidad'){
+      if(r.DIM_1==='_BENCH_'){
+        benchmarks[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      const parts = (r.DIM_2||'').split('|');
+      const mgmt = parts[0]||'A', nombre = parts.slice(1).join('|')||'';
+      filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||'',
+                  subcat:r.DIM_3||''});
+    }
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_'){
+      const parts2 = (r.DIM_2||'').split('|');
+      const n2 = parts2.slice(1).join('|')||'';
+      const match = filas.find(f=>f.nombre===n2 && f.bloque===r.DIM_1 && f.afp===(r.AFP||''));
+      if(match) match.weight = +r.VALOR||0;
+    }
+  }
+  return {filas, benchmarks};
+}
+
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks} = _parseAssetPerf(corte);
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  const integra = filas.filter(f => f.afp==='Integra' || f.afp==='');
+  if(!integra.length){ document.getElementById(div).innerHTML=''; return; }
+  const bloqueOrden = ['Equities','Fixed Income'];
+  const sorted = [];
+  bloqueOrden.forEach(b => {
+    sorted.push(...integra.filter(f=>f.bloque===b).sort((a,c)=>c.val-a.val).slice(0,5));
+  });
+  const xLabels = sorted.map(s => _wrapName(s.nombre, 14));
+  const esc = _escalaEje(sorted.map(s=>s.val));
+  const yVals = sorted.map(s=>s.val / esc.div);
+  const colores = sorted.map(s => MGMT_COLOR[s.mgmt] || '#666');
+  const bloques = [];
+  let cursor = 0;
+  bloqueOrden.forEach(bNombre => {
+    const items = sorted.filter(s=>s.bloque===bNombre);
+    if(!items.length) return;
+    const start = cursor; cursor += items.length;
+    bloques.push({nombre:bNombre, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  const traces = [
+    {type:'bar', x:xLabels, y:yVals, showlegend:false,
+     marker:{color:colores},
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto},
+     customdata:sorted.map(s=>s.nombre),
+     hovertemplate:'%{customdata}<br>Intensidad: %{y:.2f}<extra></extra>'}
+  ];
+  const bk = benchKey || 'Total_Integra';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else {
+    const bVal = benchmarks[bk] || 0;
+    if(bk==='F1_Integra') benchLabel='Intensidad F1 Integra';
+    else if(bk==='F2_Integra') benchLabel='Intensidad F2 Integra';
+    else if(bk==='F3_Integra') benchLabel='Intensidad F3 Integra';
+    benchYvals = xLabels.map(() => bVal / esc.div);
+  }
+  if(benchYvals.some(v=>v>0)){
+    traces.push({type:'scatter', mode:'markers',
+      name: benchLabel,
+      x: xLabels, y: benchYvals,
+      marker:{size:10, color:'#0B3C5D', symbol:'circle'}});
+  }
+  [...new Set(sorted.map(s=>s.mgmt))].sort().forEach(m => {
+    traces.push({type:'scatter', mode:'markers', x:[null], y:[null],
+      name: MGMT_LABEL[m]||m, marker:{color:MGMT_COLOR[m]||'#666', size:10}});
+  });
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:'',
+               tickfont:{size:10}};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.38, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:60, r:30, t:55, b:160};
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'y domain',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  const annots = bloques.map(b => ({
+    x:b.centro, xref:'x', y:1, yref:'y domain', yshift:14,
+    text:'<b>'+b.nombre+'</b>', showarrow:false,
+    font:{size:12, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+  }));
+  sorted.forEach((s, i) => {
+    if(s.subcat){
+      annots.push({
+        x:i, xref:'x', y:0, yref:'paper', yshift:-95,
+        text:'<i>'+s.subcat+'</i>', showarrow:false,
+        font:{size:9, color:'#8A99A8'}, xanchor:'center', yanchor:'top'
+      });
+    }
+  });
+  lay.annotations = annots;
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+---
+
+## BLOQUE 7 — Actualizar llamada en `render()`
+
+**Buscar:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct));
+```
+
+**Reemplazar por:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Total_Integra'));
+```
