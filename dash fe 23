@@ -1,0 +1,203 @@
+Excel validado. Ahora los 3 edits para tu script:
+
+---
+
+**EDIT 1** — Agregar el import. `Ctrl+F` → busca exactamente:
+
+```
+import plotly.graph_objects as go
+```
+
+Justo **encima** de esa línea, inserta:
+
+```python
+import xlsxwriter
+```
+
+---
+
+**EDIT 2** — Agregar la función de exportación. `Ctrl+F` → busca exactamente:
+
+```
+# 7) Orquestacion.
+```
+
+Justo **encima** de esa línea (en la línea vacía de arriba), inserta todo este bloque:
+
+```python
+# ----------------------------------------------------------------------------
+# 6b) Exportacion Excel: una hoja por chart con datos + grafico embebido.
+# ----------------------------------------------------------------------------
+def export_excel():
+    out = os.path.join(OUTPUT_DIR, "charts_fen.xlsx")
+    wbx = xlsxwriter.Workbook(out)
+
+    # Formatos reutilizables.
+    hfmt = wbx.add_format({"bold": True, "bg_color": "#002060", "font_color": "white",
+           "border": 1, "font_size": 10, "font_name": "Segoe UI"})
+    dfmt = wbx.add_format({"border": 1, "font_size": 10, "font_name": "Segoe UI",
+           "num_format": "0.00"})
+    pfmt = wbx.add_format({"border": 1, "font_size": 10, "font_name": "Segoe UI",
+           "num_format": "0%"})
+    lfmt = wbx.add_format({"border": 1, "font_size": 10, "font_name": "Segoe UI"})
+
+    # ================================================================
+    # Hoja 1: Gasto Fiscal FEN
+    # ================================================================
+    df15 = pd.read_csv(FILE_FEN_2015)
+    df16 = pd.read_csv(FILE_FEN_2016)
+    df23 = pd.read_csv(FILE_FEN_2023)
+    df24 = pd.read_csv(FILE_FEN_2024)
+    asig_1516  = (df15.ASIGNACION_PRESUPUESTARIA.sum() + df16.ASIGNACION_PRESUPUESTARIA.sum()) / 1e9
+    dev_1516   = (df15.MONTO_DEVENGADO.sum() + df16.MONTO_DEVENGADO.sum()) / 1e9
+    marco_2324 = (df23.MARCO_PRESUPUESTAL.sum() + df24.MARCO_PRESUPUESTAL.sum()) / 1e9
+    dev_2324   = (df23.MONTO_DEVENGADO.sum() + df24.MONTO_DEVENGADO.sum()) / 1e9
+    wb_mef = openpyxl.load_workbook(FILE_MEF_2026, data_only=True)
+    ws_mef = wb_mef["ejecucion del gasto"]
+    pim_26, dev_26 = 0.0, 0.0
+    for r in ws_mef.iter_rows(values_only=True):
+        if r[0] and "0068" in str(r[0]):
+            pim_26 = _to_float(r[2]) / 1e9
+            dev_26 = _to_float(r[6]) / 1e9
+            break
+
+    ws1 = wbx.add_worksheet("Gasto Fiscal FEN")
+    headers1 = ["Episodio", "Presupuesto (S/ miles MM)", "Ejecutado (S/ miles MM)",
+                "% Ejecucion", "Brecha (S/ miles MM)"]
+    labs1 = ["FEN 2015-16", "FEN 2023-24", "Prev. desastres 2026"]
+    marcos = [asig_1516, marco_2324, pim_26]
+    devs   = [dev_1516,  dev_2324,   dev_26]
+
+    for ci, h in enumerate(headers1):
+        ws1.write(0, ci, h, hfmt)
+    for ri, (l, m, d) in enumerate(zip(labs1, marcos, devs), 1):
+        ws1.write(ri, 0, l, lfmt)
+        ws1.write(ri, 1, float(m), dfmt)
+        ws1.write(ri, 2, float(d), dfmt)
+        ws1.write(ri, 3, float(d / m), pfmt)
+        ws1.write(ri, 4, float(m - d), dfmt)
+    ws1.set_column(0, 0, 24)
+    ws1.set_column(1, 4, 20)
+
+    ch1 = wbx.add_chart({"type": "bar", "subtype": "clustered"})
+    ch1.add_series({"name": "Presupuesto", "categories": ["Gasto Fiscal FEN", 1, 0, 3, 0],
+        "values": ["Gasto Fiscal FEN", 1, 1, 3, 1], "fill": {"color": "#3494BA", "transparency": 60},
+        "border": {"none": True}})
+    ch1.add_series({"name": "Ejecutado", "categories": ["Gasto Fiscal FEN", 1, 0, 3, 0],
+        "values": ["Gasto Fiscal FEN", 1, 2, 3, 2], "fill": {"color": "#ACD7CA"},
+        "border": {"none": True}})
+    ch1.set_title({"name": "Esfuerzo fiscal FEN: presupuesto vs ejecutado",
+        "name_font": {"name": "Segoe UI", "size": 11, "color": "#002060", "bold": True}})
+    ch1.set_y_axis({"name": "Miles de millones de S/", "num_format": "0.0",
+        "name_font": {"name": "Segoe UI", "size": 9}, "num_font": {"name": "Segoe UI", "size": 9},
+        "major_gridlines": {"visible": False}})
+    ch1.set_x_axis({"reverse": True, "num_font": {"name": "Segoe UI", "size": 9}})
+    ch1.set_legend({"position": "bottom", "font": {"name": "Segoe UI", "size": 9}})
+    ch1.set_size({"width": 580, "height": 360})
+    ch1.set_plotarea({"border": {"none": True}})
+    ws1.insert_chart("A7", ch1)
+
+    # ================================================================
+    # Hoja 2: Costo PBI FEN
+    # ================================================================
+    wb_mem = openpyxl.load_workbook(FILE_MEMORIA, data_only=True)
+    ws44 = wb_mem["p44"]
+    rows44 = list(ws44.iter_rows(values_only=True))
+    header44 = rows44[0]
+    pbi_row = next(r for r in rows44[1:] if r[0] and "PBI total" in str(r[0]))
+    hist_vals = {}
+    for y in [1998, 2017, 2023]:
+        ci = next(i for i, h in enumerate(header44) if isinstance(h, (int, float)) and int(h) == y)
+        hist_vals[y] = abs(_to_float(pbi_row[ci]))
+
+    wb_bcrp = openpyxl.load_workbook(FILE_BCRP, data_only=True)
+    ws_anual = wb_bcrp["anual"]
+    rows_anual = list(ws_anual.iter_rows(values_only=True))
+    names_anual = rows_anual[1]
+    pbi_col = next(i for i, n in enumerate(names_anual) if n and "PBI (variaci" in str(n))
+    pbi_efec = {}
+    for r in rows_anual[2:]:
+        y = r[0]
+        if y in [1998, 2017, 2023]:
+            v = _to_float(r[pbi_col])
+            if v is not None:
+                pbi_efec[y] = round(v, 1)
+
+    ws_proy = wb_bcrp["Proyeccion 2026-2027"]
+    proy_2026 = {}
+    for r in list(ws_proy.iter_rows(values_only=True))[1:]:
+        yr = r[0]
+        mag = str(r[1]).strip().lower() if r[1] else ""
+        inst = str(r[2]).strip() if r[2] else ""
+        val = _to_float(r[3])
+        if yr == 2026 and "fuerte" in mag and inst in ["BCRP", "Larrain", "Macrocapitales", "Apoyo"]:
+            proy_2026[inst] = abs(val) if val is not None else None
+
+    cost_consultoras = proy_2026.get("Larrain", proy_2026.get("Macrocapitales",
+                       proy_2026.get("Apoyo")))
+
+    ws2 = wbx.add_worksheet("Costo PBI FEN")
+    headers2 = ["Periodo", "PBI efectivo (%)", "Costo FEN (pp)", "PBI sin FEN (%)"]
+    labs2 = ["FEN 1998", "FEN 2017", "FEN 2023", "BCRP 2026*", "Consultoras 2026*"]
+    pbi_v  = [pbi_efec.get(1998, 0), pbi_efec.get(2017, 0), pbi_efec.get(2023, 0), 3.4, 3.4]
+    cost_v = [hist_vals[1998], hist_vals[2017], hist_vals[2023],
+              proy_2026.get("BCRP", 0), cost_consultoras if cost_consultoras else 0]
+    sinfen = [p + c for p, c in zip(pbi_v, cost_v)]
+
+    for ci, h in enumerate(headers2):
+        ws2.write(0, ci, h, hfmt)
+    for ri, (l, p, c, s) in enumerate(zip(labs2, pbi_v, cost_v, sinfen), 1):
+        ws2.write(ri, 0, l, lfmt)
+        ws2.write(ri, 1, float(p), dfmt)
+        ws2.write(ri, 2, float(c), dfmt)
+        ws2.write(ri, 3, float(s), dfmt)
+    ws2.set_column(0, 0, 22)
+    ws2.set_column(1, 3, 16)
+
+    ch2 = wbx.add_chart({"type": "column", "subtype": "stacked"})
+    ch2.add_series({"name": "PBI efectivo / proyectado",
+        "categories": ["Costo PBI FEN", 1, 0, 5, 0],
+        "values": ["Costo PBI FEN", 1, 1, 5, 1],
+        "fill": {"color": "#ACD7CA"}, "border": {"none": True}})
+    ch2.add_series({"name": "Costo FEN (pp)",
+        "categories": ["Costo PBI FEN", 1, 0, 5, 0],
+        "values": ["Costo PBI FEN", 1, 2, 5, 2],
+        "fill": {"color": "#3494BA"}, "border": {"none": True}})
+    ch2.set_title({"name": "Costo estimado del FEN sobre el PBI",
+        "name_font": {"name": "Segoe UI", "size": 11, "color": "#002060", "bold": True}})
+    ch2.set_y_axis({"name": "Var. % del PBI", "num_format": "0.0",
+        "name_font": {"name": "Segoe UI", "size": 9}, "num_font": {"name": "Segoe UI", "size": 9},
+        "major_gridlines": {"visible": False}, "crossing": -1})
+    ch2.set_x_axis({"num_font": {"name": "Segoe UI", "size": 9}})
+    ch2.set_legend({"position": "bottom", "font": {"name": "Segoe UI", "size": 9}})
+    ch2.set_size({"width": 580, "height": 360})
+    ch2.set_plotarea({"border": {"none": True}})
+    ws2.insert_chart("A9", ch2)
+
+    wbx.close()
+    return out
+```
+
+---
+
+**EDIT 3** — Llamar la exportación desde `main`. `Ctrl+F` → busca exactamente:
+
+```python
+def main():
+    html_path = build_dashboard_html()
+    print(f"[OK] HTML -> {html_path}")
+```
+
+Reemplázalo por:
+
+```python
+def main():
+    html_path = build_dashboard_html()
+    print(f"[OK] HTML -> {html_path}")
+    xlsx_path = export_excel()
+    print(f"[OK] XLSX -> {xlsx_path}")
+```
+
+---
+
+Requisito: `pip install xlsxwriter`. El Excel se genera en la misma carpeta que el dashboard con el nombre `charts_fen.xlsx`.
