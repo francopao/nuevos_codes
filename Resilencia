@@ -1,0 +1,168 @@
+Now rewrite the JS chart function with the new design rules:
+
+Todas las reglas validadas. Aquí van los 2 bloques:
+
+---
+
+## BLOQUE 1 — Python: mejorar `_subcat` con fallback robusto
+
+**Buscar:**
+```python
+        def _subcat(row, bloque):
+            if bloque == "Equities":
+                return str(row.get("GyP_MERCADO", "") or "")
+            else:
+                raw = str(row.get("GyP_AC_DIR", "") or "")
+                if "HY" in raw: return "HY"
+                if "IG" in raw: return "IG"
+                if "EM" in raw: return "EM"
+                return raw
+```
+
+**Reemplazar por:**
+```python
+        def _subcat(row, bloque):
+            if bloque == "Equities":
+                m = str(row.get("GyP_MERCADO", "") or "").strip()
+                return m if m else str(row.get("GyP_CAT", "") or "").strip() or "Otros"
+            else:
+                raw = str(row.get("GyP_AC_DIR", "") or "").strip()
+                if "HY" in raw: return "HY"
+                if "IG" in raw: return "IG"
+                if "EM" in raw: return "EM"
+                if "DM" in raw: return "DM"
+                if "SL" in raw: return "Senior Loans"
+                # Fallback a Cat (Internacional, Corporativa, Gobierno)
+                cat = str(row.get("GyP_CAT", "") or "").strip()
+                return cat if cat else raw or "Otros"
+```
+
+---
+
+## BLOQUE 2 — JS: reescribir `assetPerformanceAfp` completo
+
+**Buscar** (desde `function assetPerformanceAfp(div, corte, benchKey){` hasta su `}` de cierre, justo antes de las 3 líneas vacías que preceden `function render(){`):
+
+```
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks} = _parseAssetPerf(corte);
+```
+...hasta...
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+**Reemplazar por:**
+```
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks} = _parseAssetPerf(corte);
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  const integra = filas.filter(f => f.afp==='Integra' || f.afp==='');
+  if(!integra.length){ document.getElementById(div).innerHTML=''; return; }
+  const bloqueOrden = ['Equities','Fixed Income'];
+  const sorted = [];
+  bloqueOrden.forEach(b => {
+    sorted.push(...integra.filter(f=>f.bloque===b).sort((a,c)=>c.val-a.val).slice(0,5));
+  });
+  const xLabels = sorted.map(s => _wrapName(s.nombre, 14));
+  const esc = _escalaEje(sorted.map(s=>s.val));
+  const yVals = sorted.map(s=>s.val / esc.div);
+  const colores = sorted.map(s => MGMT_COLOR[s.mgmt] || '#666');
+  // Bloques
+  const bloques = [];
+  let cursor = 0;
+  bloqueOrden.forEach(bNombre => {
+    const items = sorted.filter(s=>s.bloque===bNombre);
+    if(!items.length) return;
+    const start = cursor; cursor += items.length;
+    bloques.push({nombre:bNombre, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  // Trace 1: barras
+  const traces = [
+    {type:'bar', x:xLabels, y:yVals, showlegend:false,
+     marker:{color:colores},
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto},
+     customdata:sorted.map(s=>s.nombre),
+     hovertemplate:'%{customdata}<br>Intensidad: %{y:.2f}<extra></extra>'}
+  ];
+  // Trace 2: benchmark markers — color coral/rojo cálido (#E74C3C) que
+  // maximiza contraste con las barras azul/turquesa sin ser similar
+  const bk = benchKey || 'Total_Integra';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else {
+    const bVal = benchmarks[bk] || 0;
+    if(bk==='F1_Integra') benchLabel='Intensidad F1 Integra';
+    else if(bk==='F2_Integra') benchLabel='Intensidad F2 Integra';
+    else if(bk==='F3_Integra') benchLabel='Intensidad F3 Integra';
+    benchYvals = xLabels.map(() => bVal / esc.div);
+  }
+  if(benchYvals.some(v=>v>0)){
+    traces.push({type:'scatter', mode:'markers',
+      name: benchLabel,
+      x: xLabels, y: benchYvals,
+      marker:{size:11, color:'#E74C3C', symbol:'circle',
+              line:{width:1.5, color:'#fff'}}});
+  }
+  // Leyenda Active/Passive
+  [...new Set(sorted.map(s=>s.mgmt))].sort().forEach(m => {
+    traces.push({type:'scatter', mode:'markers', x:[null], y:[null],
+      name: MGMT_LABEL[m]||m, marker:{color:MGMT_COLOR[m]||'#666', size:10}});
+  });
+  // --- Layout con orden vertical: Títulos → SubCats → Barras → Leyenda ---
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:'',
+               tickfont:{size:10}};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  // Leyenda al fondo (debajo de todo)
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.25, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)'};
+  // Margen superior generoso: Títulos (yshift +38) + SubCats (yshift +18)
+  lay.margin = {l:60, r:30, t:90, b:100};
+  // Separadores entre bloques (recorren toda la altura incluidas anotaciones)
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'paper',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  // --- Anotaciones con jerarquía visual estricta ---
+  const annots = [];
+  // Nivel 1 (más alto): Títulos de bloque — bold, 13px
+  bloques.forEach(b => {
+    annots.push({
+      x:b.centro, xref:'x', y:1, yref:'y domain', yshift:38,
+      text:'<b>'+b.nombre+'</b>', showarrow:false,
+      font:{size:13, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+    });
+  });
+  // Nivel 2 (intermedio): SubCats — italic, 10px, color gris institucional,
+  // posicionadas entre los títulos y el borde superior del área de datos.
+  sorted.forEach((s, i) => {
+    if(s.subcat){
+      annots.push({
+        x:i, xref:'x', y:1, yref:'y domain', yshift:18,
+        text:'<i>'+s.subcat+'</i>', showarrow:false,
+        font:{size:10, color:'#6B7B8D'}, xanchor:'center', yanchor:'bottom'
+      });
+    }
+  });
+  lay.annotations = annots;
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
