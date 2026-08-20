@@ -1,0 +1,222 @@
+Now rewrite the JS function:
+
+The issue is the `Plus` column assignment in `PresentacionBuilder.__init__`. Let me check:
+
+The issue is that `_base()` strips columns. Let me check:
+
+`_base()` doesn't strip GyP columns — they pass through. The problem in my test was that `PresentacionBuilder.__init__` calls `_base()` which filters `PORTAFOLIOS_VALIDOS`. My test data had `PORTAFOLIO='IN-F1'` which may not be in that set. Let me check:
+
+My test used `IN-F1` instead of `IN-FONDO1`. Let me fix the test:
+
+Hay duplicados porque `filas` tiene 2 AFPs y el JS no filtra por AFP. El `best` map ya no opera como antes. Necesito que para cada bloque, el top sea el de mayor Intensidad independientemente de la AFP (o solo de Integra, ya que el chart es solo de Integra). Veamos: los datos vienen duplicados (Integra y Habitat con los mismos nombres). El JS necesita deduplicar. Miremos el código JS actual:
+
+I need to filter to only Integra AFP in the JS, or deduplicate by taking highest per name+bloque. Since this chart is about "Integra's instruments", I'll filter to Integra:
+
+Todo validado: 10 barras (5+5), word-wrap funciona (`Asia Fund Long<br>Name`), benchmark en todas las barras, leyenda con 3 items, 2 bloques. Aquí van los bloques:
+
+---
+
+## BLOQUE 1 — Reemplazo de `top_por_subcat_asset` (Python)
+
+**Buscar** (método completo, desde `def top_por_subcat_asset` hasta justo antes de `# PivotTables 10/13/14/16/17`):
+```python
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Para cada subcategoría de GYP_ASSET_PERF_MAP, devuelve el instrumento
+```
+...hasta la línea que dice:
+```python
+        return out[["Bloque", "SubCat", "Mgmt_Nombre", COL["intensidad"]]]
+```
+
+**Reemplazar por:**
+```python
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Top 5 FFMM/ETFs por Intensidad para cada bloque (Equities = RV,
+        Fixed Income = RF) dentro del universo AFO líquido. Incluye Mgmt
+        (Active/Passive) y la Intensidad promedio de la cartera como benchmark."""
+        d = self.df.copy()
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            return pd.DataFrame()
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        d = _sin_huella_cero(d)
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        d[COL["huella"]] = pd.to_numeric(d[COL["huella"]], errors="coerce").fillna(0.0)
+        d[COL["inv"]] = pd.to_numeric(d[COL["inv"]], errors="coerce").fillna(0.0)
+        # Intensidad promedio de toda la cartera (benchmark visual)
+        total_inv = d[COL["inv"]].sum()
+        intens_prom = d[COL["huella"]].sum() / total_inv if total_inv else 0.0
+        AC_MAP = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"]])
+            if agg_df.empty:
+                continue
+            top5 = agg_df.head(5)
+            for _, row in top5.iterrows():
+                nombre = row[COL["nombre"]]
+                top_rows = sub[sub[COL["nombre"]] == nombre]
+                mgmt = "A"
+                if not top_rows.empty and "GyP_A_P" in top_rows.columns:
+                    raw = str(top_rows["GyP_A_P"].iloc[0]).strip()
+                    mgmt = raw if raw in ("A", "P") else "A"
+                filas.append({
+                    "Bloque": bloque,
+                    "Mgmt": mgmt,
+                    COL["nombre"]: nombre,
+                    COL["intensidad"]: float(row[COL["intensidad"]]),
+                })
+        out = pd.DataFrame(filas)
+        if out.empty:
+            return out
+        out["Mgmt_Nombre"] = out["Mgmt"] + "|" + out[COL["nombre"]]
+        result = out[["Bloque", "Mgmt_Nombre", COL["intensidad"]]].copy()
+        # Agregar fila especial con la Intensidad promedio del portafolio
+        bench = pd.DataFrame([{
+            "Bloque": "_BENCHMARK_",
+            "Mgmt_Nombre": "Intens_Prom_Cartera",
+            COL["intensidad"]: intens_prom,
+        }])
+        return pd.concat([result, bench], ignore_index=True)
+```
+
+---
+
+## BLOQUE 2 — Reemplazo completo de `assetPerformanceAfp` (JS)
+
+**Buscar** (desde el comentario del Chart 3 hasta el `}` de cierre, justo antes de `function render(){`):
+```
+// --- Chart 3: "Asset Performance por AFP" — barras verticales agrupadas
+//     en 3 bloques (Equities / Fixed Income / Market Exposure). 1 barra por
+//     subcategoría = instrumento con mayor Intensidad. Color = Active / Passive.
+const MGMT_COLOR = {A: '#00AECB', P: '#002060'};
+const MGMT_LABEL = {A: 'Active', P: 'Passive'};
+
+function assetPerformanceAfp(div, corte){
+```
+...hasta...
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+**Reemplazar por:**
+```
+// --- Chart 3: "Asset Performance" — 2 bloques (Equities / Fixed Income).
+//     Top 5 FFMM/ETFs por Intensidad desc en cada bloque. Color = Active/Passive.
+//     Marcador circular = Intensidad promedio de la cartera Integra (benchmark).
+//     Nombres de emisores con word-wrap automático en el eje X. ---------------
+const MGMT_COLOR = {A: '#00AECB', P: '#002060'};
+const MGMT_LABEL = {A: 'Active', P: 'Passive'};
+
+// Word-wrap inteligente: parte el nombre en líneas de ≤maxChars caracteres,
+// cortando por espacios. Devuelve string con <br>.
+function _wrapName(txt, maxChars){
+  if(!txt || txt.length <= maxChars) return txt||'';
+  const words = txt.split(/\s+/);
+  const lines = []; let cur = '';
+  for(const w of words){
+    if(cur && (cur.length + 1 + w.length) > maxChars){ lines.push(cur); cur = w; }
+    else { cur = cur ? cur + ' ' + w : w; }
+  }
+  if(cur) lines.push(cur);
+  return lines.join('<br>');
+}
+
+function assetPerformanceAfp(div, corte){
+  // Leer datos + benchmark
+  let benchVal = 0;
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte) ||
+       r.METRICA!=='Intensidad') continue;
+    if(r.DIM_1==='_BENCHMARK_'){
+      benchVal = Math.max(benchVal, +r.VALOR||0); continue;
+    }
+    const parts = (r.DIM_2||'').split('|');
+    const mgmt = parts[0] || 'A';
+    const nombre = parts.slice(1).join('|') || '';
+    filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||''});
+  }
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+  // Solo Integra (el chart es de la cartera de Integra)
+  const integra = filas.filter(f => f.afp==='Integra' || f.afp==='');
+  if(!integra.length){ document.getElementById(div).innerHTML=''; return; }
+  // Top 5 por bloque, desc por Intensidad
+  const bloqueOrden = ['Equities','Fixed Income'];
+  const sorted = [];
+  bloqueOrden.forEach(b => {
+    const grp = integra.filter(f=>f.bloque===b).sort((a,c)=>c.val-a.val).slice(0,5);
+    sorted.push(...grp);
+  });
+  // Word-wrap: ~14 chars por línea (adaptado a ancho típico de barra)
+  const xLabels = sorted.map(s => _wrapName(s.nombre, 14));
+  const esc = _escalaEje(sorted.map(s=>s.val));
+  const yVals = sorted.map(s=>s.val / esc.div);
+  const colores = sorted.map(s => MGMT_COLOR[s.mgmt] || '#666');
+  // Bloques para separadores y títulos
+  const bloques = [];
+  let cursor = 0;
+  bloqueOrden.forEach(bNombre => {
+    const items = sorted.filter(s=>s.bloque===bNombre);
+    if(!items.length) return;
+    const start = cursor; cursor += items.length;
+    bloques.push({nombre:bNombre, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  // Trace 1: barras (sin leyenda propia; leyenda manual abajo)
+  const traces = [
+    {type:'bar', x:xLabels, y:yVals, showlegend:false,
+     marker:{color:colores},
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto},
+     customdata:sorted.map(s=>s.nombre),
+     hovertemplate:'%{customdata}<br>Intensidad: %{y:.2f}<extra></extra>'}
+  ];
+  // Trace 2: benchmark marker (Intensidad promedio Integra)
+  const benchEsc = benchVal / esc.div;
+  if(benchEsc > 0){
+    traces.push({type:'scatter', mode:'markers',
+      name:'Intensidad promedio cartera Integra',
+      x: xLabels, y: xLabels.map(() => benchEsc),
+      marker:{size:10, color:'#0B3C5D', symbol:'circle'}});
+  }
+  // Traces 3+: leyenda manual Active/Passive
+  const mgmtPresentes = [...new Set(sorted.map(s=>s.mgmt))].sort();
+  mgmtPresentes.forEach(m => {
+    traces.push({type:'scatter', mode:'markers', x:[null], y:[null],
+      name: MGMT_LABEL[m]||m, marker:{color:MGMT_COLOR[m]||'#666', size:10}});
+  });
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:'',
+               tickfont:{size:10}};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.28, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)'};
+  // Margen inferior generoso para word-wrap de nombres
+  lay.margin = {l:60, r:30, t:55, b:120};
+  // Separadores punteados entre bloques
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'y domain',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  // Títulos de bloque arriba
+  lay.annotations = bloques.map(b => ({
+    x:b.centro, xref:'x', y:1, yref:'y domain', yshift:14,
+    text:'<b>'+b.nombre+'</b>', showarrow:false,
+    font:{size:12, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
