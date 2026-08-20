@@ -1,0 +1,333 @@
+Ahora tengo la estructura completa. La hoja **BU** tiene la columna `Nombre` (col 5 = "Empresa") y `Proxy` (col 8 = "FUND_NAME" del benchmark). El match es: `Nombre` del emisor en BU → `Proxy` → buscar ese `Proxy` como `FUND_NAME` en hoja YYYYMM → tomar `FUND_FINANCED_CARBON_EMISSIONS`.
+
+Ahora entiendo la lógica completa. Los emisores con `Tiene Huella = 'Riesgos'` son los que SÍ tienen cobertura ESG propia (no proxy). Pero igualmente tienen un proxy asignado como benchmark de comparación. Implemento todo:
+
+Now add the new PresentacionBuilder method:
+
+Now add the method itself. Let me find the right place:
+
+Now inject the emisor→proxy map into the dashboard JS and add the new chart function + card + slicer:
+
+Now add the JS chart function. Let me find the right spot (before `function render()`):
+
+Add the call in `render()` and the card with AFP slicer:
+
+Now add the AFP slicer for the gEsgBench card (same pattern as gAssetPerf slicer):
+
+Todo validado. Verifico los cálculos de benchmark: `Inkia Energy` tiene FCE=208.76 y weight=0.05, así que benchmark = 208.76 × 0.05 = 10.438 ✓. Aquí van los bloques:
+
+---
+
+## BLOQUE 1 — Loader del mapeo emisor→proxy (Python, junto a `_cargar_benchmarks_ffmm`)
+
+**Buscar** (el final de `_cargar_benchmarks_ffmm`, justo antes de `def construir_dashboard`):
+```python
+        return result
+    except Exception as e:
+        print(f"  [Benchmarks FFMM] Error: {e}")
+        return {}
+
+
+def construir_dashboard
+```
+
+**Reemplazar por:**
+```python
+        return result
+    except Exception as e:
+        print(f"  [Benchmarks FFMM] Error: {e}")
+        return {}
+
+
+def _cargar_emisor_proxy_map(anio: str, mes: str) -> dict:
+    """Lee hoja 'BU' de Lista Proxies: mapea Nombre (col 5) → Proxy FUND_NAME
+    (col 8) para emisores con cobertura ESG propia (Tiene Huella = 'Riesgos').
+    Devuelve {nombre_emisor: {proxy: fund_name, fce: float}}."""
+    ruta = RUTA_BENCHMARKS_FFMM
+    if not FsPath(ruta).exists():
+        return {}
+    try:
+        wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+        # Paso 1: mapeo emisor → proxy FUND_NAME desde hoja BU
+        if "BU" not in wb.sheetnames:
+            wb.close()
+            return {}
+        ws_bu = wb["BU"]
+        emisor_proxy = {}
+        for row in ws_bu.iter_rows(min_row=2, values_only=True):
+            nombre = row[5] if len(row) > 5 else None  # col 5 = Nombre
+            tiene = str(row[6] or "") if len(row) > 6 else ""  # col 6 = Tiene Huella?
+            proxy = row[8] if len(row) > 8 else None  # col 8 = Proxy (FUND_NAME)
+            if nombre and tiene == "Riesgos" and proxy:
+                emisor_proxy[str(nombre).strip()] = str(proxy).strip()
+        # Paso 2: FCE de cada proxy desde hoja YYYYMM
+        hoja = f"{anio}{mes}"
+        fce_map = {}
+        if hoja in wb.sheetnames:
+            ws_mm = wb[hoja]
+            hdr = list(ws_mm.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+            idx_fn = idx_fce = None
+            for i, v in enumerate(hdr):
+                if v == "FUND_NAME": idx_fn = i
+                if v == "FUND_FINANCED_CARBON_EMISSIONS": idx_fce = i
+            if idx_fn is not None and idx_fce is not None:
+                for row in ws_mm.iter_rows(min_row=2, values_only=True):
+                    fn = row[idx_fn] if idx_fn < len(row) else None
+                    fv = row[idx_fce] if idx_fce < len(row) else None
+                    if fn and fv is not None:
+                        try:
+                            fce_map[str(fn).strip()] = float(fv)
+                        except (ValueError, TypeError):
+                            pass
+        wb.close()
+        # Paso 3: combinar
+        result = {}
+        for emisor, proxy_name in emisor_proxy.items():
+            # Buscar FCE: match exacto o parcial
+            fce = fce_map.get(proxy_name)
+            if fce is None:
+                # Match parcial (el nombre en BU puede ser ligeramente distinto)
+                for k, v in fce_map.items():
+                    if proxy_name in k or k in proxy_name:
+                        fce = v
+                        break
+            if fce is not None:
+                result[emisor] = {"proxy": proxy_name, "fce": fce}
+        print(f"  [Emisor→Proxy] {len(result)} emisores con benchmark de {len(emisor_proxy)} con cobertura ESG")
+        return result
+    except Exception as e:
+        print(f"  [Emisor→Proxy] Error: {e}")
+        return {}
+
+
+def construir_dashboard
+```
+
+---
+
+## BLOQUE 2 — Nuevo método Python `contribuyentes_esg_benchmark`
+
+**Buscar:**
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def top_por_subcat_asset
+```
+
+**Reemplazar por:**
+```python
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def contribuyentes_esg_benchmark(self) -> pd.DataFrame:
+        """Emisores con cobertura ESG propia (no proxy), ordenados por Intensidad
+        desc. Incluye Weight y nombre del proxy benchmark para cada emisor."""
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra", "Proxies"])]
+        d = _sin_huella_cero(d)
+        full = _agg(d, [COL["nombre"]], [COL["huella"], COL["intensidad"], COL["inv"]])
+        if full.empty:
+            return full
+        full["Ranking"] = full[COL["intensidad"]].rank(ascending=False, method="first").astype(int)
+        full["Weight"] = (full[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0
+        return full.reset_index(drop=True)
+
+    def top_por_subcat_asset
+```
+
+---
+
+## BLOQUE 3 — Registrar nuevo OBJETO en `build_all()`
+
+**Buscar:**
+```python
+            "Contrib_Intensidad_AFP": self.contribuyentes_intensidad_afp(),
+            "TopSubCat_Asset": self.top_por_subcat_asset(),
+```
+
+**Reemplazar por:**
+```python
+            "Contrib_Intensidad_AFP": self.contribuyentes_intensidad_afp(),
+            "Contrib_ESG_Benchmark": self.contribuyentes_esg_benchmark(),
+            "TopSubCat_Asset": self.top_por_subcat_asset(),
+```
+
+---
+
+## BLOQUE 4 — Inyectar emisor_proxy_map en el JS del dashboard
+
+**Buscar:**
+```python
+    js = js.replace("__BENCHMARKS_FFMM__", json.dumps(bench_ffmm, ensure_ascii=False))
+```
+
+**Reemplazar por:**
+```python
+    js = js.replace("__BENCHMARKS_FFMM__", json.dumps(bench_ffmm, ensure_ascii=False))
+
+    # Mapeo emisor→{proxy, fce} para chart "Emisores con cobertura ESG"
+    emisor_proxy = _cargar_emisor_proxy_map(_anio, _mes)
+    js = js.replace("__EMISOR_PROXY__", json.dumps(emisor_proxy, ensure_ascii=False))
+```
+
+---
+
+## BLOQUE 5 — Chart 4 JS (antes de `function render()`)
+
+**Buscar** (final del chart anterior, justo antes de `function render()`):
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+**Reemplazar por:**
+```
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+// --- Chart 4: "Emisores con cobertura ESG vs Benchmark" -------------------
+// Barras horizontales = Intensidad. Marcadores = Intensidad del benchmark
+// (FCE del proxy × weight del emisor). Slicer de AFP.
+const EMISOR_PROXY = __EMISOR_PROXY__;
+
+function emisoresEsgBenchmark(div, corte, afpSel){
+  const afp = afpSel || 'Integra';
+  // Leer Contrib_ESG_Benchmark para la AFP seleccionada
+  const emisores = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='Contrib_ESG_Benchmark' || String(r.FECHA_CORTE)!==String(corte) ||
+       (r.AFP||'')!==afp) continue;
+    if(!r.DIM_1) continue;
+    let e = emisores.find(x=>x.nombre===r.DIM_1);
+    if(!e){ e={nombre:r.DIM_1}; emisores.push(e); }
+    if(r.METRICA==='Intensidad') e.intens = +r.VALOR||0;
+    if(r.METRICA==='Weight') e.weight = +r.VALOR||0;
+  }
+  // Filtrar solo emisores que tienen proxy en EMISOR_PROXY (cobertura ESG propia)
+  const conProxy = emisores.filter(e => {
+    // Match: nombre exacto o parcial
+    for(const k of Object.keys(EMISOR_PROXY)){
+      if(e.nombre===k || e.nombre.includes(k) || k.includes(e.nombre)){
+        e.proxyInfo = EMISOR_PROXY[k]; e.matchKey = k; return true;
+      }
+    }
+    return false;
+  });
+  if(!conProxy.length){ document.getElementById(div).innerHTML='<p style="color:#8A99A8;text-align:center">Sin emisores con cobertura ESG para '+afp+'</p>'; return; }
+  // Ordenar desc por Intensidad, tomar top 15
+  conProxy.sort((a,b)=>(b.intens||0)-(a.intens||0));
+  const top = conProxy.slice(0, 15);
+  // Invertir para que el mayor quede arriba (horizontal bottom-up)
+  const sorted = top.slice().reverse();
+  const yNames = sorted.map(s=>s.nombre);
+  const xIntens = sorted.map(s=>s.intens||0);
+  const xBench = sorted.map(s => {
+    const fce = s.proxyInfo ? s.proxyInfo.fce : 0;
+    return fce * (s.weight||0);
+  });
+  const colores = sorted.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad emisor',
+     x:xIntens, y:yNames, marker:{color:colores}, showlegend:false,
+     text:xIntens.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Benchmark',
+     x:xBench, y:yNames,
+     marker:{size:11, color:'#E74C3C', symbol:'circle',
+             line:{width:1.5, color:'#fff'}},
+     hovertemplate:'%{y}<br>Benchmark: %{x:.2f}<extra></extra>'}
+  ];
+  const lay = LAYOUT();
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:'',
+               automargin:true, tickfont:{size:10}};
+  lay.xaxis = {title:'Intensidad (Tn CO2 / USD MM)', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:200, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, sorted.length*28 + 100);
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+
+
+function render(){
+```
+
+---
+
+## BLOQUE 6 — Llamada en `render()`
+
+**Buscar:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Total_Integra'));
+}
+```
+
+**Reemplazar por:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Total_Integra'));
+  safe('gEsgBench',            () => emisoresEsgBenchmark('gEsgBench', cAct,
+    document.getElementById('selAfpEsgBench') ? document.getElementById('selAfpEsgBench').value : 'Integra'));
+}
+```
+
+---
+
+## BLOQUE 7 — Tarjeta + slicer AFP en la lista de tarjetas
+
+**Buscar:**
+```python
+        ("gAssetPerf", "Asset Performance — top instrumento por subcategoría (Active vs Passive)", True),
+    ]
+```
+
+**Reemplazar por:**
+```python
+        ("gAssetPerf", "Asset Performance — top instrumento por subcategoría (Active vs Passive)", True),
+        ("gEsgBench", "Emisores con cobertura ESG propia vs Benchmark", True),
+    ]
+```
+
+---
+
+## BLOQUE 8 — Slicer AFP en la generación de cards HTML
+
+**Buscar** (el bloque que genera `cards`):
+```python
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}"><h3>{titulo}</h3>'
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'Benchmark: </label><select id="selBenchAssetPerf" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{bench_opts_html}</select></div>' if cid == "gAssetPerf" else "")
+         + f'<div id="{cid}" class="plot"></div></div>')
+        for cid, titulo, full in tarjetas)
+```
+
+**Reemplazar por:**
+```python
+    # Opciones del slicer AFP para Chart 4 (Emisores ESG vs Benchmark)
+    afp_esg_opts = ["Integra", "Profuturo", "Prima", "Habitat", "Ex_Integra"]
+    afp_esg_html = "".join(
+        f'<option value="{a}"{" selected" if a=="Integra" else ""}>{a}</option>'
+        for a in afp_esg_opts)
+
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}"><h3>{titulo}</h3>'
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'Benchmark: </label><select id="selBenchAssetPerf" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{bench_opts_html}</select></div>' if cid == "gAssetPerf" else "")
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'AFP: </label><select id="selAfpEsgBench" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{afp_esg_html}</select></div>' if cid == "gEsgBench" else "")
+         + f'<div id="{cid}" class="plot"></div></div>')
+        for cid, titulo, full in tarjetas)
+```
