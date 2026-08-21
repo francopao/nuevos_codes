@@ -1,0 +1,214 @@
+Aquí tienes los bloques exactos. Son **5 cambios en total** dentro del mismo archivo `huella_pipeline.py` — 2 para eliminar Ruta A, 3 para el filtro por AFP (uno de esos 3 toca la parte JavaScript del dashboard, que igual vive dentro del `.py`, incrustada en el string `JS_DASHBOARD`; no es un archivo aparte).
+
+Resumen antes de entrar al detalle:
+
+| # | Qué hace | Dónde |
+|---|---|---|
+| 1 | Borra `construir_valorizacion()` (Ruta A) | Python |
+| 2 | Borra `_procesar_corte()` + `run_pipeline()` (Ruta A) | Python |
+| 3 | Filtro por AFP en el motor de gráficos apilados | JS (dentro del .py) |
+| 4 | Filtro por AFP en Chart 52/63 | JS (dentro del .py) |
+| 5 | Selectores nuevos en las 3 tarjetas del dashboard | Python |
+
+---
+
+## PARTE 1 — Eliminar Ruta A por completo
+
+### Cambio 1 — Borrar `construir_valorizacion()`
+
+**Ctrl+F para encontrar el INICIO del bloque a borrar:**
+```
+def construir_valorizacion(cfg: "Config", verbose: bool = True):
+```
+
+**Borra todo desde esa línea hasta (sin incluirla) esta otra línea, que debe quedar intacta:**
+```
+def _market_cap_seguro(cfg: "Config", verbose: bool = True):
+```
+
+Es decir: selecciona desde `def construir_valorizacion(...)` hasta justo antes de `def _market_cap_seguro(...)` y bórralo. `_market_cap_seguro` NO se toca — la usa Ruta B también.
+
+---
+
+### Cambio 2 — Borrar `_procesar_corte()` y `run_pipeline()`
+
+**Ctrl+F para encontrar el INICIO del bloque a borrar:**
+```
+def _procesar_corte(cfg, exp, verbose=True):
+```
+
+**Borra todo desde esa línea hasta (sin incluirla) esta otra línea, que debe quedar intacta:**
+```
+if __name__ == "__main__":
+```
+
+Con esto desaparecen `_procesar_corte()` y `run_pipeline()` completos. `run_pipeline_bd1s()` (Ruta B) no se toca.
+
+> **Nota:** Dejo intactas las clases `QueryReader`, `CajaLoader`, `TipoCambioLoader`, `ParametriaBuilder`, y los métodos `BDMSCIBuilder.append_proxies()` / `ProxyEngine.load()`. Con estos 2 cambios quedan sin ningún llamador — código inerte que nunca se ejecuta, ya no hay forma de disparar Ruta A por accidente — pero no las borro para no arriesgar un error de edición en clases largas que no aportan nada al riesgo que querías cerrar. Si más adelante quieres el archivo 100% limpio de eso también, lo vemos aparte con calma.
+
+---
+
+## PARTE 2 — Filtro por AFP en Chart 52, Chart 63 y "Exposición soberana por emisor"
+
+### Cambio 3 — Motor de gráficos apilados (`apiladoPorCorte`): que sepa filtrar por AFP
+
+**Ctrl+F:**
+```
+      if(opts.excluir && opts.excluir.includes(r.DIM_1)) continue;
+```
+
+**Código actual (para confirmar que encontraste el lugar correcto):**
+```javascript
+    for(const r of HIST){
+      if(r.OBJETO!==objeto || r.METRICA!==met) continue;
+      if(String(r.FECHA_CORTE)!==String(corte)) continue;
+      if(opts.excluir && opts.excluir.includes(r.DIM_1)) continue;
+      const k = opts.clave ? opts.clave(r) : r.DIM_1;
+```
+
+**Reemplázalo por:**
+```javascript
+    for(const r of HIST){
+      if(r.OBJETO!==objeto || r.METRICA!==met) continue;
+      if(String(r.FECHA_CORTE)!==String(corte)) continue;
+      if(opts.excluir && opts.excluir.includes(r.DIM_1)) continue;
+      if(opts.afp && (r.AFP||'Integra')!==opts.afp) continue;
+      const k = opts.clave ? opts.clave(r) : r.DIM_1;
+```
+
+Solo agregué una línea. Como el filtro se activa nada más si `opts.afp` viene definido, el resto de charts que usan esta misma función (Chart 58 "Huella soberana por país", Estrategia, etc.) siguen funcionando exactamente igual que hoy — sin filtrar por AFP, como ya era.
+
+---
+
+### Cambio 4 — `sectorMsciProxies` (usada por Chart 52 y Chart 63): que reciba y pase el AFP
+
+**Ctrl+F:**
+```
+function sectorMsciProxies(div, metrica, cAct, cCmp){
+```
+
+**Código actual completo:**
+```javascript
+function sectorMsciProxies(div, metrica, cAct, cCmp){
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + ' (Proxies)'); });
+  apiladoPorCorte(div, 'Sector_MSCI_Proxies', metrica, cAct, cCmp, {
+    orden: ordenSeries,
+    clave: r => r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : ''),
+    marker: markerCategoria,
+    y: metrica,
+    compacto: true
+  });
+}
+```
+
+**Reemplázalo por:**
+```javascript
+function sectorMsciProxies(div, metrica, cAct, cCmp, afp){
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + ' (Proxies)'); });
+  apiladoPorCorte(div, 'Sector_MSCI_Proxies', metrica, cAct, cCmp, {
+    orden: ordenSeries,
+    clave: r => r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : ''),
+    marker: markerCategoria,
+    y: metrica,
+    compacto: true,
+    afp: afp
+  });
+}
+```
+
+---
+
+### Cambio 5 — Las 3 líneas `safe(...)` que disparan los charts: que lean el selector y por defecto usen Integra
+
+Son 3 líneas independientes — búscalas y reemplázalas una por una.
+
+**5a. Ctrl+F:**
+```
+safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true}));
+```
+**Reemplázala por:**
+```javascript
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true,
+    afp: document.getElementById('selAfpSoberanos') ? document.getElementById('selAfpSoberanos').value : 'Integra'}));
+```
+
+**5b. Ctrl+F:**
+```
+safe('gSector52',     () => sectorMsciProxies('gSector52','Huella', cAct, cCmp));
+```
+**Reemplázala por:**
+```javascript
+  safe('gSector52',     () => sectorMsciProxies('gSector52','Huella', cAct, cCmp,
+    document.getElementById('selAfpSector52') ? document.getElementById('selAfpSector52').value : 'Integra'));
+```
+
+**5c. Ctrl+F:**
+```
+safe('gSector63',     () => sectorMsciProxies('gSector63','Intensidad', cAct, cCmp));
+```
+**Reemplázala por:**
+```javascript
+  safe('gSector63',     () => sectorMsciProxies('gSector63','Intensidad', cAct, cCmp,
+    document.getElementById('selAfpSector63') ? document.getElementById('selAfpSector63').value : 'Integra'));
+```
+
+---
+
+### Cambio 6 — Agregar los 3 selectores `<select>` (AFP) a las tarjetas del dashboard
+
+Este es Python puro (genera el HTML de las tarjetas). Reutiliza la misma lista de AFPs que ya existe para el chart de Emisores ESG (`afp_esg_html`), así que no hay que inventar nada nuevo.
+
+**Ctrl+F:**
+```
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gAssetPerf"}
+```
+
+**Código actual completo (desde esa línea):**
+```python
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gAssetPerf"}
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}{" card-ppt" if cid in _IDS_PPT else ""}"><h3>{titulo}</h3>'
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'Benchmark: </label><select id="selBenchAssetPerf" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{bench_opts_html}</select></div>' if cid == "gAssetPerf" else "")
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'AFP: </label><select id="selAfpEsgBench" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{afp_esg_html}</select></div>' if cid == "gEsgBench" else "")
+         + f'<div id="{cid}" class="plot"></div></div>')
+        for cid, titulo, full in tarjetas)
+```
+
+**Reemplázalo por:**
+```python
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gAssetPerf"}
+    _IDS_AFP_SLICER = {"gSector52": "selAfpSector52", "gSector63": "selAfpSector63",
+                        "gSoberanos": "selAfpSoberanos"}
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}{" card-ppt" if cid in _IDS_PPT else ""}"><h3>{titulo}</h3>'
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'Benchmark: </label><select id="selBenchAssetPerf" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{bench_opts_html}</select></div>' if cid == "gAssetPerf" else "")
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'AFP: </label><select id="selAfpEsgBench" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{afp_esg_html}</select></div>' if cid == "gEsgBench" else "")
+         + (f'<div style="margin:0 0 8px 4px"><label style="font-size:12px;color:#8A99A8">'
+            f'AFP: </label><select id="{_IDS_AFP_SLICER.get(cid)}" '
+            f'onchange="render()" style="font-size:12px;padding:2px 6px">'
+            f'{afp_esg_html}</select></div>' if cid in _IDS_AFP_SLICER else "")
+         + f'<div id="{cid}" class="plot"></div></div>')
+        for cid, titulo, full in tarjetas)
+```
+
+---
+
+## Una decisión de diseño que tomé, para que la conozcas
+
+Puse **un selector independiente por tarjeta** (`selAfpSector52`, `selAfpSector63`, `selAfpSoberanos`) en vez de uno solo compartido entre Chart 52 y 63 (que usan la misma data). Es un poco redundante — vas a elegir la AFP dos veces si quieres ver ambos charts de la misma AFP — pero es el mismo patrón que ya usan `gAssetPerf`/`gEsgBench` en tu dashboard, y evitar un selector compartido entre dos tarjetas me evita el riesgo de un id duplicado en el HTML (rompería el segundo selector silenciosamente). Si luego lo quieres unificar en un solo control, es un cambio pequeño aparte.
+
+Todos los selectores nuevos abren con **Integra ya seleccionada por defecto**, igual que el patrón existente.
