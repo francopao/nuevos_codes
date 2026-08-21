@@ -1,0 +1,162 @@
+Encontré dos cosas importantes revisando el código antes de tocar nada: (1) el chart "Huella soberana por país" (Chart 58) depende internamente de `soberanos()` — si solo cambio el filtro ahí, se te mueve un tercer chart que no mencionaste; lo aíslo primero. (2) Al auditar "una única forma de calcular Intensidad", encontré exactamente **una** desviación real en todo el script (te la explico en el Cambio 6).
+
+Sobre el AFP por fondos F1/F2/F3: **no hace falta código nuevo para eso** — ya quedó resuelto la vez pasada. Cada AFP ya corre su propio `PresentacionBuilder` con solo sus F1/F2/F3, y el selector `selAfpSoberanos` que agregamos ya filtra el chart a una sola AFP. Solo hay que crear el selector gemelo para el nuevo chart de Intensidad (Cambio 4/5).
+
+---
+
+## Cambio 1 — Aislar "Huella soberana por país" (Chart 58) para que NO herede el cambio de filtro
+
+**Ctrl+F:**
+```
+    def soberanos_por_pais(self, top_n: int = 4) -> pd.DataFrame:
+```
+
+**Código actual completo:**
+```python
+    def soberanos_por_pais(self, top_n: int = 4) -> pd.DataFrame:
+        sob = self.soberanos()
+        if sob.empty:
+            return pd.DataFrame(columns=["Pais"] + METRICAS)
+        sob = sob.copy()
+        sob["Pais"] = sob[COL["nombre"]].map(PAIS_POR_EMISOR_SOBERANO).fillna("Otros")
+        met = [m for m in [COL["huella"], COL["intensidad"],
+                           COL["intensidad_m"], COL["inv"]] if m in sob.columns]
+        out = (sob.groupby("Pais", dropna=False)[met].sum()
+                  .sort_values(COL["huella"], ascending=False).reset_index())
+```
+
+**Reemplázalo por:**
+```python
+    def soberanos_por_pais(self, top_n: int = 4) -> pd.DataFrame:
+        # Filtro propio (independiente de soberanos()) para que Chart 58 no se
+        # mueva si el universo de soberanos() cambia (p.ej. a Estrategia=GOB).
+        d = self.df[
+            self.df[COL["plus"]].isin(["ETF", "SOV"])
+            & (self.df[COL["plus_1"]] == "SOV")
+        ]
+        d = _sin_huella_cero(d)
+        sob = _agg(d, [COL["nombre"]], METRICAS)
+        if sob.empty:
+            return pd.DataFrame(columns=["Pais"] + METRICAS)
+        sob = sob.copy()
+        sob["Pais"] = sob[COL["nombre"]].map(PAIS_POR_EMISOR_SOBERANO).fillna("Otros")
+        met = [m for m in [COL["huella"], COL["intensidad"],
+                           COL["intensidad_m"], COL["inv"]] if m in sob.columns]
+        out = (sob.groupby("Pais", dropna=False)[met].sum()
+                  .sort_values(COL["huella"], ascending=False).reset_index())
+```
+
+(El resto del método, desde `if len(out) > top_n:` hacia abajo, no lo toques — queda igual.)
+
+---
+
+## Cambio 2 — Filtrar "Soberanos" (emisor) por Estrategia == GOB
+
+**Ctrl+F:**
+```
+    def soberanos(self) -> pd.DataFrame:
+        d = self.df[
+            self.df[COL["plus"]].isin(["ETF", "SOV"])
+            & (self.df[COL["plus_1"]] == "SOV")
+        ]
+        d = _sin_huella_cero(d)
+```
+
+**Reemplázalo por:**
+```python
+    def soberanos(self) -> pd.DataFrame:
+        d = self.df[self.df[COL["estrategia"]] == "GOB"]
+        d = _sin_huella_cero(d)
+```
+
+No toques nada más del método (las líneas `out = _agg(...)`, `% Huella`, `% AUM`, `Intensidad implícita` siguen igual — mismo formato del objeto, tal como pediste).
+
+---
+
+## Cambio 3 — Nueva tarjeta gemela de Intensidad
+
+**Ctrl+F:**
+```
+        ("gSoberanos", "Exposición soberana por emisor — comparación entre cortes", False),
+```
+
+**Reemplázalo por:**
+```python
+        ("gSoberanos", "Exposición soberana por emisor — comparación entre cortes", False),
+        ("gSoberanosInt", "Intensidad soberana por emisor — comparación entre cortes", False),
+```
+
+---
+
+## Cambio 4 — Registrar el chart nuevo (tamaño de tarjeta + selector de AFP)
+
+**Ctrl+F:**
+```
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gAssetPerf"}
+    _IDS_AFP_SLICER = {"gSector52": "selAfpSector52", "gSector63": "selAfpSector63",
+                        "gSoberanos": "selAfpSoberanos"}
+```
+
+**Reemplázalo por:**
+```python
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gSoberanosInt", "gAssetPerf"}
+    _IDS_AFP_SLICER = {"gSector52": "selAfpSector52", "gSector63": "selAfpSector63",
+                        "gSoberanos": "selAfpSoberanos", "gSoberanosInt": "selAfpSoberanosInt"}
+```
+
+No hace falta tocar el bloque de `cards = "".join(...)` de más abajo — ya quedó genérico la vez pasada (lee `_IDS_AFP_SLICER` con `.get(cid)`), así que el selector nuevo aparece solo.
+
+---
+
+## Cambio 5 — Disparar el chart nuevo en el render
+
+**Ctrl+F:**
+```
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true,
+    afp: document.getElementById('selAfpSoberanos') ? document.getElementById('selAfpSoberanos').value : 'Integra'}));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true,
+    afp: document.getElementById('selAfpSoberanos') ? document.getElementById('selAfpSoberanos').value : 'Integra'}));
+  safe('gSoberanosInt', () => apiladoPorCorte('gSoberanosInt','Soberanos','Intensidad', cAct,cCmp,{y:'Intensidad', compacto:true,
+    afp: document.getElementById('selAfpSoberanosInt') ? document.getElementById('selAfpSoberanosInt').value : 'Integra'}));
+```
+
+Nota que reutiliza el mismo objeto `'Soberanos'` — solo pide `'Intensidad'` en vez de `'Huella'`. Como `soberanos()` ya agrega con `METRICAS` completo (Huella, Intensidad, Intensidad-M, Inv MM$), el dato de Intensidad ya existe ahí, calculado con la fórmula oficial (Σ CO2-H × Weight-en-su-fondo) — no hay que recalcular nada aparte.
+
+---
+
+## Cambio 6 — Unificar el cálculo de Intensidad (la única desviación real que encontré)
+
+Auditar todo el archivo: revisé cada lugar donde se calcula algo etiquetado "Intensidad" o similar. Todos usan la fórmula oficial (suma de CO2-H × Weight por instrumento) — **excepto uno**: las líneas de referencia "Total_Integra / F1_Integra / F2_Integra / F3_Integra" que alimentan el selector de benchmark del chart "Asset Performance por AFP" (`selBenchAssetPerf`). Ahí se recalculaba como Huella/Inversión (una razón a nivel del bloque), en vez de sumar la Intensidad ya calculada por instrumento. Con Huella también revisé — no encontré ninguna desviación, solo se calcula de una forma en todo el script.
+
+**Ctrl+F:**
+```
+        # Intensidad promedio por fondo (F1/F2/F3) y total
+        total_inv = d[COL["inv"]].sum()
+        intens_total = d[COL["huella"]].sum() / total_inv if total_inv else 0.0
+        intens_por_fondo = {}
+        if COL["portafolio"] in d.columns:
+            for pf in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+                sf = d[d[COL["portafolio"]] == pf]
+                inv_f = sf[COL["inv"]].sum()
+                intens_por_fondo[pf] = sf[COL["huella"]].sum() / inv_f if inv_f else 0.0
+```
+
+**Reemplázalo por:**
+```python
+        # Intensidad promedio por fondo (F1/F2/F3) y total: SUMA de la Intensidad
+        # oficial por instrumento (CO2-H x Weight dentro de su propio fondo) —
+        # la misma fórmula que usa cualquier otro objeto del pipeline. Antes se
+        # recalculaba como Huella/Inv, una razón distinta a la métrica oficial.
+        intens_total = float(d[COL["intensidad"]].sum())
+        intens_por_fondo = {}
+        if COL["portafolio"] in d.columns:
+            for pf in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+                sf = d[d[COL["portafolio"]] == pf]
+                intens_por_fondo[pf] = float(sf[COL["intensidad"]].sum())
+```
+
+Con esto, en todo `huella_pipeline.py` queda exactamente una fórmula para Intensidad (Σ CO2-H × Weight-en-su-propio-fondo) y una para Huella (Σ CO2-H × Inv MM$). Las únicas cifras que siguen usando otra lógica son las de los benchmarks externos (ACWI/ILF/CEMB/EMB en `comparables()`), y eso es intencional: esos no son datos de tu cartera, son la intensidad publicada del propio ETF — no hay "peso dentro de un fondo Integra" que aplicarles.
