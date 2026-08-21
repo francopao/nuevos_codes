@@ -1,0 +1,232 @@
+Este pedido necesita dos piezas: (1) calcular en Python, por cada combinación (Bloque, SubCategoría), el promedio de Intensidad del universo FFMM/ETF no-proxy de Integra; (2) en el dashboard, que cada barra busque su propio promedio según a qué SubCat pertenece — no un solo número plano para todo el chart, como hacen hoy los otros benchmarks.
+
+Un hallazgo al revisar el código: los benchmarks actuales (`Total_Integra`, `F1_Integra`, etc.) no filtran por AFP al leerse en JS — si el histórico tiene más de una AFP, el último que se procese puede pisar el valor de Integra bajo esa misma etiqueta. Para que tu benchmark nuevo no herede ese problema, sí le agrego el filtro `AFP==Integra`. No toco el bug viejo porque no me lo pediste, pero te lo dejo anotado por si más adelante quieres que lo corrija también.
+
+---
+
+## Cambio 1 — Calcular el promedio por (Bloque, SubCat), sin proxies
+
+**Ctrl+F:**
+```
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"], COL["inv"]])
+```
+
+**Reemplázalo por:**
+```python
+        # --- Benchmark "Intensidad Promedio - Comparables": promedio de
+        # Intensidad por (Bloque, SubCat), solo instrumentos NO proxy (data
+        # MSCI directa), sobre el mismo universo GyP-válido del top 5. Cada
+        # barra se compara contra el promedio de SU propio grupo (misma
+        # Bloque + misma SubCat), no contra un único valor plano.
+        d_comp = d[d[COL["plus"]] != "Proxies"] if COL["plus"] in d.columns else d
+        bench_subcat: Dict[str, float] = {}
+        for ac_orig, bloque in AC_MAP.items():
+            sub_c = d_comp[d_comp["GyP_ASSET_CLASS"] == ac_orig]
+            if sub_c.empty:
+                continue
+            sub_c = sub_c.copy()
+            sub_c["__subcat"] = sub_c.apply(lambda r: _subcat(r, bloque), axis=1)
+            prom = sub_c.groupby("__subcat")[COL["intensidad"]].mean()
+            for sc, val in prom.items():
+                bench_subcat[bloque + "|" + str(sc)] = float(val)
+
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"], COL["inv"]])
+```
+
+---
+
+## Cambio 2 — Agregar esas filas de benchmark al resultado final
+
+**Ctrl+F:**
+```
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        return pd.concat([result, bench_df], ignore_index=True)
+```
+
+**Reemplázalo por:**
+```python
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        bench_subcat_df = pd.DataFrame([{
+            "Bloque": "_BENCH_SUBCAT_", "Mgmt_Nombre": clave, "SubCat": "",
+            COL["intensidad"]: val, "Weight": 0.0
+        } for clave, val in bench_subcat.items()])
+        return pd.concat([result, bench_df, bench_subcat_df], ignore_index=True)
+```
+
+---
+
+## Cambio 3 — Agregar la opción al slicer, y que sea la seleccionada por defecto
+
+**Ctrl+F:**
+```
+    bench_options = [
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+        ("F1_Integra", "Intensidad F1 Integra"),
+        ("F2_Integra", "Intensidad F2 Integra"),
+        ("F3_Integra", "Intensidad F3 Integra"),
+    ]
+    for fname in sorted(bench_ffmm.keys()):
+        bench_options.append((f"FFMM:{fname}", fname))
+    bench_opts_html = "".join(
+        f'<option value="{val}">{label}</option>' for val, label in bench_options)
+```
+
+**Reemplázalo por:**
+```python
+    bench_options = [
+        ("Comparables_Subcat", "Intensidad Promedio - Comparables"),
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+        ("F1_Integra", "Intensidad F1 Integra"),
+        ("F2_Integra", "Intensidad F2 Integra"),
+        ("F3_Integra", "Intensidad F3 Integra"),
+    ]
+    for fname in sorted(bench_ffmm.keys()):
+        bench_options.append((f"FFMM:{fname}", fname))
+    bench_opts_html = "".join(
+        f'<option value="{val}"{" selected" if val=="Comparables_Subcat" else ""}>{label}</option>'
+        for val, label in bench_options)
+```
+
+---
+
+## Cambio 4 — Leer las nuevas filas de benchmark en el JS
+
+**Ctrl+F:**
+```
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(r.METRICA==='Intensidad'){
+      if(r.DIM_1==='_BENCH_'){
+        benchmarks[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      const parts = (r.DIM_2||'').split('|');
+      const mgmt = parts[0]||'A', nombre = parts.slice(1).join('|')||'';
+      filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||'',
+                  subcat:r.DIM_3||''});
+    }
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_'){
+      const parts2 = (r.DIM_2||'').split('|');
+      const n2 = parts2.slice(1).join('|')||'';
+      const match = filas.find(f=>f.nombre===n2 && f.bloque===r.DIM_1 && f.afp===(r.AFP||''));
+      if(match) match.weight = +r.VALOR||0;
+    }
+  }
+  return {filas, benchmarks};
+}
+```
+
+**Reemplázalo por:**
+```javascript
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const benchmarksSubcat = {};
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(r.METRICA==='Intensidad'){
+      if(r.DIM_1==='_BENCH_'){
+        benchmarks[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      if(r.DIM_1==='_BENCH_SUBCAT_'){
+        if((r.AFP||'Integra')!=='Integra') continue;
+        benchmarksSubcat[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      const parts = (r.DIM_2||'').split('|');
+      const mgmt = parts[0]||'A', nombre = parts.slice(1).join('|')||'';
+      filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||'',
+                  subcat:r.DIM_3||''});
+    }
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_' && r.DIM_1!=='_BENCH_SUBCAT_'){
+      const parts2 = (r.DIM_2||'').split('|');
+      const n2 = parts2.slice(1).join('|')||'';
+      const match = filas.find(f=>f.nombre===n2 && f.bloque===r.DIM_1 && f.afp===(r.AFP||''));
+      if(match) match.weight = +r.VALOR||0;
+    }
+  }
+  return {filas, benchmarks, benchmarksSubcat};
+}
+```
+
+---
+
+## Cambio 5 — Que cada barra use el promedio de su propio grupo
+
+**Ctrl+F:**
+```
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks} = _parseAssetPerf(corte);
+```
+
+**Reemplázalo por:**
+```javascript
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks, benchmarksSubcat} = _parseAssetPerf(corte);
+```
+
+**Y luego, Ctrl+F:**
+```
+  const bk = benchKey || 'Total_Integra';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else {
+```
+
+**Reemplázalo por:**
+```javascript
+  const bk = benchKey || 'Comparables_Subcat';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else if(bk === 'Comparables_Subcat'){
+    benchLabel = 'Intensidad Promedio - Comparables';
+    benchYvals = sorted.map(s => (benchmarksSubcat[s.bloque+'|'+s.subcat] || 0) / esc.div);
+  } else {
+```
+
+---
+
+## Cambio 6 — Que el valor por defecto del selector coincida
+
+**Ctrl+F:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Total_Integra'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Comparables_Subcat'));
+```
+
+---
+
+Con esto: cada una de las barras del top 5 (Equities y Fixed Income) se compara contra el promedio de Intensidad de todos los FFMM/ETF de Integra no-proxy que comparten su misma Bloque **y** su misma SubCat (EM, IG, HY, DM, Senior Loans, o lo que corresponda) — y ese es el que se ve apenas se abre el dashboard, pudiendo cambiarlo manualmente por cualquiera de las otras opciones del slicer, como antes.
