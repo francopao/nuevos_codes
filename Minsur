@@ -1,0 +1,180 @@
+Este chart es más simple que el de categorías (no necesita anotaciones externas por emisor — tu punto 3 pide justamente lo contrario: que el protagonismo esté en el nombre, no en el valor). Reutilizo el helper `_cumulativos` que ya quedó en el script del cambio anterior.
+
+Antes del código, dos decisiones que tomé:
+
+- **Consolidación de nombres duplicados**: en vez de solo "traducir visualmente" cada emisor, hago que "Gobierno de Mexico" y "Gobierno de México" (si ambos existieran como filas separadas por alguna inconsistencia de tildes en la data) se **sumen en un solo segmento** "México" — no dos segmentos idénticos superpuestos en la lectura. Esto no toca la data de Python ni afecta ningún otro chart (el país-nivel de Chart 58 sigue calculándose aparte, como quedó la vez pasada).
+- **Reutilizo el diccionario que ya existe** (`PAIS_POR_EMISOR_SOBERANO`, el mismo que usa Chart 58) en vez de crear una lista nueva — así no mantienes dos tablas de "nombre bonito" por separado. De paso, corrijo una inconsistencia que ya tenía ese diccionario: "Gobierno de Mexico" apuntaba a "Mexico" (sin tilde) mientras "Gobierno de México" apuntaba a "México" (con tilde) — dos representaciones del mismo país. Lo dejo unificado en "México", como pediste.
+- **Tamaño del chart**: lo dejo exactamente en 620×261, igual que hoy — no lo cambié, tal como pediste.
+
+---
+
+## Cambio 1 — Unificar tildes de México en el diccionario de países
+
+**Ctrl+F:**
+```
+    "Gobierno de Mexico": "Mexico",
+```
+
+**Reemplázalo por:**
+```python
+    "Gobierno de Mexico": "México",
+```
+
+---
+
+## Cambio 2 — Exponer ese diccionario al dashboard (JS)
+
+**Ctrl+F:**
+```
+        "orden_paises": ORDEN_PAISES,
+        "metrica_intensidad": "Intensidad",
+    }
+```
+
+**Reemplázalo por:**
+```python
+        "orden_paises": ORDEN_PAISES,
+        "pais_por_emisor": PAIS_POR_EMISOR_SOBERANO,
+        "metrica_intensidad": "Intensidad",
+    }
+```
+
+---
+
+## Cambio 3 — Nueva función de render `soberanosEjecutivo`
+
+**Ctrl+F:**
+```
+function sectorEjecutivo(div, metrica, cAct, cCmp, afp){
+```
+
+**Inserta esto justo ANTES de esa línea** (no borres nada, solo agrega el bloque encima):
+```javascript
+// --- Chart ejecutivo Soberanos: Total -> Variación -> Emisores (por país) --
+function paisDeEmisor(nombre){
+  return CFG.pais_por_emisor[nombre] || nombre;
+}
+
+function serieSoberanosPorPais(metrica, corte, afp){
+  const raw = serieCategoriaAfp('Soberanos', metrica, corte, afp); // Map(Nombre -> valor)
+  const out = new Map();
+  raw.forEach((v, nombre) => {
+    const pais = paisDeEmisor(nombre);
+    out.set(pais, (out.get(pais) || 0) + v);
+  });
+  return out;
+}
+
+function soberanosEjecutivo(div, metrica, cAct, cCmp, afp){
+  const mCmp = serieSoberanosPorPais(metrica, cCmp, afp);
+  const mAct = serieSoberanosPorPais(metrica, cAct, afp);
+  const ordenPais = CFG.orden_paises;
+
+  const keys = Array.from(new Set([...mCmp.keys(), ...mAct.keys()]))
+    .filter(k => Math.abs(mCmp.get(k)||0) > 1e-9 || Math.abs(mAct.get(k)||0) > 1e-9)
+    .sort((x, y) => {
+      const ix = ordenPais.indexOf(x), iy = ordenPais.indexOf(y);
+      const rx = ix < 0 ? 999 : ix, ry = iy < 0 ? 999 : iy;
+      if (rx !== ry) return rx - ry;
+      return ((mCmp.get(y)||0)+(mAct.get(y)||0)) - ((mCmp.get(x)||0)+(mAct.get(x)||0));
+    });
+
+  const cumCmp = _cumulativos(mCmp, keys);
+  const cumAct = _cumulativos(mAct, keys);
+  const etiqCmp = etiquetaCorte(cCmp), etiqAct = etiquetaCorte(cAct);
+
+  const colorPais = (k, i) =>
+    CFG.colores_pais[k] || CFG.colores_pais_fallback[i % CFG.colores_pais_fallback.length];
+
+  const traces = keys.map((k, i) => ({
+    type:'bar', name:k, showlegend:false, hoverinfo:'skip',
+    x:[etiqCmp, etiqAct],
+    y:[mCmp.get(k)||0, mAct.get(k)||0],
+    marker: {color: colorPais(k, i), line:{color:'#FFFFFF', width:0.5}}
+  }));
+
+  const UMBRAL_LABEL = 0.025; // no etiquetar segmentos < 2.5% del total
+  const etiquetasInternas = (cum, xEtq) => keys
+    .filter(k => cum.total && (cum.porKey[k].v / cum.total) >= UMBRAL_LABEL)
+    .map(k => ({
+      x: xEtq, y:(cum.porKey[k].y0 + cum.porKey[k].y1)/2, xref:'x', yref:'y',
+      text: k, showarrow:false,
+      font:{size:9.5, color: CFG.color_texto}
+    }));
+
+  const totB = cumCmp.total, totA = cumAct.total;
+  const varPct = totB ? (totA/totB - 1) : null;
+  const colorVar = varPct===null ? CFG.color_texto : (varPct<0 ? '#1B8F5A' : '#C0392B');
+  const Y_TOTALES = 1.14;
+  const anotTotales = [
+    { x: etiqCmp, y: Y_TOTALES, xref:'x', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<b>Total: '+fmt(totB)+'</b>', font:{size:12, color: CFG.color_texto},
+      bgcolor:'#EDEFF2', bordercolor:'#EDEFF2', borderpad:6 },
+    { x: etiqAct, y: Y_TOTALES, xref:'x', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<b>Total: '+fmt(totA)+'</b>', font:{size:12, color: CFG.color_texto},
+      bgcolor:'#EDEFF2', bordercolor:'#EDEFF2', borderpad:6 },
+    { x:0.5, y: Y_TOTALES, xref:'paper', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<span style="color:'+colorVar+'">➜ '+
+        (varPct===null?'s/d':((varPct>0?'+':'')+(varPct*100).toFixed(0)+'%'))+'</span>',
+      font:{size:12, color: colorVar} }
+  ];
+
+  const lay = LAYOUT();
+  lay.xaxis.type = 'category';
+  lay.barmode = 'stack';
+  lay.bargap = 0.5;
+  lay.showlegend = false;
+  lay.width = 620;
+  lay.height = 261;
+  lay.autosize = false;
+  lay.margin = {l:15, r:15, t:50, b:38};
+  lay.yaxis.visible = false;
+  lay.annotations = anotTotales
+    .concat(etiquetasInternas(cumCmp, etiqCmp))
+    .concat(etiquetasInternas(cumAct, etiqAct));
+
+  Plotly.react(div, traces, lay, OPTS_PPT);
+}
+
+```
+
+(Nota el salto de línea extra al final antes de `function sectorEjecutivo` — está bien, es solo para separar visualmente los bloques.)
+
+---
+
+## Cambio 4 — Actualizar la llamada de "Exposición soberana por emisor" (Huella)
+
+**Ctrl+F:**
+```
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true,
+    afp: document.getElementById('selAfpSoberanos') ? document.getElementById('selAfpSoberanos').value : 'Integra'}));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gSoberanos',    () => soberanosEjecutivo('gSoberanos','Huella', cAct, cCmp,
+    document.getElementById('selAfpSoberanos') ? document.getElementById('selAfpSoberanos').value : 'Integra'));
+```
+
+---
+
+## Cambio 5 — Actualizar la llamada de "Intensidad soberana por emisor"
+
+**Ctrl+F:**
+```
+  safe('gSoberanosInt', () => apiladoPorCorte('gSoberanosInt','Soberanos','Intensidad', cAct,cCmp,{y:'Intensidad', compacto:true,
+    afp: document.getElementById('selAfpSoberanosInt') ? document.getElementById('selAfpSoberanosInt').value : 'Integra'}));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gSoberanosInt', () => soberanosEjecutivo('gSoberanosInt','Intensidad', cAct, cCmp,
+    document.getElementById('selAfpSoberanosInt') ? document.getElementById('selAfpSoberanosInt').value : 'Integra'));
+```
+
+---
+
+Un par de notas honestas:
+
+- El **punto 7** de tu spec (misma lógica de variación para Huella e Intensidad) queda resuelto solo: `varPct` se calcula sobre `totB`/`totA`, que ya vienen de `mCmp`/`mAct` — y esos ya traen la métrica correcta según cuál de los dos charts esté llamando a la función (`'Huella'` o `'Intensidad'`). No hay ninguna fórmula especial distinta entre ambos.
+- Como con el chart anterior, no puedo previsualizar el resultado — si algún nombre de país queda muy pegado al borde o el bloque de Total se ve corrido, dime y ajustamos `margin`, `Y_TOTALES` o `UMBRAL_LABEL` con precisión.
