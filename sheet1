@@ -1,0 +1,279 @@
+6 ajustes — mismo criterio de tamaño ya aplicado a `gCompBenchAfp`, sin tocar contenido/lógica de ningún chart.
+
+---
+
+### 1) JS — declarar `OPTS_PPT` global (reutilizable por todos los charts compactos)
+
+**Find:**
+```js
+const OPTS = {displayModeBar:false, responsive:true};
+```
+
+**Replace:**
+```js
+const OPTS = {displayModeBar:false, responsive:true};
+const OPTS_PPT = {displayModeBar:false, responsive:false};
+```
+
+---
+
+### 2) JS — `apiladoPorCorte`: soporte de modo compacto vía `opts.compacto`
+
+**Find:**
+```js
+  const lay = LAYOUT();
+  lay.xaxis.type = 'category';
+  lay.barmode = 'stack';
+  lay.bargap = 0.55;
+  lay.yaxis.title = opts.y || metrica;
+  const varPct = totB ? (totA/totB - 1) : null;
+  lay.annotations = [
+    {x:etiqCmp, y:totB, text:'<b>'+fmt(totB)+'</b>', showarrow:false, yshift:16},
+    {x:etiqAct, y:totA, text:'<b>'+fmt(totA)+'</b>' +
+      (varPct===null ? '' :
+        '<br><span style="color:'+(varPct<0?'#1B8F5A':'#C0392B')+'">'+
+        (varPct>0?'+':'')+(varPct*100).toFixed(1)+'%</span>'),
+     showarrow:false, yshift:24}
+  ];
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Replace:**
+```js
+  const lay = LAYOUT();
+  lay.xaxis.type = 'category';
+  lay.barmode = 'stack';
+  lay.bargap = 0.55;
+  lay.yaxis.title = opts.y || metrica;
+  const varPct = totB ? (totA/totB - 1) : null;
+  lay.annotations = [
+    {x:etiqCmp, y:totB, text:'<b>'+fmt(totB)+'</b>', showarrow:false, yshift:16},
+    {x:etiqAct, y:totA, text:'<b>'+fmt(totA)+'</b>' +
+      (varPct===null ? '' :
+        '<br><span style="color:'+(varPct<0?'#1B8F5A':'#C0392B')+'">'+
+        (varPct>0?'+':'')+(varPct*100).toFixed(1)+'%</span>'),
+     showarrow:false, yshift:24}
+  ];
+  if(opts.compacto){
+    lay.width = 620;
+    lay.height = 261;
+    lay.autosize = false;
+    lay.margin = {l:40, r:20, t:26, b:46};
+    lay.font = Object.assign({}, lay.font, {size:9});
+    lay.legend = Object.assign({}, lay.legend, {y:-0.22, font:{size:8.5}});
+    lay.yaxis.tickfont = {size:8.5};
+    lay.yaxis.title = {text: opts.y || metrica, font:{size:9}};
+    lay.xaxis.tickfont = {size:9};
+    lay.annotations.forEach(a => { a.font = Object.assign({size:9}, a.font); });
+  }
+  Plotly.react(div, traces, lay, opts.compacto ? OPTS_PPT : OPTS);
+}
+```
+
+---
+
+### 3) JS — `sectorMsciProxies` (afecta gSector52 y gSector63): activar `compacto`
+
+**Find:**
+```js
+function sectorMsciProxies(div, metrica, cAct, cCmp){
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + ' (Proxies)'); });
+  apiladoPorCorte(div, 'Sector_MSCI_Proxies', metrica, cAct, cCmp, {
+    orden: ordenSeries,
+    clave: r => r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : ''),
+    marker: markerCategoria,
+    y: metrica
+  });
+}
+```
+
+**Replace:**
+```js
+function sectorMsciProxies(div, metrica, cAct, cCmp){
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + ' (Proxies)'); });
+  apiladoPorCorte(div, 'Sector_MSCI_Proxies', metrica, cAct, cCmp, {
+    orden: ordenSeries,
+    clave: r => r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : ''),
+    marker: markerCategoria,
+    y: metrica,
+    compacto: true
+  });
+}
+```
+
+---
+
+### 4) JS — `render()`: activar `compacto` solo para gSoberanos
+
+**Find:**
+```js
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2'}));
+```
+
+**Replace:**
+```js
+  safe('gSoberanos',    () => apiladoPorCorte('gSoberanos','Soberanos','Huella', cAct,cCmp,{y:'Tn CO2', compacto:true}));
+```
+
+---
+
+### 5) JS — `assetPerformanceAfp`: layout compacto
+
+**Find:**
+```js
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto},
+```
+
+**Replace:**
+```js
+     text:yVals.map(v=>v.toFixed(1)), textposition:'outside', cliponaxis:false,
+     textfont:{size:8,color:CFG.color_texto},
+```
+
+**Find:**
+```js
+  // --- Layout con orden vertical: Títulos → SubCats → Barras → Leyenda ---
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:'',
+               tickfont:{size:10}};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  // Leyenda al fondo (debajo de todo)
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.25, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)'};
+  // Margen superior generoso: Títulos (yshift +38) + SubCats (yshift +18)
+  lay.margin = {l:60, r:30, t:90, b:100};
+  // Separadores entre bloques (recorren toda la altura incluidas anotaciones)
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'paper',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  // --- Anotaciones con jerarquía visual estricta ---
+  const annots = [];
+  // Nivel 1 (más alto): Títulos de bloque — bold, 13px
+  bloques.forEach(b => {
+    annots.push({
+      x:b.centro, xref:'x', y:1, yref:'y domain', yshift:38,
+      text:'<b>'+b.nombre+'</b>', showarrow:false,
+      font:{size:13, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+    });
+  });
+  // Nivel 2 (intermedio): SubCats — italic, 10px, color gris institucional,
+  // posicionadas entre los títulos y el borde superior del área de datos.
+  sorted.forEach((s, i) => {
+    if(s.subcat){
+      annots.push({
+        x:i, xref:'x', y:1, yref:'y domain', yshift:18,
+        text:'<i>'+s.subcat+'</i>', showarrow:false,
+        font:{size:10, color:'#6B7B8D'}, xanchor:'center', yanchor:'bottom'
+      });
+    }
+  });
+  lay.annotations = annots;
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Replace:**
+```js
+  // --- Layout con orden vertical: Títulos → SubCats → Barras → Leyenda ---
+  const lay = LAYOUT();
+  lay.xaxis = {type:'category', tickangle:0, showgrid:false,
+               showline:true, linecolor:CFG.color_grid, ticks:'',
+               tickfont:{size:8}};
+  lay.yaxis.title = 'Intensidad' + (esc.suf ? ' — ' + esc.suf : '');
+  lay.yaxis.tickfont = {size:8};
+  // Leyenda al fondo (debajo de todo)
+  lay.legend = {orientation:'h', yanchor:'top', y:-0.30, x:0.5, xanchor:'center',
+                bgcolor:'rgba(0,0,0,0)', font:{size:8}};
+  lay.font = Object.assign({}, lay.font, {size:9});
+  lay.width = 620;
+  lay.height = 261;
+  lay.autosize = false;
+  // Margen superior reducido: Títulos (yshift +22) + SubCats (yshift +11)
+  lay.margin = {l:38, r:16, t:48, b:64};
+  // Separadores entre bloques (recorren toda la altura incluidas anotaciones)
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x', yref:'paper',
+    x0:b.start-0.5, x1:b.start-0.5, y0:0, y1:1,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  // --- Anotaciones con jerarquía visual estricta ---
+  const annots = [];
+  // Nivel 1 (más alto): Títulos de bloque — bold, tamaño reducido
+  bloques.forEach(b => {
+    annots.push({
+      x:b.centro, xref:'x', y:1, yref:'y domain', yshift:22,
+      text:'<b>'+b.nombre+'</b>', showarrow:false,
+      font:{size:9.5, color:CFG.color_texto}, xanchor:'center', yanchor:'bottom'
+    });
+  });
+  // Nivel 2 (intermedio): SubCats — italic, tamaño reducido
+  sorted.forEach((s, i) => {
+    if(s.subcat){
+      annots.push({
+        x:i, xref:'x', y:1, yref:'y domain', yshift:11,
+        text:'<i>'+s.subcat+'</i>', showarrow:false,
+        font:{size:7.5, color:'#6B7B8D'}, xanchor:'center', yanchor:'bottom'
+      });
+    }
+  });
+  lay.annotations = annots;
+  Plotly.react(div, traces, lay, OPTS_PPT);
+}
+```
+
+---
+
+### 6) Python — `tarjetas`: quitar ancho completo en los 4 charts
+
+**Find:**
+```python
+        ("gSoberanos", "Exposición soberana por emisor — comparación entre cortes", True),
+```
+**Replace:**
+```python
+        ("gSoberanos", "Exposición soberana por emisor — comparación entre cortes", False),
+```
+
+**Find:**
+```python
+        ("gSector52", "Huella por categoría — MSCI vs Proxies (Chart 52)", True),
+        ("gSector63", "Intensidad por categoría — MSCI vs Proxies (Chart 63)", True),
+```
+**Replace:**
+```python
+        ("gSector52", "Huella por categoría — MSCI vs Proxies (Chart 52)", False),
+        ("gSector63", "Intensidad por categoría — MSCI vs Proxies (Chart 63)", False),
+```
+
+**Find:**
+```python
+        ("gAssetPerf", "Asset Performance — top instrumento por subcategoría (Active vs Passive)", True),
+```
+**Replace:**
+```python
+        ("gAssetPerf", "Asset Performance — top instrumento por subcategoría (Active vs Passive)", False),
+```
+
+---
+
+### 7) Python — `cards`: extender la clase `card-ppt` a los 4 nuevos divs
+
+**Find:**
+```python
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}{" card-ppt" if cid == "gCompBenchAfp" else ""}"><h3>{titulo}</h3>'
+```
+
+**Replace:**
+```python
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gAssetPerf"}
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}{" card-ppt" if cid in _IDS_PPT else ""}"><h3>{titulo}</h3>'
+```
