@@ -1,0 +1,586 @@
+Perfecto, confirmado exacto. Ahora reviso `top_por_subcat_asset` tal cual quedó después del cambio anterior:
+
+Entendido — tu corrección es matemáticamente importante: promediar directamente las `Intensidad` de los comparables mezclaría el Weight *de ellos* (que no tiene nada que ver con el emisor que estás mirando) con la comparación. Lo correcto es promediar **CO2-H puro** (la intensidad intrínseca del instrumento, sin ningún Weight adentro) y recién multiplicarlo por el Weight del emisor del eje X — exactamente el mismo patrón que ya usa tu chart para comparar contra un FFMM/ETF externo específico (`fce * Weight`), solo que ahora el "fce" es un promedio del peer group en vez de un solo fondo.
+
+Esto trae una complicación real: para juntar **F1+F2+F3 de todas las AFPs** necesito los datos de todas las AFPs disponibles *antes* de construir la Presentación de cualquiera de ellas — hoy el pipeline procesa una AFP a la vez y arma su Presentación en el mismo paso. Por eso el cambio en `run_pipeline_bd1s` es más grande: separa "construir Valorización de todas" de "construir Presentación de todas", con el cálculo del peer group en medio. No cambia ningún otro comportamiento (diagnóstico, exportación, manejo de errores por AFP) — solo lo reordena.
+
+---
+
+## Cambio 1 — Nuevas funciones a nivel de módulo (SubCat compartida + promedio cross-AFP)
+
+**Ctrl+F:**
+```
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+**Inserta esto justo ANTES de esas líneas** (no borres nada):
+```python
+# SubCat de un instrumento FFMM/ETF: Mercado para RV (DM/EM/Commodities),
+# AC_Dir para RF (HY/IG/EM/DM/Senior Loans). Función única y compartida:
+# la usan tanto el top 5 de cada AFP como el peer group cross-AFP del
+# benchmark "Intensidad Promedio - Comparables", para que ambos agrupen
+# exactamente igual.
+def _subcat_activo(row, bloque: str) -> str:
+    if bloque == "Equities":
+        m = str(row.get("GyP_MERCADO", "") or "").strip()
+        return m if m else str(row.get("GyP_CAT", "") or "").strip() or "Otros"
+    else:
+        raw = str(row.get("GyP_AC_DIR", "") or "").strip()
+        if "HY" in raw: return "HY"
+        if "IG" in raw: return "IG"
+        if "EM" in raw: return "EM"
+        if "DM" in raw: return "DM"
+        if "SL" in raw: return "Senior Loans"
+        cat = str(row.get("GyP_CAT", "") or "").strip()
+        return cat if cat else raw or "Otros"
+
+
+def _peer_group_co2h(vals_ctx: dict) -> Dict[str, float]:
+    """Promedio de CO2-H (intensidad intrínseca del instrumento, SIN el
+    Weight de ningún fondo) por (Bloque, SubCat), usando el universo
+    FFMM/ETF no-proxy de TODAS las AFPs juntas (F1+F2+F3 de cada una) —
+    el peer group ampliado del benchmark 'Intensidad Promedio - Comparables'
+    de Chart 3. Puramente informativo para ese benchmark: NO modifica
+    ningún Weight real de ninguna cartera."""
+    piezas = []
+    for afp, par in vals_ctx.items():
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        sub["CO2-H"] = pd.to_numeric(sub["CO2-H"], errors="coerce").fillna(0.0)
+        prom = sub.groupby("__subcat")["CO2-H"].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+---
+
+## Cambio 2 — `PresentacionBuilder` recibe el peer group ya calculado
+
+**Ctrl+F:**
+```
+    def __init__(self, df_valorizacion: pd.DataFrame, fecha_corte: str,
+                 sector_lookup: dict | None = None,
+                 intensidades_comp: dict | None = None,
+                 aum_comp: dict | None = None,
+                 caja_neta_mm: float = 0.0,
+                 aum_total_mm: float | None = None):
+        """
+        df_valorizacion   : DataFrame de M10 (columnas formuladas ya construidas)
+        fecha_corte       : 'yyyymm' o 'yyyy-mm-dd'
+        sector_lookup     : {Nombre -> Sector} de Parametria (col O -> col P)
+        intensidades_comp : {alias -> intensidad} de ComparablesLoader
+        aum_comp          : {alias -> AUM USD MM} de MarketCapLoader (hoja MKT)
+        """
+        self.fecha_corte = str(fecha_corte)
+        self.df = _base(df_valorizacion)
+        self.sector_lookup = sector_lookup or {}
+        self.intensidades_comp = intensidades_comp or {}
+        self.aum_comp = aum_comp or {}
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+        self.objetos: dict[str, pd.DataFrame] = {}
+        self._diagnostico_plus()
+```
+
+**Reemplázalo por:**
+```python
+    def __init__(self, df_valorizacion: pd.DataFrame, fecha_corte: str,
+                 sector_lookup: dict | None = None,
+                 intensidades_comp: dict | None = None,
+                 aum_comp: dict | None = None,
+                 caja_neta_mm: float = 0.0,
+                 aum_total_mm: float | None = None,
+                 bench_peer_co2h: dict | None = None):
+        """
+        df_valorizacion   : DataFrame de M10 (columnas formuladas ya construidas)
+        fecha_corte       : 'yyyymm' o 'yyyy-mm-dd'
+        sector_lookup     : {Nombre -> Sector} de Parametria (col O -> col P)
+        intensidades_comp : {alias -> intensidad} de ComparablesLoader
+        aum_comp          : {alias -> AUM USD MM} de MarketCapLoader (hoja MKT)
+        bench_peer_co2h   : {"Bloque|SubCat" -> CO2-H promedio} del peer group
+                            cross-AFP, precomputado una sola vez para todo el
+                            pipeline (ver _peer_group_co2h). Usado por Chart 3.
+        """
+        self.fecha_corte = str(fecha_corte)
+        self.df = _base(df_valorizacion)
+        self.sector_lookup = sector_lookup or {}
+        self.intensidades_comp = intensidades_comp or {}
+        self.aum_comp = aum_comp or {}
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+        self.bench_peer_co2h = bench_peer_co2h or {}
+        self.objetos: dict[str, pd.DataFrame] = {}
+        self._diagnostico_plus()
+```
+
+---
+
+## Cambio 3 — `top_por_subcat_asset`: usar el peer group precomputado
+
+**Ctrl+F:**
+```
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Top 5 FFMM/ETFs por Intensidad para Equities (RV) y Fixed Income (RF).
+        Incluye SubCat (Mercado para RV, AC_Dir para RF), Mgmt, y benchmarks:
+        Intensidad promedio cartera, F1, F2, F3."""
+        d = self.df.copy()
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            return pd.DataFrame()
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        d = _sin_huella_cero(d)
+        for c in [COL["intensidad"], COL["huella"], COL["inv"]]:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+        # Intensidad promedio por fondo (F1/F2/F3) y total: SUMA de la Intensidad
+        # oficial por instrumento (CO2-H x Weight dentro de su propio fondo) —
+        # la misma fórmula que usa cualquier otro objeto del pipeline. Antes se
+        # recalculaba como Huella/Inv, una razón distinta a la métrica oficial.
+        intens_total = float(d[COL["intensidad"]].sum())
+        intens_por_fondo = {}
+        if COL["portafolio"] in d.columns:
+            for pf in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+                sf = d[d[COL["portafolio"]] == pf]
+                intens_por_fondo[pf] = float(sf[COL["intensidad"]].sum())
+        AC_MAP = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+        # SubCat: Mercado para RV (DM/EM/Commodities), AC_Dir para RF (HY/IG/...)
+        def _subcat(row, bloque):
+            if bloque == "Equities":
+                m = str(row.get("GyP_MERCADO", "") or "").strip()
+                return m if m else str(row.get("GyP_CAT", "") or "").strip() or "Otros"
+            else:
+                raw = str(row.get("GyP_AC_DIR", "") or "").strip()
+                if "HY" in raw: return "HY"
+                if "IG" in raw: return "IG"
+                if "EM" in raw: return "EM"
+                if "DM" in raw: return "DM"
+                if "SL" in raw: return "Senior Loans"
+                # Fallback a Cat (Internacional, Corporativa, Gobierno)
+                cat = str(row.get("GyP_CAT", "") or "").strip()
+                return cat if cat else raw or "Otros"
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"], COL["inv"]])
+            if agg_df.empty:
+                continue
+            for _, row in agg_df.head(5).iterrows():
+                nombre = row[COL["nombre"]]
+                top_rows = sub[sub[COL["nombre"]] == nombre]
+                mgmt = "A"
+                sc = ""
+                if not top_rows.empty:
+                    if "GyP_A_P" in top_rows.columns:
+                        raw = str(top_rows["GyP_A_P"].iloc[0]).strip()
+                        mgmt = raw if raw in ("A", "P") else "A"
+                    sc = _subcat(top_rows.iloc[0], bloque)
+                # Weight del emisor (para calcular intensidad del benchmark)
+                wt = (row[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0 if COL["inv"] in row.index else 0.0
+                filas.append({
+                    "Bloque": bloque, "SubCat": sc, "Mgmt": mgmt,
+                    COL["nombre"]: nombre,
+                    COL["intensidad"]: float(row[COL["intensidad"]]),
+                    "Weight": float(wt),
+                })
+        out = pd.DataFrame(filas)
+        if out.empty:
+            return out
+        # Codificar en DIM_2 = Mgmt|Nombre, DIM_3 = SubCat
+        out["Mgmt_Nombre"] = out["Mgmt"] + "|" + out[COL["nombre"]]
+        result = out[["Bloque", "Mgmt_Nombre", "SubCat", COL["intensidad"], "Weight"]].copy()
+        # Filas especiales de benchmark
+        benchmarks = [
+            ("_BENCH_", "Total_Integra", intens_total),
+            ("_BENCH_", "F1_Integra", intens_por_fondo.get("IN-FONDO1", 0.0)),
+            ("_BENCH_", "F2_Integra", intens_por_fondo.get("IN-FONDO2", 0.0)),
+            ("_BENCH_", "F3_Integra", intens_por_fondo.get("IN-FONDO3", 0.0)),
+        ]
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        return pd.concat([result, bench_df], ignore_index=True)
+```
+
+**Reemplázalo por:**
+```python
+    def top_por_subcat_asset(self) -> pd.DataFrame:
+        """Top 5 FFMM/ETFs por Intensidad para Equities (RV) y Fixed Income (RF).
+        Incluye SubCat (Mercado para RV, AC_Dir para RF), Mgmt, y benchmarks:
+        Intensidad promedio cartera, F1, F2, F3, y el peer group cross-AFP
+        (self.bench_peer_co2h, ver _peer_group_co2h)."""
+        d = self.df.copy()
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            return pd.DataFrame()
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        d = _sin_huella_cero(d)
+        for c in [COL["intensidad"], COL["huella"], COL["inv"]]:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+        # Intensidad promedio por fondo (F1/F2/F3) y total: SUMA de la Intensidad
+        # oficial por instrumento (CO2-H x Weight dentro de su propio fondo) —
+        # la misma fórmula que usa cualquier otro objeto del pipeline. Antes se
+        # recalculaba como Huella/Inv, una razón distinta a la métrica oficial.
+        intens_total = float(d[COL["intensidad"]].sum())
+        intens_por_fondo = {}
+        if COL["portafolio"] in d.columns:
+            for pf in ["IN-FONDO1", "IN-FONDO2", "IN-FONDO3"]:
+                sf = d[d[COL["portafolio"]] == pf]
+                intens_por_fondo[pf] = float(sf[COL["intensidad"]].sum())
+        AC_MAP = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+        filas = []
+        for ac_orig, bloque in AC_MAP.items():
+            sub = d[d["GyP_ASSET_CLASS"] == ac_orig]
+            if sub.empty:
+                continue
+            agg_df = _agg(sub, [COL["nombre"]], [COL["intensidad"], COL["inv"]])
+            if agg_df.empty:
+                continue
+            for _, row in agg_df.head(5).iterrows():
+                nombre = row[COL["nombre"]]
+                top_rows = sub[sub[COL["nombre"]] == nombre]
+                mgmt = "A"
+                sc = ""
+                if not top_rows.empty:
+                    if "GyP_A_P" in top_rows.columns:
+                        raw = str(top_rows["GyP_A_P"].iloc[0]).strip()
+                        mgmt = raw if raw in ("A", "P") else "A"
+                    sc = _subcat_activo(top_rows.iloc[0], bloque)
+                # Weight del emisor (para calcular intensidad del benchmark)
+                wt = (row[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0 if COL["inv"] in row.index else 0.0
+                filas.append({
+                    "Bloque": bloque, "SubCat": sc, "Mgmt": mgmt,
+                    COL["nombre"]: nombre,
+                    COL["intensidad"]: float(row[COL["intensidad"]]),
+                    "Weight": float(wt),
+                })
+        out = pd.DataFrame(filas)
+        if out.empty:
+            return out
+        # Codificar en DIM_2 = Mgmt|Nombre, DIM_3 = SubCat
+        out["Mgmt_Nombre"] = out["Mgmt"] + "|" + out[COL["nombre"]]
+        result = out[["Bloque", "Mgmt_Nombre", "SubCat", COL["intensidad"], "Weight"]].copy()
+        # Filas especiales de benchmark
+        benchmarks = [
+            ("_BENCH_", "Total_Integra", intens_total),
+            ("_BENCH_", "F1_Integra", intens_por_fondo.get("IN-FONDO1", 0.0)),
+            ("_BENCH_", "F2_Integra", intens_por_fondo.get("IN-FONDO2", 0.0)),
+            ("_BENCH_", "F3_Integra", intens_por_fondo.get("IN-FONDO3", 0.0)),
+        ]
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        # "Intensidad Promedio - Comparables": CO2-H promedio del peer group
+        # cross-AFP (F1+F2+F3 de TODAS las AFPs, no-proxy). Se guarda SIN
+        # multiplicar por ningún Weight — eso lo hace el dashboard (JS) al
+        # vuelo usando el Weight propio de cada instrumento del eje X.
+        bench_subcat_df = pd.DataFrame([{
+            "Bloque": "_BENCH_SUBCAT_", "Mgmt_Nombre": clave, "SubCat": "",
+            COL["intensidad"]: val, "Weight": 0.0
+        } for clave, val in self.bench_peer_co2h.items()])
+        return pd.concat([result, bench_df, bench_subcat_df], ignore_index=True)
+```
+
+---
+
+## Cambio 4 — `run_pipeline_bd1s`: dos pasadas (Valorización de todas primero, luego Presentación)
+
+**Ctrl+F (inicio del bloque a reemplazar):**
+```
+    # --- Procesar cada AFP ---
+    exp = HistoricoExporter(ruta_historico)
+    all_results: Dict[str, dict] = {}
+
+    for afp in afps:
+```
+
+**Reemplaza TODO ese bloque, hasta (incluyendo) esta línea de cierre:**
+```
+                print(f"  [{afp}] [ERROR] {exc}")
+                import traceback; traceback.print_exc()
+```
+
+(Esta última línea aparece dos veces en el archivo — la segunda es del bloque de diagnóstico consolidado, que va DESPUÉS y no se toca. Usa la PRIMERA ocurrencia, la que está dentro de este mismo `for afp in afps:`.)
+
+**Por esto:**
+```python
+    # --- Procesar cada AFP: primero Valorización de TODAS (para poder armar
+    # el peer group cross-AFP del benchmark de Chart 3 antes de construir
+    # cualquier Presentación), luego recién Presentación de cada una. ---
+    exp = HistoricoExporter(ruta_historico)
+    all_results: Dict[str, dict] = {}
+    vals_ctx: Dict[str, tuple] = {}
+
+    for afp in afps:
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"  HUELLA — AFP: {afp} (Valorización)")
+            print(f"{'='*60}")
+        try:
+            val, ctx = construir_valorizacion_bd1s(
+                cfg, ruta_bd1s, afp=afp, shared=shared, verbose=verbose)
+            vals_ctx[afp] = (val, ctx)
+        except Exception as exc:
+            if verbose:
+                print(f"  [{afp}] [ERROR] {exc}")
+                import traceback; traceback.print_exc()
+
+    # Peer group cross-AFP (F1+F2+F3 de todas las AFPs) para el benchmark
+    # "Intensidad Promedio - Comparables" de Chart 3. Solo informativo: NO
+    # afecta ningún Weight real de ninguna cartera.
+    peer_co2h = _peer_group_co2h(vals_ctx)
+
+    for afp, par in vals_ctx.items():
+        val, ctx = par
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"  HUELLA — AFP: {afp} (Presentación)")
+            print(f"{'='*60}")
+        try:
+            pres = PresentacionBuilder(
+                val, cfg.semestre,
+                sector_lookup=ctx.get("sector_lookup", {}),
+                intensidades_comp=shared["comp"].intensidades,
+                aum_comp=(shared["mkt"].aum if shared["mkt"] else {}),
+                caja_neta_mm=ctx.get("caja_neta_mm", 0.0),
+                aum_total_mm=ctx.get("aum_multifondos_mm"),
+                bench_peer_co2h=peer_co2h,
+            )
+            objetos = pres.build_all()
+
+            # --- Exportar al histórico con sufijo AFP ---
+            # Inyectar columna AFP en el formato largo para el dashboard
+            largo = pres.to_long()
+            largo.insert(1, "AFP", afp)
+            _exportar_con_afp(exp, largo, cfg.semestre, afp, pres, verbose)
+
+            all_results[afp] = {
+                "valorizacion": val, "objetos": objetos,
+                "aum_mm": ctx.get("aum_multifondos_mm"),
+                "presentacion": pres,
+            }
+            if verbose:
+                print(f"  [{afp}] {len(objetos)} objetos, {len(pres.df)} registros.")
+
+            # --- Reporte de instrumentos sin huella y Cuestionario Integra ---
+            vb = ctx["valorizacion_builder"]
+            _cols_rep = ["PORTAFOLIO", "TITULO", "CODIGO_SBS", "CODIGO_ISIN",
+                         "GRUPO_ECONOMICO", "Plus", "Inv MM$", "Huella", "CO2-H"]
+            _cols_rep = [c for c in _cols_rep if c in val.columns]
+
+            prob = val.loc[
+                (pd.to_numeric(val["CO2-H"], errors="coerce").fillna(0.0) == 0) &
+                (pd.to_numeric(val["Inv MM$"], errors="coerce").fillna(0.0).abs() > 1e-9),
+                _cols_rep].copy()
+            if not prob.empty:
+                prob.insert(0, "AFP", afp)
+                prob.insert(1, "Tipo", "PROBLEMÁTICO (con inversión, sin huella)")
+            cuest = val.loc[val["Plus"] == "Cuestionario Integra", _cols_rep].copy()
+            if not cuest.empty:
+                cuest.insert(0, "AFP", afp)
+                cuest.insert(1, "Tipo", "Cuestionario Integra")
+            all_results[afp]["diagnostico"] = pd.concat(
+                [prob, cuest], ignore_index=True)
+
+        except Exception as exc:
+            if verbose:
+                print(f"  [{afp}] [ERROR] {exc}")
+                import traceback; traceback.print_exc()
+```
+
+---
+
+## Cambio 5 — Slicer: agregar la opción y dejarla seleccionada por defecto
+
+**Ctrl+F:**
+```
+    bench_options = [
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+        ("F1_Integra", "Intensidad F1 Integra"),
+        ("F2_Integra", "Intensidad F2 Integra"),
+        ("F3_Integra", "Intensidad F3 Integra"),
+    ]
+    for fname in sorted(bench_ffmm.keys()):
+        bench_options.append((f"FFMM:{fname}", fname))
+    bench_opts_html = "".join(
+        f'<option value="{val}">{label}</option>' for val, label in bench_options)
+```
+
+**Reemplázalo por:**
+```python
+    bench_options = [
+        ("Comparables_Subcat", "Intensidad Promedio - Comparables"),
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+        ("F1_Integra", "Intensidad F1 Integra"),
+        ("F2_Integra", "Intensidad F2 Integra"),
+        ("F3_Integra", "Intensidad F3 Integra"),
+    ]
+    for fname in sorted(bench_ffmm.keys()):
+        bench_options.append((f"FFMM:{fname}", fname))
+    bench_opts_html = "".join(
+        f'<option value="{val}"{" selected" if val=="Comparables_Subcat" else ""}>{label}</option>'
+        for val, label in bench_options)
+```
+
+---
+
+## Cambio 6 — JS: leer las filas del nuevo benchmark
+
+**Ctrl+F:**
+```
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(r.METRICA==='Intensidad'){
+      if(r.DIM_1==='_BENCH_'){
+        benchmarks[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      const parts = (r.DIM_2||'').split('|');
+      const mgmt = parts[0]||'A', nombre = parts.slice(1).join('|')||'';
+      filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||'',
+                  subcat:r.DIM_3||''});
+    }
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_'){
+      const parts2 = (r.DIM_2||'').split('|');
+      const n2 = parts2.slice(1).join('|')||'';
+      const match = filas.find(f=>f.nombre===n2 && f.bloque===r.DIM_1 && f.afp===(r.AFP||''));
+      if(match) match.weight = +r.VALOR||0;
+    }
+  }
+  return {filas, benchmarks};
+}
+```
+
+**Reemplázalo por:**
+```javascript
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const benchmarksSubcat = {};
+  const filas = [];
+  for(const r of HIST){
+    if(r.OBJETO!=='TopSubCat_Asset' || String(r.FECHA_CORTE)!==String(corte)) continue;
+    if(r.METRICA==='Intensidad'){
+      if(r.DIM_1==='_BENCH_'){
+        benchmarks[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      if(r.DIM_1==='_BENCH_SUBCAT_'){
+        if((r.AFP||'Integra')!=='Integra') continue; // mismo valor en todas, tomar una sola vez
+        benchmarksSubcat[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      const parts = (r.DIM_2||'').split('|');
+      const mgmt = parts[0]||'A', nombre = parts.slice(1).join('|')||'';
+      filas.push({bloque:r.DIM_1, mgmt, nombre, val:+r.VALOR||0, afp:r.AFP||'',
+                  subcat:r.DIM_3||''});
+    }
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_' && r.DIM_1!=='_BENCH_SUBCAT_'){
+      const parts2 = (r.DIM_2||'').split('|');
+      const n2 = parts2.slice(1).join('|')||'';
+      const match = filas.find(f=>f.nombre===n2 && f.bloque===r.DIM_1 && f.afp===(r.AFP||''));
+      if(match) match.weight = +r.VALOR||0;
+    }
+  }
+  return {filas, benchmarks, benchmarksSubcat};
+}
+```
+
+---
+
+## Cambio 7 — JS: usar el promedio × Weight del emisor del eje X
+
+**Ctrl+F:**
+```
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks} = _parseAssetPerf(corte);
+```
+
+**Reemplázalo por:**
+```javascript
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks, benchmarksSubcat} = _parseAssetPerf(corte);
+```
+
+**Y luego, Ctrl+F:**
+```
+  const bk = benchKey || 'Total_Integra';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else {
+```
+
+**Reemplázalo por:**
+```javascript
+  const bk = benchKey || 'Comparables_Subcat';
+  let benchLabel = 'Intensidad promedio cartera Integra';
+  let benchYvals;
+  if(bk.startsWith('FFMM:')){
+    const fundName = bk.substring(5);
+    const fce = BENCH_FFMM[fundName] || 0;
+    benchLabel = fundName;
+    benchYvals = sorted.map(s => (fce * (s.weight||0)) / esc.div);
+  } else if(bk === 'Comparables_Subcat'){
+    benchLabel = 'Intensidad Promedio - Comparables';
+    // CO2-H promedio del peer group (misma Bloque+SubCat) x Weight PROPIO
+    // del emisor del eje X — no el Weight de los comparables.
+    benchYvals = sorted.map(s =>
+      ((benchmarksSubcat[s.bloque+'|'+s.subcat] || 0) * (s.weight||0)) / esc.div);
+  } else {
+```
+
+---
+
+## Cambio 8 — Valor por defecto del selector al cargar
+
+**Ctrl+F:**
+```
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Total_Integra'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gAssetPerf',           () => assetPerformanceAfp('gAssetPerf', cAct,
+    document.getElementById('selBenchAssetPerf') ? document.getElementById('selBenchAssetPerf').value : 'Comparables_Subcat'));
+```
+
+---
+
+Con esto: `CO2-H` (la intensidad intrínseca, sin Weight) se promedia sobre el peer group de F1+F2+F3 de **todas** las AFPs que compartan Bloque+SubCat con el emisor del eje X, no-proxy — y ese promedio se multiplica recién en el dashboard por el Weight propio de cada barra, igual que ya hace tu comparación contra un FFMM/ETF puntual. El Weight real de los comparables no se toca en ningún momento — solo se usa su CO2-H.
