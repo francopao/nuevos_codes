@@ -1,0 +1,215 @@
+Este es un rediseño completo del chart, no un ajuste. Antes de darte el código, te explico las decisiones que tomé para que no haya sorpresas:
+
+- **No reutilizo `apiladoPorCorte`** (el motor genérico que comparten otros charts) — lo dejo intacto para no arriesgar los demás gráficos. Construyo una función nueva y separada, dedicada solo a Chart 52/63.
+- **Colores**: uso únicamente los que ya existen en tu paleta corporativa (`CFG.color_acento` = el mismo morado de "Alts", `CFG.color_texto` para TD/BU). No inventé ningún color nuevo.
+- **La flecha de evolución** la resolví con el carácter "➜" + porcentaje (mismo criterio de color verde/rojo que ya usas en el resto del dashboard), no como una forma vectorial dibujada — es la opción más robusta sin poder previsualizar el render.
+- **Los números pequeños "22/29/53"** que se ven en tu imagen de referencia entre ambas barras no están en tu lista de 9 requisitos escritos, así que no los agregué — si son algo puntual que quieres, dime qué representan y lo sumamos aparte.
+- **Etiqueta interna por categoría**: una sola por categoría base (ej. "RF"), centrada en el bloque combinado MSCI+Proxies (no una etiqueta separada para cada textura), igual que en tu referencia. Los segmentos muy pequeños (<3.5% del total) no muestran etiqueta para evitar amontonamiento — vos me dices si ese umbral hay que subirlo o bajarlo.
+
+Como no puedo renderizar Plotly para verlo yo mismo, los valores de píxeles (separación, márgenes, tamaños) son mi mejor punto de partida — es normal que necesites 1-2 ajustes finos una vez lo veas en tu navegador. Mándame captura y afino contigo.
+
+---
+
+## Cambio 1 — Reemplazar `sectorMsciProxies` por la función ejecutiva nueva
+
+**Ctrl+F:**
+```
+function sectorMsciProxies(div, metrica, cAct, cCmp, afp){
+```
+
+**Código actual completo (bórralo entero):**
+```javascript
+function sectorMsciProxies(div, metrica, cAct, cCmp, afp){
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + ' (Proxies)'); });
+  apiladoPorCorte(div, 'Sector_MSCI_Proxies', metrica, cAct, cCmp, {
+    orden: ordenSeries,
+    clave: r => r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : ''),
+    marker: markerCategoria,
+    y: metrica,
+    compacto: true,
+    afp: afp
+  });
+}
+```
+
+**Reemplázalo por:**
+```javascript
+// --- Chart ejecutivo 52/63: Total -> Variación -> Estrategias -> Categorías -
+const ESTRATEGIA_DE_CAT = {
+  'RF': 'TD', 'RF Proxies': 'TD', 'RV': 'TD', 'RV Proxies': 'TD', 'ETF Sobs': 'TD'
+};
+const estrategiaDeCategoria = cat => (cat === 'Alts') ? 'ALT' : (ESTRATEGIA_DE_CAT[cat] || 'BU');
+const ORDEN_ESTRATEGIAS = ['BU', 'TD', 'ALT'];
+const ETIQUETA_ESTRATEGIA = {BU:'BU', TD:'TD', ALT:'Alts'};
+const COLOR_ESTRATEGIA = {BU: CFG.color_texto, TD: CFG.color_texto, ALT: CFG.color_acento};
+
+function _cumulativos(mapa, keys){
+  let acc = 0; const porKey = {};
+  keys.forEach(k => {
+    const v = mapa.get(k) || 0;
+    porKey[k] = {y0: acc, y1: acc + v, v: v};
+    acc += v;
+  });
+  return {porKey: porKey, total: acc};
+}
+
+function sectorEjecutivo(div, metrica, cAct, cCmp, afp){
+  const SUF = ' (Proxies)';
+  const baseCat = k => k.endsWith(SUF) ? k.slice(0, -SUF.length) : k;
+
+  const mCmp = serieCategoriaAfp('Sector_MSCI_Proxies', metrica, cCmp, afp);
+  const mAct = serieCategoriaAfp('Sector_MSCI_Proxies', metrica, cAct, afp);
+
+  const ordenSeries = [];
+  CFG.categorias_sector.forEach(c=>{ ordenSeries.push(c, c + SUF); });
+  const keys = ordenSeries.filter(k =>
+    Math.abs(mCmp.get(k)||0) > 1e-9 || Math.abs(mAct.get(k)||0) > 1e-9);
+
+  const cumCmp = _cumulativos(mCmp, keys);
+  const cumAct = _cumulativos(mAct, keys);
+  const etiqCmp = etiquetaCorte(cCmp), etiqAct = etiquetaCorte(cAct);
+
+  // --- Trazas apiladas: solo color/patrón, sin texto automático ni leyenda -
+  const traces = keys.map(k => ({
+    type:'bar', name:k, showlegend:false, hoverinfo:'skip',
+    x:[etiqCmp, etiqAct],
+    y:[mCmp.get(k)||0, mAct.get(k)||0],
+    marker: markerCategoria(k)
+  }));
+
+  // --- Etiquetas internas: una por categoría base, centrada en su bloque ---
+  const UMBRAL_LABEL = 0.035; // no etiquetar segmentos < 3.5% del total
+  const etiquetasInternas = (cum, xEtq) => {
+    const rangos = {};
+    keys.forEach(k => {
+      const bc = baseCat(k), seg = cum.porKey[k];
+      if(!rangos[bc]) rangos[bc] = {y0: seg.y0, y1: seg.y1};
+      else { rangos[bc].y0 = Math.min(rangos[bc].y0, seg.y0);
+             rangos[bc].y1 = Math.max(rangos[bc].y1, seg.y1); }
+    });
+    return Object.entries(rangos)
+      .filter(function(e){ return cum.total && (e[1].y1 - e[1].y0) / cum.total >= UMBRAL_LABEL; })
+      .map(function(e){
+        const bc = e[0], r = e[1];
+        return {
+          x: xEtq, y: (r.y0 + r.y1) / 2, xref:'x', yref:'y',
+          text: bc, showarrow:false,
+          font:{size:9, color: CFG.color_texto}
+        };
+      });
+  };
+
+  // --- Anotaciones externas por estrategia ----------------------------------
+  const rangoEstrategias = (cum) => {
+    const rangos = {};
+    keys.forEach(k => {
+      const est = estrategiaDeCategoria(baseCat(k)), seg = cum.porKey[k];
+      if(!rangos[est]) rangos[est] = {y0: seg.y0, y1: seg.y1};
+      else { rangos[est].y0 = Math.min(rangos[est].y0, seg.y0);
+             rangos[est].y1 = Math.max(rangos[est].y1, seg.y1); }
+    });
+    return rangos;
+  };
+  const estCmp = rangoEstrategias(cumCmp), estAct = rangoEstrategias(cumAct);
+
+  const OFFSET_PX = 55;
+  const anotBase = ORDEN_ESTRATEGIAS.filter(est => estCmp[est]).map(est => {
+    const r = estCmp[est], v = r.y1 - r.y0;
+    return {
+      x: etiqCmp, y:(r.y0+r.y1)/2, xref:'x', yref:'y',
+      xanchor:'left', yanchor:'middle', xshift: OFFSET_PX, showarrow:false, align:'left',
+      text:'<b>'+ETIQUETA_ESTRATEGIA[est]+':</b> '+fmt(v),
+      font:{size:11, color: COLOR_ESTRATEGIA[est]}
+    };
+  });
+
+  const anotActual = ORDEN_ESTRATEGIAS.filter(est => estAct[est]).map(est => {
+    const r = estAct[est], v = r.y1 - r.y0;
+    const base = estCmp[est] ? (estCmp[est].y1 - estCmp[est].y0) : 0;
+    const pct = base ? (v/base - 1) : null;
+    const colorPct = pct===null ? CFG.color_texto : (pct<0 ? '#1B8F5A' : '#C0392B');
+    const flecha = pct===null ? '' : (pct<0 ? '▼' : '▲');
+    const linea2 = pct===null ? '' :
+      '<br><span style="color:'+colorPct+'">'+flecha+' ('+(pct>0?'+':'')+(pct*100).toFixed(0)+'%)</span>';
+    return {
+      x: etiqAct, y:(r.y0+r.y1)/2, xref:'x', yref:'y',
+      xanchor:'left', yanchor:'middle', xshift: OFFSET_PX, showarrow:false, align:'left',
+      text:'<b>'+ETIQUETA_ESTRATEGIA[est]+':</b> '+fmt(v)+linea2,
+      font:{size:11, color: COLOR_ESTRATEGIA[est]}
+    };
+  });
+
+  // --- Bloque superior de Totales + narrativa de evolución ------------------
+  const totB = cumCmp.total, totA = cumAct.total;
+  const varPct = totB ? (totA/totB - 1) : null;
+  const colorVar = varPct===null ? CFG.color_texto : (varPct<0 ? '#1B8F5A' : '#C0392B');
+  const Y_TOTALES = 1.16;
+  const anotTotales = [
+    { x: etiqCmp, y: Y_TOTALES, xref:'x', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<b>Total: '+fmt(totB)+'</b>', font:{size:13, color: CFG.color_texto},
+      bgcolor:'#EDEFF2', bordercolor:'#EDEFF2', borderpad:8 },
+    { x: etiqAct, y: Y_TOTALES, xref:'x', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<b>Total: '+fmt(totA)+'</b>', font:{size:13, color: CFG.color_texto},
+      bgcolor:'#EDEFF2', bordercolor:'#EDEFF2', borderpad:8 },
+    { x:0.5, y: Y_TOTALES, xref:'paper', yref:'paper', xanchor:'center', showarrow:false,
+      text:'<span style="color:'+colorVar+'">➜ '+
+        (varPct===null?'s/d':((varPct>0?'+':'')+(varPct*100).toFixed(0)+'%'))+'</span>',
+      font:{size:13, color: colorVar} }
+  ];
+
+  const lay = LAYOUT();
+  lay.xaxis.type = 'category';
+  lay.barmode = 'stack';
+  lay.bargap = 0.62;
+  lay.showlegend = false;
+  lay.width = 620;
+  lay.height = 320;
+  lay.autosize = false;
+  lay.margin = {l:20, r:135, t:60, b:40};
+  lay.yaxis.visible = false;
+  lay.annotations = anotTotales
+    .concat(etiquetasInternas(cumCmp, etiqCmp))
+    .concat(etiquetasInternas(cumAct, etiqAct))
+    .concat(anotBase)
+    .concat(anotActual);
+
+  Plotly.react(div, traces, lay, OPTS_PPT);
+}
+```
+
+---
+
+## Cambio 2 — Actualizar la llamada de Chart 52
+
+**Ctrl+F:**
+```
+  safe('gSector52',     () => sectorMsciProxies('gSector52','Huella', cAct, cCmp,
+    document.getElementById('selAfpSector52') ? document.getElementById('selAfpSector52').value : 'Integra'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gSector52',     () => sectorEjecutivo('gSector52','Huella', cAct, cCmp,
+    document.getElementById('selAfpSector52') ? document.getElementById('selAfpSector52').value : 'Integra'));
+```
+
+---
+
+## Cambio 3 — Actualizar la llamada de Chart 63
+
+**Ctrl+F:**
+```
+  safe('gSector63',     () => sectorMsciProxies('gSector63','Intensidad', cAct, cCmp,
+    document.getElementById('selAfpSector63') ? document.getElementById('selAfpSector63').value : 'Integra'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gSector63',     () => sectorEjecutivo('gSector63','Intensidad', cAct, cCmp,
+    document.getElementById('selAfpSector63') ? document.getElementById('selAfpSector63').value : 'Integra'));
+```
+
+---
+
+No toqué nada de Python — toda la data que necesita ya la trae `Sector_MSCI_Proxies` (mismo objeto de siempre), y el selector de AFP de cada tarjeta ya existe desde el cambio anterior. Cuando lo pruebes, si algo se ve amontonado o mal alineado (sobre todo las anotaciones externas de la derecha, que dependen del ancho del texto), dime exactamente qué parte y ajustamos solo esos números (`OFFSET_PX`, `margin.r`, `Y_TOTALES`, tamaños de fuente).
