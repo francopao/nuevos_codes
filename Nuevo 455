@@ -1,0 +1,38 @@
+¡Encontrado y confirmado con la data real!
+
+**La causa exacta:** en el workbook viejo (Ruta A), Parametria etiquetaba a los soberanos como `"GOB"`. En BD1_S_Huella (Ruta B), la misma clasificación viene como `"SOB"` — 328 filas. Cuando cambié el filtro a `Estrategia == "GOB"`, el nuevo corte T queda con **cero filas** de soberanos (porque su data BD1_S dice "SOB"), mientras que el corte T-1 sigue funcionando solo si su histórico ya estaba guardado desde una corrida vieja o desde un `Reporte_...202512.xlsm` que sí tenía "GOB".
+
+La comparativa entre `Strategy` y `Estrategia` que descubrí ahora:
+
+| Workbook viejo (Ruta A) | BD1_S (Ruta B, la que usas hoy) |
+|---|---|
+| GOB | SOB |
+| BU | BU |
+| TD | TD |
+| ALT | (no aparece) |
+
+**Fix mínimo:** aceptar ambas etiquetas en `soberanos()`. Así funciona con cualquier corte, venga de la fuente que venga, y no toca nada más del pipeline.
+
+---
+
+## Cambio único
+
+**Ctrl+F:**
+```
+    def soberanos(self) -> pd.DataFrame:
+        d = self.df[self.df[COL["estrategia"]] == "GOB"]
+```
+
+**Reemplázalo por:**
+```python
+    def soberanos(self) -> pd.DataFrame:
+        d = self.df[self.df[COL["estrategia"]].isin(["GOB", "SOB"])]
+```
+
+Con eso, el corte actual (T) vuelve a mostrar las barras. El resto del método queda igual, el formato del objeto no cambia, y los otros charts no se ven afectados.
+
+**Nota aparte para tu conocimiento** (no requiere acción hoy, pero conviene que lo tengas presente): la Ruta A usaba "ALT" para Alternatives y Ruta B no trae esa etiqueta — hoy solo aparecen BU/TD/SOB. Cualquier chart que filtre por `Estrategia == "ALT"` (bloque "ALT Proxies" en `bloques_estrategia`, filtro `alt` en `sector_msci_vs_proxies`, etc.) va a dar **vacío** con la data actual de BD1_S. Si más adelante notas que "Alts" aparece en cero en algún chart, ese es el motivo, no un bug de código.
+
+
+
+
