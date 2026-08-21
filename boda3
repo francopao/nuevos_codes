@@ -1,0 +1,202 @@
+Ahora entrego los bloques de código. Cuatro inserciones, en este orden dentro de tu script `Huella_20.txt`:
+
+---
+
+### 1) Funciones auxiliares (JS)
+
+**Ubicar con find:** el cierre de `function soberanosPais(...)` (línea ~3680), justo antes de:
+```js
+// --- Bloques de estrategia, apilados por corte (reemplaza barrasComparadas) -
+```
+
+**Insertar debajo del cierre `}` de `soberanosPais`:**```js
+// --- Datos auxiliares: Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks ---
+function serieCategoriaAfp(objeto, metrica, corte, afp){
+  const met = metricaDisponible(objeto, metrica, corte);
+  const m = new Map();
+  for(const r of HIST){
+    if(r.OBJETO!==objeto || r.METRICA!==met) continue;
+    if(String(r.FECHA_CORTE)!==String(corte)) continue;
+    if((r.AFP||'Integra')!==afp) continue;
+    const k = r.DIM_1 + (r.DIM_2==='Proxies' ? ' (Proxies)' : '');
+    if(!k) continue;
+    m.set(k, (m.get(k)||0) + (+r.VALOR||0));
+  }
+  return m;
+}
+
+function serieEmisorGOB(corte){
+  const met = metricaDisponible('Soberanos', 'Intensidad', corte);
+  const m = new Map();
+  for(const r of HIST){
+    if(r.OBJETO!=='Soberanos' || r.METRICA!==met) continue;
+    if(String(r.FECHA_CORTE)!==String(corte)) continue;
+    if((r.AFP||'Integra')!=='Integra') continue;
+    const k = r.DIM_1;
+    if(!k) continue;
+    m.set(k, (m.get(k)||0) + (+r.VALOR||0));
+  }
+  return m;
+}
+
+function valorComparableAfp(alias, metrica, corte){
+  const met = metricaDisponible('Comparables', metrica, corte);
+  let v = 0;
+  for(const r of HIST){
+    if(r.OBJETO==='Comparables' && r.METRICA===met &&
+       String(r.FECHA_CORTE)===String(corte) &&
+       (r.AFP||'Integra')==='Integra' && r.DIM_1===alias){ v += +r.VALOR||0; }
+  }
+  return v;
+}
+
+function _sumaMapa(m){ let t=0; m.forEach(v=>t+=v); return t; }
+```
+
+---
+
+### 2) Función principal del chart (JS)
+
+**Insertar justo debajo del bloque anterior** (antes de `// --- Bloques de estrategia...`):
+
+```js
+// --- Chart nuevo: Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks ---
+function comparativoBenchmarksAfp(div, corte){
+  const XPOS = [0,1,2,3,4,5,6,7,8,9];
+  const AFP_IZQ = ['Integra','Prima','Profuturo','Habitat'];
+  const BENCH_IZQ = ['ACWI','ILF','CEMB'];
+  const POS = {Integra:0, Prima:1, Profuturo:2, Habitat:3,
+               ACWI:4, ILF:5, CEMB:6, GOB:8, EMB:9};
+  const zeros = () => new Array(XPOS.length).fill(0);
+
+  // Bloque izquierdo: desglose por categoría (MSCI vs Proxies) — mismo
+  // formato y colores que el Chart 63 (Intensidad por categoría).
+  const ordenCat = [];
+  CFG.categorias_sector.forEach(c => ordenCat.push(c, c + ' (Proxies)'));
+  const mapasAfp = {};
+  AFP_IZQ.forEach(afp => {
+    mapasAfp[afp] = serieCategoriaAfp('Sector_MSCI_Proxies', 'Intensidad', corte, afp);
+  });
+  const catsPresentes = ordenCat.filter(c =>
+    AFP_IZQ.some(afp => Math.abs(mapasAfp[afp].get(c)||0) > 1e-9));
+
+  const traces = catsPresentes.map(cat => {
+    const y = zeros();
+    AFP_IZQ.forEach(afp => { y[POS[afp]] = mapasAfp[afp].get(cat) || 0; });
+    return {type:'bar', name:cat, x:XPOS, y,
+             marker: markerCategoria(cat), showlegend:false};
+  });
+
+  // Benchmarks (ACWI, ILF, CEMB, EMB): barra simple, color de comparación.
+  const yBench = zeros();
+  BENCH_IZQ.forEach(b => { yBench[POS[b]] = valorComparableAfp(b, 'Intensidad', corte); });
+  yBench[POS.EMB] = valorComparableAfp('EMB', 'Intensidad', corte);
+  traces.push({type:'bar', name:'Benchmark', x:XPOS, y:yBench,
+    marker:{color:C_CMP}, showlegend:false});
+
+  // Bloque derecho: desglose por emisor soberano — mismo formato y colores
+  // que el chart "Exposición soberana por emisor" (objeto Soberanos, Integra).
+  const mapaEmisor = serieEmisorGOB(corte);
+  const emisores = [...mapaEmisor.keys()]
+    .filter(k => Math.abs(mapaEmisor.get(k)||0) > 1e-9)
+    .sort((a,b) => (mapaEmisor.get(b)||0) - (mapaEmisor.get(a)||0));
+  emisores.forEach((em, i) => {
+    const y = zeros();
+    y[POS.GOB] = mapaEmisor.get(em) || 0;
+    traces.push({type:'bar', name:em, x:XPOS, y,
+      marker:{color:P[i % P.length]}, showlegend:false});
+  });
+
+  const totales = {
+    0: _sumaMapa(mapasAfp.Integra), 1: _sumaMapa(mapasAfp.Prima),
+    2: _sumaMapa(mapasAfp.Profuturo), 3: _sumaMapa(mapasAfp.Habitat),
+    4: yBench[4], 5: yBench[5], 6: yBench[6],
+    8: _sumaMapa(mapaEmisor), 9: yBench[9]
+  };
+  const maxVal = Math.max(1, ...Object.values(totales));
+
+  const c = String(corte);
+  const etiqCorte = (MESES[c.slice(4,6)]||c.slice(4,6)) + '-' + c.slice(2,4);
+
+  const valueAnns = Object.entries(totales).map(([pos,val]) => ({
+    x:+pos, y:val, xref:'x', yref:'y', yshift:14,
+    text:'<b>'+fmt(val)+'</b>', showarrow:false,
+    font:{size:11,color:'#0B3C5D'},
+    bgcolor:'#F2F4F6', bordercolor:'#F2F4F6', borderpad:3
+  }));
+
+  const bloqueAnns = [
+    {x:3, y:maxVal*1.30, xref:'x', yref:'y', text:'<b>Alts + TD + BU</b>',
+     showarrow:false, font:{size:12,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1.2, borderpad:5},
+    {x:8.5, y:maxVal*1.30, xref:'x', yref:'y', text:'<b>GOB</b>',
+     showarrow:false, font:{size:12,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1.2, borderpad:5}
+  ];
+
+  const fechaAnns = [
+    {x:3, y:-0.22, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:11,color:CFG.color_texto}},
+    {x:8.5, y:-0.22, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:11,color:CFG.color_texto}}
+  ];
+
+  const lay = LAYOUT();
+  lay.barmode = 'stack';
+  lay.showlegend = false;
+  lay.bargap = 0.35;
+  lay.height = 300;
+  lay.margin = {l:20, r:20, t:55, b:78};
+  lay.xaxis = {
+    tickvals:[0,1,2,3,4,5,6,8,9],
+    ticktext:['Integra','Prima','Profuturo','Habitat','ACWI','ILF','CEMB','Integra','EMB'],
+    range:[-0.6, 9.6],
+    showgrid:false, zeroline:false, showline:false, ticks:'',
+    tickfont:{size:10, color:CFG.color_texto}
+  };
+  lay.yaxis = {visible:false, range:[0, maxVal*1.42]};
+  lay.shapes = [{
+    type:'line', xref:'x', yref:'y', x0:-0.6, x1:9.6, y0:0, y1:0,
+    line:{color:'#D9EDF7', width:1.5}
+  }];
+  lay.annotations = [...bloqueAnns, ...valueAnns, ...fechaAnns];
+
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+---
+
+### 3) Registro en el orquestador `render()` (JS)
+
+**Ubicar con find (línea ~4314-4316):**
+```js
+  safe('gEsgBench',            () => emisoresEsgBenchmark('gEsgBench', cAct,
+    document.getElementById('selAfpEsgBench') ? document.getElementById('selAfpEsgBench').value : 'Integra'));
+}
+```
+
+**Reemplazar por:**
+```js
+  safe('gEsgBench',            () => emisoresEsgBenchmark('gEsgBench', cAct,
+    document.getElementById('selAfpEsgBench') ? document.getElementById('selAfpEsgBench').value : 'Integra'));
+  safe('gCompBenchAfp', () => comparativoBenchmarksAfp('gCompBenchAfp', cAct));
+}
+```
+
+---
+
+### 4) Registro de la tarjeta (Python)
+
+**Ubicar con find (línea ~4543-4544):**
+```python
+        ("gEsgBench", "Emisores con cobertura ESG propia vs Benchmark", True),
+    ]
+```
+
+**Reemplazar por:**
+```python
+        ("gEsgBench", "Emisores con cobertura ESG propia vs Benchmark", True),
+        ("gCompBenchAfp", "Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks", True),
+    ]
+```
