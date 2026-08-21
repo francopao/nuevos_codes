@@ -1,0 +1,152 @@
+4 modificaciones sobre lo ya aplicado. Todo vía `find` sobre el texto exacto que quedó en tu script tras el bloque anterior.
+
+---
+
+### 1) CSS — clase compacta para inserción en PPT
+
+**Find (dentro de `CSS_DASHBOARD`):**
+```css
+ .card.full{grid-column:1/-1}
+```
+
+**Replace:**
+```css
+ .card.full{grid-column:1/-1}
+ .card-ppt{max-width:660px;min-height:0;padding:8px 10px;justify-self:start}
+ .card-ppt h3{font-size:12px;margin:0 0 4px}
+```
+
+---
+
+### 2) Tarjeta — quitar el ancho completo (ya no debe ocupar todo el grid)
+
+**Find:**
+```python
+        ("gCompBenchAfp", "Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks", True),
+```
+
+**Replace:**
+```python
+        ("gCompBenchAfp", "Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks", False),
+```
+
+---
+
+### 3) Template de tarjetas — aplicar la clase `card-ppt` solo a este chart
+
+**Find:**
+```python
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}"><h3>{titulo}</h3>'
+```
+
+**Replace:**
+```python
+    cards = "".join(
+        (f'<div class="card{" full" if full else ""}{" card-ppt" if cid == "gCompBenchAfp" else ""}"><h3>{titulo}</h3>'
+```
+
+---
+
+### 4) JS — anotaciones y layout compactos (dentro de `comparativoBenchmarksAfp`)
+
+**Find:**
+```js
+  const valueAnns = Object.entries(totales).map(([pos,val]) => ({
+    x:+pos, y:val, xref:'x', yref:'y', yshift:14,
+    text:'<b>'+fmt(val)+'</b>', showarrow:false,
+    font:{size:11,color:'#0B3C5D'},
+    bgcolor:'#F2F4F6', bordercolor:'#F2F4F6', borderpad:3
+  }));
+
+  const bloqueAnns = [
+    {x:3, y:maxVal*1.30, xref:'x', yref:'y', text:'<b>Alts + TD + BU</b>',
+     showarrow:false, font:{size:12,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1.2, borderpad:5},
+    {x:8.5, y:maxVal*1.30, xref:'x', yref:'y', text:'<b>GOB</b>',
+     showarrow:false, font:{size:12,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1.2, borderpad:5}
+  ];
+
+  const fechaAnns = [
+    {x:3, y:-0.22, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:11,color:CFG.color_texto}},
+    {x:8.5, y:-0.22, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:11,color:CFG.color_texto}}
+  ];
+
+  const lay = LAYOUT();
+  lay.barmode = 'stack';
+  lay.showlegend = false;
+  lay.bargap = 0.35;
+  lay.height = 300;
+  lay.margin = {l:20, r:20, t:55, b:78};
+  lay.xaxis = {
+    tickvals:[0,1,2,3,4,5,6,8,9],
+    ticktext:['Integra','Prima','Profuturo','Habitat','ACWI','ILF','CEMB','Integra','EMB'],
+    range:[-0.6, 9.6],
+    showgrid:false, zeroline:false, showline:false, ticks:'',
+    tickfont:{size:10, color:CFG.color_texto}
+  };
+  lay.yaxis = {visible:false, range:[0, maxVal*1.42]};
+  lay.shapes = [{
+    type:'line', xref:'x', yref:'y', x0:-0.6, x1:9.6, y0:0, y1:0,
+    line:{color:'#D9EDF7', width:1.5}
+  }];
+  lay.annotations = [...bloqueAnns, ...valueAnns, ...fechaAnns];
+
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Replace:**
+```js
+  const valueAnns = Object.entries(totales).map(([pos,val]) => ({
+    x:+pos, y:val, xref:'x', yref:'y', yshift:10,
+    text:'<b>'+fmt(val)+'</b>', showarrow:false,
+    font:{size:9,color:'#0B3C5D'},
+    bgcolor:'#F2F4F6', bordercolor:'#F2F4F6', borderpad:2
+  }));
+
+  const bloqueAnns = [
+    {x:3, y:maxVal*1.22, xref:'x', yref:'y', text:'<b>Alts + TD + BU</b>',
+     showarrow:false, font:{size:9.5,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1, borderpad:3},
+    {x:8.5, y:maxVal*1.22, xref:'x', yref:'y', text:'<b>GOB</b>',
+     showarrow:false, font:{size:9.5,color:'#0B3C5D'},
+     bgcolor:'#EAF6FB', bordercolor:'#0B3C5D', borderwidth:1, borderpad:3}
+  ];
+
+  const fechaAnns = [
+    {x:3, y:-0.30, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:8.5,color:CFG.color_texto}},
+    {x:8.5, y:-0.30, xref:'x', yref:'paper', text:etiqCorte, showarrow:false,
+     font:{size:8.5,color:CFG.color_texto}}
+  ];
+
+  const lay = LAYOUT();
+  lay.barmode = 'stack';
+  lay.showlegend = false;
+  lay.bargap = 0.32;
+  lay.width = 620;
+  lay.height = 261;
+  lay.autosize = false;
+  lay.margin = {l:12, r:12, t:36, b:58};
+  lay.xaxis = {
+    tickvals:[0,1,2,3,4,5,6,8,9],
+    ticktext:['Integra','Prima','Profuturo','Habitat','ACWI','ILF','CEMB','Integra','EMB'],
+    range:[-0.6, 9.6],
+    showgrid:false, zeroline:false, showline:false, ticks:'',
+    tickfont:{size:8.5, color:CFG.color_texto}
+  };
+  lay.yaxis = {visible:false, range:[0, maxVal*1.38]};
+  lay.shapes = [{
+    type:'line', xref:'x', yref:'y', x0:-0.6, x1:9.6, y0:0, y1:0,
+    line:{color:'#D9EDF7', width:1.2}
+  }];
+  lay.annotations = [...bloqueAnns, ...valueAnns, ...fechaAnns];
+
+  const OPTS_PPT = {displayModeBar:false, responsive:false};
+  Plotly.react(div, traces, lay, OPTS_PPT);
+}
+```
