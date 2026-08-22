@@ -1,0 +1,32 @@
+Buena decisión — es el fix correcto y, de paso, también hace más preciso el benchmark viejo contra un FFMM/ETF puntual (`FFMM:xxx`), porque ese también usa este mismo `Weight` para escalar. Es un solo bloque a tocar, dentro del mismo método de siempre.
+
+## Cambio único — recalcular el Weight de X desde su propia Intensidad e Intensidad/CO2-H
+
+**Ctrl+F:**
+```
+                # Weight del emisor (para calcular intensidad del benchmark)
+                wt = (row[COL["inv"]] / self.aum_total_mm) if self.aum_total_mm else 0.0 if COL["inv"] in row.index else 0.0
+                filas.append({
+```
+
+**Reemplázalo por:**
+```python
+                # Weight "implícito" de X: se despeja de su propia Intensidad
+                # oficial (Intensidad_X = CO2-H_X x Weight_X) en vez de
+                # aproximarlo con Inv/AUM total cartera. Así el benchmark
+                # ajustado queda exactamente en la misma base que la barra
+                # que acompaña (y de paso, el benchmark FFMM:xxx puntual
+                # que ya existía también queda más preciso, porque usa
+                # este mismo Weight para escalar).
+                co2h_val = 0.0
+                if not top_rows.empty and "CO2-H" in top_rows.columns:
+                    co2h_val = float(pd.to_numeric(
+                        top_rows["CO2-H"], errors="coerce").fillna(0.0).iloc[0])
+                intens_x = float(row[COL["intensidad"]])
+                wt = (intens_x / co2h_val) if co2h_val else 0.0
+                filas.append({
+```
+
+**Dónde ubicarlo exactamente:** este bloque está dentro de `top_por_subcat_asset`, en el mismo `for _, row in agg_df.head(5).iterrows():` donde ya se calculan `mgmt` y `sc` a partir de `top_rows` — justo unas líneas después de `sc = _subcat_activo(top_rows.iloc[0], bloque)`. El Ctrl+F de arriba es único en el archivo, así que no hay ambigüedad posible.
+
+No hace falta tocar nada más — ni el `_agg(...)` de arriba (sigue trayendo `COL["inv"]`, simplemente ya no se usa para este cálculo, pero no molesta dejarlo), ni el resto de `filas.append({...})`, ni ningún bloque de JS: `Weight` se sigue exportando igual (`"Weight": float(wt)`) y el dashboard lo sigue leyendo igual, solo que ahora el número que le llega es matemáticamente exacto.
