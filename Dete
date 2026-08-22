@@ -1,0 +1,53 @@
+Bien pensado — reusar `Contrib_Variacion_Intensidad` como fuente es literalmente lo que ya armamos hace un par de turnos (mismo universo: BU+TD, sin Proxy, con Intensidad ya calculada por emisor), así que no hace falta tocar nada de Python. Solo hay que redirigir el chart existente hacia esa data y ajustar `ranking()` para que pueda mostrar una métrica distinta a Huella (hoy la tiene fija).
+
+Una cosa que encontré al revisar y que te dejo como aviso, no como algo que vaya a tocar sin que me digas: `ranking()` (tanto hoy como después de este cambio) **suma entre todas las AFPs** — no filtra por AFP como sí hacen Soberanos o los charts de categoría. Es un comportamiento que ya tenía el chart antes de este cambio (no lo introduzco yo), pero como ahora apunta a un objeto que armamos pensando en multi-AFP, te lo señalo por si te interesa agregarle un selector de AFP más adelante — no lo hago ahora porque no me lo pediste.
+
+---
+
+## Cambio 1 — Quitar la tarjeta de "Mayores contribuyentes general" y ajustar el título de la que se queda
+
+**Ctrl+F:**
+```
+        ("gContribBUTD", "Mayores contribuyentes BU + TD (solo corte seleccionado)", False),
+        ("gContribGral", "Mayores contribuyentes general (solo corte seleccionado)", False),
+```
+
+**Reemplázalo por:**
+```python
+        ("gContribBUTD", "Mayores contribuyentes por Intensidad — BU + TD sin Proxy (solo corte seleccionado)", False),
+```
+
+---
+
+## Cambio 2 — Quitar su llamado y redirigir el que se queda a la nueva fuente
+
+**Ctrl+F:**
+```
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_BU_TD',cAct,15));
+  safe('gContribGral',  () => ranking('gContribGral','Contrib_General',cAct,20));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_Variacion_Intensidad',cAct,15,'Intensidad'));
+```
+
+---
+
+## Cambio 3 — Que `ranking()` pueda mostrar una métrica distinta a Huella
+
+**Ctrl+F:**
+```
+function ranking(div, objeto, corte, topN){
+  const m = agg(objeto,'Huella',corte);
+```
+
+**Reemplázalo por:**
+```javascript
+function ranking(div, objeto, corte, topN, metrica){
+  const m = agg(objeto, metrica || 'Huella', corte);
+```
+
+---
+
+No hace falta tocar nada más: `ranking()` sigue siendo el mismo chart simple de siempre (barra horizontal, un valor por emisor, sin las flechas ni la partición Weight/CO2-H de "Variación de Intensidad") — solo que ahora mide Intensidad sobre el universo BU+TD sin Proxy en vez de Huella sobre el universo BU+TD con Proxy incluido. `contribuyentes_general()` y `Contrib_General` en Python no se tocan, así que ese dato sigue disponible en el Excel aunque ya no tenga chart en el dashboard.
