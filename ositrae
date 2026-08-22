@@ -1,0 +1,29 @@
+He verificado los dos Excel que subiste y esto descarta una posibilidad: **Carreteras.xlsx y Ferrovias.xlsx ya tienen datos completos de Febrero, Marzo y Abril 2026** (incluso Mayo). O sea, no es que falte el dato en la fuente — el problema está 100% en el script, en cómo arma el nombre de la columna de fecha antes de escribirla en `Ositran.xlsx`.
+
+**Causa raíz:** en la línea que construye `fecha_col`, el índice de mes se saca de una variable `mes_` (con guion bajo) que **no existe dentro de `main()`** — no aparece definida en ningún lado de este archivo. Tu función recibe el parámetro `mes` (sin guion bajo), pero solo lo usas en los `print` de error; para la fecha real usas `mes_`, que debe ser una variable global de otra celda de tu script (la del mes "actual"). Resultado: no importa qué `mes` le pases a `main()` al querer rellenar Febrero/Marzo/Abril — la columna que realmente escribe siempre corresponde al mes que tenga esa variable global en ese momento, así que tus llamadas de backfill terminaron pisando la misma columna en vez de crear tres columnas distintas.
+
+**Cómo encontrar la línea (Ctrl+F):**
+Busca el texto `fecha_col_dt` — aparece una sola vez en todo el archivo. La línea justo **arriba** de esa es la que hay que tocar (ojo: hay otra línea idéntica pero comentada con `#` más arriba en el archivo — esa NO la toques, déjala como está).
+
+**Cambio a hacer:**
+
+```python
+# ANTES (línea justo arriba de "fecha_col_dt ="):
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+
+# DESPUÉS:
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes)] + "/" + anio
+```
+
+Solo cambias `mes_` por `mes` (quitas el guion bajo) en esa única línea.
+
+Una vez aplicado, para recuperar lo que falta puedes correr manualmente `main('Febrero','2026')`, luego `main('Marzo','2026')`, luego `main('Abril','2026')` en ese orden — la fuente ya tiene esos meses, así que deberían quedar bien escritos como columnas nuevas.
+
+---
+
+Dos cosas más que no cuadran, pero antes de tocarlas prefiero que decidas tú:
+
+1. El bloque `for i in range(12,0,-1): if os.path.isfile(archivo1)...` no hace nada útil: `archivo1`/`archivo2` son rutas fijas que no cambian con el mes, así que el bucle revisa 12 veces el mismo archivo. ¿Era tu intención que buscara el archivo de meses anteriores si falta el actual (rutas con mes/año), o es código muerto que puedo simplificar?
+2. Si `File_found` queda en `False`, el script solo imprime el error pero no se detiene (`return`/`raise`) — sigue intentando procesar igual. ¿Quieres que corte la ejecución ahí?
+
+Si quieres que revise algo más (por ejemplo `carretera()` o `ferrovias()`, que no vienen en este archivo), pásamelas y las reviso también.
