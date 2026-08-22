@@ -1,0 +1,351 @@
+Perfecto, entendido — quieres las dos versiones disponibles al mismo tiempo, cada una con su propio cálculo. La nueva ("sin ajustar Weight") es más simple: toma el `Intensidad` tal cual viene por instrumento (que ya trae adentro el Weight propio de cada comparable, sin homogeneizar), le agrega el filtro de "debe tener Intensidad" y promedia — sin tocar para nada el cálculo "ajustado" que ya quedó funcionando.
+
+---
+
+## Cambio 1 — Nueva función: promedio de Intensidad tal cual, con el filtro de "debe tener valor"
+
+**Ctrl+F:**
+```
+        prom = sub.groupby("__subcat")["CO2-H"].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+**Reemplázalo por:**
+```python
+        prom = sub.groupby("__subcat")["CO2-H"].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+def _peer_group_intensidad(vals_ctx: dict) -> Dict[str, float]:
+    """Promedio de Intensidad TAL COMO VIENE por instrumento (con el Weight
+    propio de cada comparable ya incluido, SIN homogeneizar), por
+    (Bloque, SubCat) — mismo peer group cross-AFP que _peer_group_co2h
+    (F1+F2+F3 de todas las AFPs, no-proxy), más un tercer filtro: el
+    comparable debe tener un valor de Intensidad (!= 0). Es el benchmark
+    'sin ajustar Weight' de Chart 3: un solo valor por SubCat, igual para
+    toda barra de ese grupo (no se multiplica por el Weight del eje X)."""
+    piezas = []
+    for afp, par in vals_ctx.items():
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        d = d.copy()
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        d = d[d[COL["intensidad"]] != 0]  # tercer filtro: debe tener Intensidad
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        prom = sub.groupby("__subcat")[COL["intensidad"]].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+---
+
+## Cambio 2 — `PresentacionBuilder` recibe también este segundo diccionario
+
+**Ctrl+F:**
+```
+                 aum_total_mm: float | None = None,
+                 bench_peer_co2h: dict | None = None):
+        """
+        df_valorizacion   : DataFrame de M10 (columnas formuladas ya construidas)
+        fecha_corte       : 'yyyymm' o 'yyyy-mm-dd'
+        sector_lookup     : {Nombre -> Sector} de Parametria (col O -> col P)
+        intensidades_comp : {alias -> intensidad} de ComparablesLoader
+        aum_comp          : {alias -> AUM USD MM} de MarketCapLoader (hoja MKT)
+        bench_peer_co2h   : {"Bloque|SubCat" -> CO2-H promedio} del peer group
+                            cross-AFP, precomputado una sola vez para todo el
+                            pipeline (ver _peer_group_co2h). Usado por Chart 3.
+        """
+        self.fecha_corte = str(fecha_corte)
+        self.df = _base(df_valorizacion)
+        self.sector_lookup = sector_lookup or {}
+        self.intensidades_comp = intensidades_comp or {}
+        self.aum_comp = aum_comp or {}
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+        self.bench_peer_co2h = bench_peer_co2h or {}
+        self.objetos: dict[str, pd.DataFrame] = {}
+        self._diagnostico_plus()
+```
+
+**Reemplázalo por:**
+```python
+                 aum_total_mm: float | None = None,
+                 bench_peer_co2h: dict | None = None,
+                 bench_peer_intensidad: dict | None = None):
+        """
+        df_valorizacion   : DataFrame de M10 (columnas formuladas ya construidas)
+        fecha_corte       : 'yyyymm' o 'yyyy-mm-dd'
+        sector_lookup     : {Nombre -> Sector} de Parametria (col O -> col P)
+        intensidades_comp : {alias -> intensidad} de ComparablesLoader
+        aum_comp          : {alias -> AUM USD MM} de MarketCapLoader (hoja MKT)
+        bench_peer_co2h      : {"Bloque|SubCat" -> CO2-H promedio} del peer
+                               group cross-AFP (ver _peer_group_co2h). Benchmark
+                               "ajustado" (se multiplica x Weight del eje X).
+        bench_peer_intensidad: {"Bloque|SubCat" -> Intensidad promedio, tal
+                               cual, sin homogeneizar} (ver _peer_group_intensidad).
+                               Benchmark "sin ajustar Weight".
+        """
+        self.fecha_corte = str(fecha_corte)
+        self.df = _base(df_valorizacion)
+        self.sector_lookup = sector_lookup or {}
+        self.intensidades_comp = intensidades_comp or {}
+        self.aum_comp = aum_comp or {}
+        self.caja_neta_mm = float(caja_neta_mm or 0.0)
+        self.aum_total_mm = aum_total_mm
+        self.bench_peer_co2h = bench_peer_co2h or {}
+        self.bench_peer_intensidad = bench_peer_intensidad or {}
+        self.objetos: dict[str, pd.DataFrame] = {}
+        self._diagnostico_plus()
+```
+
+---
+
+## Cambio 3 — `top_por_subcat_asset`: agregar las filas del benchmark nuevo
+
+**Ctrl+F:**
+```
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        # "Intensidad Promedio - Comparables": CO2-H promedio del peer group
+        # cross-AFP (F1+F2+F3 de TODAS las AFPs, no-proxy). Se guarda SIN
+        # multiplicar por ningún Weight — eso lo hace el dashboard (JS) al
+        # vuelo usando el Weight propio de cada instrumento del eje X.
+        bench_subcat_df = pd.DataFrame([{
+            "Bloque": "_BENCH_SUBCAT_", "Mgmt_Nombre": clave, "SubCat": "",
+            COL["intensidad"]: val, "Weight": 0.0
+        } for clave, val in self.bench_peer_co2h.items()])
+        return pd.concat([result, bench_df, bench_subcat_df], ignore_index=True)
+```
+
+**Reemplázalo por:**
+```python
+        bench_df = pd.DataFrame([{
+            "Bloque": b, "Mgmt_Nombre": mn, "SubCat": "",
+            COL["intensidad"]: v, "Weight": 0.0
+        } for b, mn, v in benchmarks])
+        # "Intensidad Promedio - Comparables" (ajustado): CO2-H promedio del
+        # peer group cross-AFP. Se guarda SIN multiplicar por ningún Weight —
+        # eso lo hace el dashboard (JS) usando el Weight propio del eje X.
+        bench_subcat_df = pd.DataFrame([{
+            "Bloque": "_BENCH_SUBCAT_", "Mgmt_Nombre": clave, "SubCat": "",
+            COL["intensidad"]: val, "Weight": 0.0
+        } for clave, val in self.bench_peer_co2h.items()])
+        # "Benchmark sin ajustar Weight": Intensidad promedio del peer group
+        # tal cual viene (con el Weight propio de cada comparable adentro,
+        # sin homogeneizar). Un solo valor por SubCat, igual para toda barra
+        # de ese grupo — el dashboard NO lo multiplica por nada.
+        bench_subcat_unadj_df = pd.DataFrame([{
+            "Bloque": "_BENCH_SUBCAT_UNADJ_", "Mgmt_Nombre": clave, "SubCat": "",
+            COL["intensidad"]: val, "Weight": 0.0
+        } for clave, val in self.bench_peer_intensidad.items()])
+        return pd.concat([result, bench_df, bench_subcat_df, bench_subcat_unadj_df],
+                          ignore_index=True)
+```
+
+---
+
+## Cambio 4 — `run_pipeline_bd1s`: calcular y pasar el segundo peer group
+
+**Ctrl+F:**
+```
+    # Peer group cross-AFP (F1+F2+F3 de todas las AFPs) para el benchmark
+    # "Intensidad Promedio - Comparables" de Chart 3. Solo informativo: NO
+    # afecta ningún Weight real de ninguna cartera.
+    peer_co2h = _peer_group_co2h(vals_ctx)
+```
+
+**Reemplázalo por:**
+```python
+    # Peer group cross-AFP (F1+F2+F3 de todas las AFPs) para los dos
+    # benchmarks de Chart 3. Solo informativos: NO afectan ningún Weight
+    # real de ninguna cartera.
+    peer_co2h = _peer_group_co2h(vals_ctx)
+    peer_intensidad = _peer_group_intensidad(vals_ctx)
+```
+
+**Y luego, Ctrl+F:**
+```
+                aum_total_mm=ctx.get("aum_multifondos_mm"),
+                bench_peer_co2h=peer_co2h,
+            )
+```
+
+**Reemplázalo por:**
+```python
+                aum_total_mm=ctx.get("aum_multifondos_mm"),
+                bench_peer_co2h=peer_co2h,
+                bench_peer_intensidad=peer_intensidad,
+            )
+```
+
+---
+
+## Cambio 5 — Agregar la opción al slicer (sin marcarla como default)
+
+**Ctrl+F:**
+```
+    bench_options = [
+        ("Comparables_Subcat", "Intensidad Promedio - Comparables"),
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+```
+
+**Reemplázalo por:**
+```python
+    bench_options = [
+        ("Comparables_Subcat", "Intensidad Promedio - Comparables"),
+        ("Comparables_Subcat_Unadj", "Benchmark sin ajustar Weight"),
+        ("Total_Integra", "Intensidad promedio cartera Integra"),
+```
+
+---
+
+## Cambio 6 — JS: leer las filas del benchmark nuevo
+
+**Ctrl+F:**
+```
+      if(r.DIM_1==='_BENCH_SUBCAT_'){
+        if((r.AFP||'Integra')!=='Integra') continue; // mismo valor en todas, tomar una sola vez
+        benchmarksSubcat[r.DIM_2] = +r.VALOR||0; continue;
+      }
+```
+
+**Reemplázalo por:**
+```javascript
+      if(r.DIM_1==='_BENCH_SUBCAT_'){
+        if((r.AFP||'Integra')!=='Integra') continue; // mismo valor en todas, tomar una sola vez
+        benchmarksSubcat[r.DIM_2] = +r.VALOR||0; continue;
+      }
+      if(r.DIM_1==='_BENCH_SUBCAT_UNADJ_'){
+        if((r.AFP||'Integra')!=='Integra') continue;
+        benchmarksSubcatUnadj[r.DIM_2] = +r.VALOR||0; continue;
+      }
+```
+
+**Y en la misma función, Ctrl+F:**
+```
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const benchmarksSubcat = {};
+  const filas = [];
+```
+
+**Reemplázalo por:**
+```javascript
+function _parseAssetPerf(corte){
+  const benchmarks = {};
+  const benchmarksSubcat = {};
+  const benchmarksSubcatUnadj = {};
+  const filas = [];
+```
+
+**Y más abajo en la misma función, Ctrl+F:**
+```
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_' && r.DIM_1!=='_BENCH_SUBCAT_'){
+```
+
+**Reemplázalo por:**
+```javascript
+    if(r.METRICA==='Weight' && r.DIM_1!=='_BENCH_' && r.DIM_1!=='_BENCH_SUBCAT_'
+       && r.DIM_1!=='_BENCH_SUBCAT_UNADJ_'){
+```
+
+**Y al final de la misma función, Ctrl+F:**
+```
+  return {filas, benchmarks, benchmarksSubcat};
+}
+```
+
+**Reemplázalo por:**
+```javascript
+  return {filas, benchmarks, benchmarksSubcat, benchmarksSubcatUnadj};
+}
+```
+
+---
+
+## Cambio 7 — JS: nueva rama del slicer (valor plano, sin multiplicar por Weight)
+
+**Ctrl+F:**
+```
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks, benchmarksSubcat} = _parseAssetPerf(corte);
+```
+
+**Reemplázalo por:**
+```javascript
+function assetPerformanceAfp(div, corte, benchKey){
+  const {filas, benchmarks, benchmarksSubcat, benchmarksSubcatUnadj} = _parseAssetPerf(corte);
+```
+
+**Y luego, Ctrl+F:**
+```
+  } else if(bk === 'Comparables_Subcat'){
+    benchLabel = 'Intensidad Promedio - Comparables';
+    // CO2-H promedio del peer group (misma Bloque+SubCat) x Weight PROPIO
+    // del emisor del eje X — no el Weight de los comparables.
+    benchYvals = sorted.map(s =>
+      ((benchmarksSubcat[s.bloque+'|'+s.subcat] || 0) * (s.weight||0)) / esc.div);
+  } else {
+```
+
+**Reemplázalo por:**
+```javascript
+  } else if(bk === 'Comparables_Subcat'){
+    benchLabel = 'Intensidad Promedio - Comparables';
+    // CO2-H promedio del peer group (misma Bloque+SubCat) x Weight PROPIO
+    // del emisor del eje X — no el Weight de los comparables.
+    benchYvals = sorted.map(s =>
+      ((benchmarksSubcat[s.bloque+'|'+s.subcat] || 0) * (s.weight||0)) / esc.div);
+  } else if(bk === 'Comparables_Subcat_Unadj'){
+    benchLabel = 'Benchmark sin ajustar Weight';
+    // Intensidad promedio del peer group tal cual viene (con el Weight de
+    // cada comparable ya adentro) — un solo valor por SubCat, sin
+    // reescalar por el Weight del emisor del eje X.
+    benchYvals = sorted.map(s =>
+      (benchmarksSubcatUnadj[s.bloque+'|'+s.subcat] || 0) / esc.div);
+  } else {
+```
+
+---
+
+Con esto tienes las dos opciones lado a lado en el slicer: "Intensidad Promedio - Comparables" (la que ya tenías, ajustada al Weight de cada emisor del eje X) y "Benchmark sin ajustar Weight" (nueva, un valor fijo por SubCat calculado con el Weight propio de cada comparable, filtrando primero a los que sí tienen Intensidad y no vienen de Proxy).
