@@ -1,0 +1,277 @@
+Aquí están los bloques. Antes, dos decisiones de implementación que tomé y quiero que conozcas:
+
+- **Cómo se calcula el "% de contribución"**: lo hice como el peso de cada emisor sobre la **suma de todos los movimientos en valor absoluto** (no sobre el neto). Si lo hiciera sobre el neto, un semestre donde subidas y bajadas casi se cancelan daría porcentajes absurdos (150%, -300%) por dividir entre un número cercano a cero. Con el absoluto, siempre es estable y se lee como "este emisor explica X% de todo el movimiento de intensidad del semestre".
+- **AFP**: le puse su propio selector (con Integra por defecto), igual que a Soberanos y a los charts de categoría — así queda consistente con el resto del dashboard en vez de ser el único chart sin esa opción.
+
+---
+
+## Cambio 1 — Marcar qué filas usan el dato de respaldo de "Perdieron Huella"
+
+**Ctrl+F:**
+```
+    def _apply_perdieron(self, df, isin, sbs):
+        if not self.perdieron_lookup:
+            return
+        aj = df[V_AJ].tolist()
+        n = 0
+        for k, (i, s) in enumerate(zip(isin, sbs)):
+            hit = self._lookup_id(self.perdieron_lookup, i, s)
+            if hit is None:
+                continue
+            if self.perdieron_mode == "override":
+                aj[k] = hit; n += 1
+            elif aj[k] is None or (isinstance(aj[k], float) and pd.isna(aj[k])):
+                aj[k] = hit; n += 1
+        df[V_AJ] = aj
+        if self.verbose and n:
+            print(f"  [Módulo 10] Perdieron Huella ({self.perdieron_mode}): {n} aplicadas.")
+```
+
+**Reemplázalo por:**
+```python
+    def _apply_perdieron(self, df, isin, sbs):
+        if "PERDIO_HUELLA" not in df.columns:
+            df["PERDIO_HUELLA"] = False
+        if not self.perdieron_lookup:
+            return
+        aj = df[V_AJ].tolist()
+        flag = df["PERDIO_HUELLA"].tolist()
+        n = 0
+        for k, (i, s) in enumerate(zip(isin, sbs)):
+            hit = self._lookup_id(self.perdieron_lookup, i, s)
+            if hit is None:
+                continue
+            if self.perdieron_mode == "override":
+                aj[k] = hit; flag[k] = True; n += 1
+            elif aj[k] is None or (isinstance(aj[k], float) and pd.isna(aj[k])):
+                aj[k] = hit; flag[k] = True; n += 1
+        df[V_AJ] = aj
+        df["PERDIO_HUELLA"] = flag
+        if self.verbose and n:
+            print(f"  [Módulo 10] Perdieron Huella ({self.perdieron_mode}): {n} aplicadas.")
+```
+
+---
+
+## Cambio 2 — Nuevo método: emisores BU+TD sin Proxy, con Huella + Intensidad + flag
+
+**Ctrl+F:**
+```
+    def contribuyentes_bu_td(self, top_n: int = 15) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+```
+
+**Inserta esto justo ANTES de esa línea:**
+```python
+    def contribuyentes_variacion_intensidad(self) -> pd.DataFrame:
+        """Universo BU+TD, EXCLUYENDO Proxy (dato ESG directo únicamente),
+        agregado por emisor: Huella, Intensidad, Inv MM$ + flag PERDIO_HUELLA
+        (True si alguna de sus posiciones usó el dato de respaldo de la hoja
+        'Perdieron Huella'). Es la base del chart de variación de Intensidad
+        por emisor — el dashboard arma la comparación entre cortes y la
+        descomposición CO2-H vs Weight con estos tres números."""
+        d = self.df[
+            self.df[COL["estrategia"]].isin(["BU", "TD"])
+            & ~self.df[COL["plus_1"]].isin(["SOV", "Alts"])
+            & (self.df[COL["plus"]] != "Proxies")
+        ]
+        d = _sin_huella_cero(d)
+        out = _agg(d, [COL["nombre"]],
+                   [COL["huella"], COL["intensidad"], COL["inv"]])
+        if out.empty:
+            out["PERDIO_HUELLA"] = pd.Series(dtype=bool)
+            return out
+        if "PERDIO_HUELLA" in d.columns:
+            flag = d.groupby(COL["nombre"])["PERDIO_HUELLA"].any()
+            out["PERDIO_HUELLA"] = out[COL["nombre"]].map(flag).fillna(False)
+        else:
+            out["PERDIO_HUELLA"] = False
+        return out
+
+    def contribuyentes_bu_td(self, top_n: int = 15) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+```
+
+---
+
+## Cambio 3 — Registrar el objeto nuevo
+
+**Ctrl+F:**
+```
+            "Contrib_BU_TD": full_bu_td,
+```
+
+**Reemplázalo por:**
+```python
+            "Contrib_BU_TD": full_bu_td,
+            "Contrib_Variacion_Intensidad": self.contribuyentes_variacion_intensidad(),
+```
+
+---
+
+## Cambio 4 — Tarjeta nueva + selector de AFP
+
+**Ctrl+F:**
+```
+        ("gContribBUTD", "Mayores contribuyentes BU + TD (solo corte seleccionado)", False),
+```
+
+**Reemplázalo por:**
+```python
+        ("gContribBUTD", "Mayores contribuyentes BU + TD (solo corte seleccionado)", False),
+        ("gContribVarInt", "Variación de Intensidad por emisor — efecto Weight vs efecto CO2-H (BU+TD, sin Proxy)", True),
+```
+
+**Ctrl+F:**
+```
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gSoberanosInt", "gAssetPerf"}
+    _IDS_AFP_SLICER = {"gSector52": "selAfpSector52", "gSector63": "selAfpSector63",
+                        "gSoberanos": "selAfpSoberanos", "gSoberanosInt": "selAfpSoberanosInt"}
+```
+
+**Reemplázalo por:**
+```python
+    _IDS_PPT = {"gCompBenchAfp", "gSector52", "gSector63", "gSoberanos", "gSoberanosInt", "gAssetPerf"}
+    _IDS_AFP_SLICER = {"gSector52": "selAfpSector52", "gSector63": "selAfpSector63",
+                        "gSoberanos": "selAfpSoberanos", "gSoberanosInt": "selAfpSoberanosInt",
+                        "gContribVarInt": "selAfpContribVarInt"}
+```
+
+---
+
+## Cambio 5 — Disparar el chart
+
+**Ctrl+F:**
+```
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_BU_TD',cAct,15));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_BU_TD',cAct,15));
+  safe('gContribVarInt', () => contribVariacionIntensidad('gContribVarInt', cAct, cCmp,
+    document.getElementById('selAfpContribVarInt') ? document.getElementById('selAfpContribVarInt').value : 'Integra', 12));
+```
+
+---
+
+## Cambio 6 — Las funciones nuevas del render
+
+**Ctrl+F:**
+```
+function markerCategoria(clave){
+```
+
+**Inserta esto justo ANTES de esa línea:**
+```javascript
+// --- Chart nuevo: variación de Intensidad por emisor (BU+TD, sin Proxy) —
+// descompuesto en efecto Weight (decisión propia: compramos/vendimos) vs
+// efecto CO2-H (dato externo que cambió). Intensidad = CO2-H x Weight; la
+// descomposición usa el PROMEDIO de ambos períodos para cada factor, así
+// los dos efectos suman EXACTO la variación total, sin residuo.
+function _mapaContribVar(corte, afp){
+  const met = ['Huella', 'Intensidad', 'Inv MM$', 'PERDIO_HUELLA'];
+  const out = new Map();
+  for(const r of HIST){
+    if(r.OBJETO!=='Contrib_Variacion_Intensidad') continue;
+    if(String(r.FECHA_CORTE)!==String(corte)) continue;
+    if((r.AFP||'Integra')!==afp) continue;
+    if(!met.includes(r.METRICA)) continue;
+    const k = r.DIM_1;
+    if(!k) continue;
+    if(!out.has(k)) out.set(k, {huella:0, intensidad:0, inv:0, perdio:false});
+    const o = out.get(k);
+    if(r.METRICA==='Huella') o.huella += +r.VALOR||0;
+    if(r.METRICA==='Intensidad') o.intensidad += +r.VALOR||0;
+    if(r.METRICA==='Inv MM$') o.inv += +r.VALOR||0;
+    if(r.METRICA==='PERDIO_HUELLA') o.perdio = o.perdio || (+r.VALOR>0);
+  }
+  return out;
+}
+
+function contribVariacionIntensidad(div, cAct, cCmp, afp, topN){
+  topN = topN || 12;
+  const mCmp = _mapaContribVar(cCmp, afp);
+  const mAct = _mapaContribVar(cAct, afp);
+  const nombres = new Set([...mCmp.keys(), ...mAct.keys()]);
+  const co2h = o => o.inv ? o.huella / o.inv : null;
+
+  const filas = [];
+  nombres.forEach(nombre => {
+    const c = mCmp.get(nombre) || {huella:0, intensidad:0, inv:0, perdio:false};
+    const a = mAct.get(nombre) || {huella:0, intensidad:0, inv:0, perdio:false};
+    let cC = co2h(c), cA = co2h(a);
+    if(cC===null && cA===null) return;
+    if(cC===null) cC = cA;
+    if(cA===null) cA = cC;
+    const wC = cC ? c.intensidad / cC : 0;
+    const wA = cA ? a.intensidad / cA : 0;
+    const deltaInt = a.intensidad - c.intensidad;
+    if(Math.abs(deltaInt) < 1e-9) return;
+    const co2Avg = (cC + cA) / 2, wAvg = (wC + wA) / 2;
+    filas.push({
+      nombre, deltaInt,
+      efectoWeight: (wA - wC) * co2Avg,
+      efectoCO2H: (cA - cC) * wAvg,
+      perdio: c.perdio || a.perdio
+    });
+  });
+
+  if(!filas.length){ document.getElementById(div).innerHTML=''; return; }
+
+  const totalAbs = filas.reduce((s,f)=>s+Math.abs(f.deltaInt), 0);
+  filas.sort((x,y)=>Math.abs(y.deltaInt)-Math.abs(x.deltaInt));
+  const top = filas.slice(0, topN).reverse();
+
+  const y = top.map(f => (f.perdio ? '◇ ' : '') + f.nombre);
+  const patron = top.map(f => f.perdio ? '/' : '');
+
+  const traces = [
+    {type:'bar', orientation:'h', name:'Efecto Weight', y, x: top.map(f=>f.efectoWeight),
+     marker:{color:'#3494BA',
+             pattern:{shape:patron, fgcolor:'#3494BA', bgcolor:'#FFFFFF', size:6, solidity:0.35}},
+     showlegend:false},
+    {type:'bar', orientation:'h', name:'Efecto CO2-H', y, x: top.map(f=>f.efectoCO2H),
+     marker:{color:'#ACD7CA',
+             pattern:{shape:patron, fgcolor:'#ACD7CA', bgcolor:'#FFFFFF', size:6, solidity:0.35}},
+     showlegend:false}
+  ];
+
+  const annotations = top.map((f,i) => ({
+    x: f.deltaInt, y: y[i], xref:'x', yref:'y',
+    xanchor: f.deltaInt>=0 ? 'left' : 'right', xshift: f.deltaInt>=0 ? 6 : -6,
+    showarrow:false,
+    text: '<b>'+(100*Math.abs(f.deltaInt)/(totalAbs||1)).toFixed(0)+'%</b>',
+    font:{size:9.5, color: f.deltaInt>=0 ? '#C0392B' : '#1B8F5A'}
+  }));
+  annotations.push({
+    x:0, y:1.10, xref:'paper', yref:'paper', xanchor:'left', showarrow:false,
+    text:'<span style="color:#3494BA">■</span> Efecto Weight &nbsp;&nbsp;'
+       + '<span style="color:#ACD7CA">■</span> Efecto CO2-H',
+    font:{size:10, color: CFG.color_texto}
+  });
+  if(top.some(f=>f.perdio)){
+    annotations.push({
+      x:0, y:-0.10, xref:'paper', yref:'paper', xanchor:'left', showarrow:false,
+      text:'◇ = emisor con dato de "Perdieron Huella" (sin cobertura ESG actualizada)',
+      font:{size:9, color:'#8A99A8'}
+    });
+  }
+
+  const lay = LAYOUT();
+  lay.barmode = 'relative';
+  lay.showlegend = false;
+  lay.xaxis.title = 'Variación de Intensidad';
+  lay.xaxis.zeroline = true;
+  lay.xaxis.zerolinecolor = '#B9C2CC';
+  lay.xaxis.zerolinewidth = 1.5;
+  lay.margin = {l: 190, r: 60, t: 40, b: 55};
+  lay.height = Math.max(CFG.alto, 26*top.length + 130);
+  lay.annotations = annotations;
+  Plotly.react(div, traces, lay, OPTS);
+}
+
+function markerCategoria(clave){
+```
+
+---
+
+Con esto: barra que se lee de un vistazo (derecha = subió intensidad, izquierda = bajó), partida en Weight vs CO2-H, con el % de aporte al movimiento total al final de cada una, y el símbolo ◇ para los emisores sin cobertura ESG propia — sin sacarlos del ranking, tal como pediste, solo distinguidos.
