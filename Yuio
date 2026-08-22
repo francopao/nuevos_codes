@@ -1,0 +1,198 @@
+Sí, entendí — y es una diferencia real frente a lo que tenía antes, vale la pena confirmarlo con un ejemplo antes de tocar código.
+
+**Lo que tenía antes** ("sin ajustar Weight"): promediaba **cada posición-fondo por separado**. Si el emisor Z estaba en Integra-F1, Prima-F2 y Habitat-F3, esas 3 filas entraban al promedio como si fueran 3 instrumentos distintos — un emisor muy repartido entre fondos pesaba más en el promedio solo por aparecer más veces, no porque tuviera más intensidad real.
+
+**Lo que pides ahora**: primero **consolidar por emisor** (sumar sus Intensidad si aparece en varios fondos/AFPs), y recién ese número consolidado — uno solo por emisor — entra al promedio final.
+
+Ejemplo con la misma subcategoría EM:
+
+| Emisor | Aparece en | Intensidad por posición | Intensidad consolidada del emisor |
+|---|---|---|---|
+| Z | Integra-F1 (0.7) + Prima-F2 (0.5) + Habitat-F3 (0.3) | 0.7, 0.5, 0.3 | **1.5** (suma) |
+| W | Profuturo-F1 | 0.9 | **0.9** |
+
+- Antes: promedio de las 4 filas sueltas = (0.7+0.5+0.3+0.9)/4 = 0.6 (Z domina porque aparece 3 veces)
+- Ahora: promedio de los 2 emisores YA consolidados = (1.5+0.9)/2 = **1.2** (Z y W pesan igual, un voto por emisor)
+
+Y agregas una condición nueva: **excluir Ex_Integra** del universo de AFPs. Esa parte también la sumo a `_peer_group_co2h` (el benchmark "ajustado"), porque ambos benchmarks representan el mismo peer group y no tendría sentido que uno excluya Ex_Integra y el otro no — dime si en realidad querías que fuera solo para este.
+
+---
+
+## Cambio 1 — Excluir Ex_Integra del benchmark "ajustado"
+
+**Ctrl+F:**
+```
+    piezas = []
+    for afp, par in vals_ctx.items():
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        sub["CO2-H"] = pd.to_numeric(sub["CO2-H"], errors="coerce").fillna(0.0)
+        prom = sub.groupby("__subcat")["CO2-H"].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+```
+
+**Reemplázalo por:**
+```python
+    piezas = []
+    for afp, par in vals_ctx.items():
+        if afp == "Ex_Integra":
+            continue
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        sub["CO2-H"] = pd.to_numeric(sub["CO2-H"], errors="coerce").fillna(0.0)
+        prom = sub.groupby("__subcat")["CO2-H"].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+```
+
+---
+
+## Cambio 2 — Consolidar por emisor antes de promediar, y excluir Ex_Integra
+
+**Ctrl+F:**
+```
+def _peer_group_intensidad(vals_ctx: dict) -> Dict[str, float]:
+    """Promedio de Intensidad TAL COMO VIENE por instrumento (con el Weight
+    propio de cada comparable ya incluido, SIN homogeneizar), por
+    (Bloque, SubCat) — mismo peer group cross-AFP que _peer_group_co2h
+    (F1+F2+F3 de todas las AFPs, no-proxy), más un tercer filtro: el
+    comparable debe tener un valor de Intensidad (!= 0). Es el benchmark
+    'sin ajustar Weight' de Chart 3: un solo valor por SubCat, igual para
+    toda barra de ese grupo (no se multiplica por el Weight del eje X)."""
+    piezas = []
+    for afp, par in vals_ctx.items():
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        d = d.copy()
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        d = d[d[COL["intensidad"]] != 0]  # tercer filtro: debe tener Intensidad
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        prom = sub.groupby("__subcat")[COL["intensidad"]].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+```
+
+**Reemplázalo por:**
+```python
+def _peer_group_intensidad(vals_ctx: dict) -> Dict[str, float]:
+    """Promedio de Intensidad CONSOLIDADA por emisor, por (Bloque, SubCat) —
+    peer group cross-AFP (F1+F2+F3, EXCLUYENDO Ex_Integra), no-proxy, con
+    Intensidad != 0. Si un emisor aparece en más de un fondo/AFP, primero se
+    SUMAN sus Intensidad (consolidación por emisor) y recién ese número
+    consolidado -uno por emisor- entra al promedio. Así un emisor repetido
+    entre varios fondos no pesa más que uno que aparece una sola vez. Es el
+    benchmark 'sin ajustar Weight' de Chart 3: un solo valor por SubCat,
+    igual para toda barra de ese grupo (no se multiplica por Weight del eje X)."""
+    piezas = []
+    for afp, par in vals_ctx.items():
+        if afp == "Ex_Integra":
+            continue
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        d = d.copy()
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        d = d[d[COL["intensidad"]] != 0]  # tercer filtro: debe tener Intensidad
+        if not d.empty:
+            piezas.append(d)
+    if not piezas:
+        return {}
+    universo = pd.concat(piezas, ignore_index=True)
+
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    out: Dict[str, float] = {}
+    for ac_orig, bloque in ac_map.items():
+        sub = universo[universo["GyP_ASSET_CLASS"] == ac_orig]
+        if sub.empty:
+            continue
+        sub = sub.copy()
+        sub["__subcat"] = sub.apply(lambda r: _subcat_activo(r, bloque), axis=1)
+        # Paso 1: consolidar por emisor -> SUMAR Intensidad si el mismo
+        # emisor aparece en más de un fondo/AFP dentro de la misma SubCat.
+        consolidado = sub.groupby(["__subcat", COL["nombre"]])[COL["intensidad"]].sum()
+        # Paso 2: promediar esos valores YA consolidados, uno por emisor.
+        prom = consolidado.groupby(level="__subcat").mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+```
+
+---
+
+No hace falta tocar nada más — ni `_exportar_universo_ffmm_debug` (el Excel de diagnóstico sigue trayendo el universo completo sin consolidar, para que sigas pudiendo verificar tú mismo la consolidación a mano en Excel), ni el JS del dashboard, ni `top_por_subcat_asset`. Ambas funciones siguen devolviendo el mismo formato `{"Bloque|SubCat": valor}`, así que el resto del cableado no se entera del cambio.
