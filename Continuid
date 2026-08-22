@@ -1,0 +1,60 @@
+Tienes razón — mi error de continuidad. `Huella 28` es tu archivo **antes** de que aplicaras nada de lo que te pasé para este chart, así que la función `contribuyentesBuTdPorIntensidad` no existe todavía en tu script: no hay nada que reemplazar, porque nunca llegaste a insertarla. Vamos directo a la versión final (la de doble eje), sin el paso intermedio.
+
+## Cambio 1 — Insertar la función nueva
+
+**Ctrl+F:**
+```
+function ranking(div, objeto, corte, topN, metrica){
+```
+
+**Inserta esto justo ANTES de esa línea** (no borres nada):
+```javascript
+// --- gContribBUTD: la barra sigue siendo Intensidad (mismo largo, mismo
+// valor, mismo ranking) — el marcador circular vive en un eje X2 aparte,
+// con escala de Huella, así que se mueve horizontalmente según la Huella
+// del emisor, independiente del largo de la barra.
+function contribuyentesBuTdPorIntensidad(div, objeto, corte, topN){
+  const mInt = agg(objeto, 'Intensidad', corte);
+  const mHuella = agg(objeto, 'Huella', corte);
+  const keys = [...mInt.keys()].filter(k=>k)
+    .sort((x,y)=>mInt.get(x)-mInt.get(y)).slice(-topN);
+  const valInt = keys.map(k=>mInt.get(k)||0);
+  const valHuella = keys.map(k=>mHuella.get(k)||0);
+
+  const lay = LAYOUT();
+  lay.height = Math.max(CFG.alto, 26*keys.length + 130);
+  lay.margin = {l:250,r:80,t:20,b:40};
+  lay.showlegend = false;
+  lay.xaxis = {visible:false};
+  lay.xaxis2 = {overlaying:'x', side:'bottom', title:'Huella (Tn CO2)',
+                showgrid:true, gridcolor:CFG.color_grid, zeroline:true};
+
+  Plotly.react(div, [
+    {type:'bar', orientation:'h', x:valInt, y:keys,
+     marker:{color:C_ACT}, text:valInt.map(fmt), textposition:'outside',
+     cliponaxis:false, hoverinfo:'skip'},
+    {type:'scatter', mode:'markers', orientation:'h', x:valHuella, y:keys,
+     xaxis:'x2',
+     marker:{size:14, color:'#fff', line:{color:C_ACC, width:2.5}},
+     hoverinfo:'skip', showlegend:false}
+  ], lay, OPTS);
+}
+
+function ranking(div, objeto, corte, topN, metrica){
+```
+
+## Cambio 2 — Redirigir el chart a la función nueva
+
+**Ctrl+F:**
+```
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_Variacion_Intensidad',cAct,15,'Intensidad'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gContribBUTD',  () => contribuyentesBuTdPorIntensidad('gContribBUTD','Contrib_Variacion_Intensidad',cAct,15));
+```
+
+---
+
+Con estos 2 cambios queda completo — no falta nada más de la Parte 1. Para que quede claro para la próxima vez: cuando te pase una corrección sobre algo que "acabamos de agregar", siempre parto de que ya aplicaste el paso anterior a tu script. Si en algún momento no estás seguro de si algo quedó aplicado, dime y reviso tu archivo más reciente antes de darte el Ctrl+F, como hice ahora.
