@@ -1,0 +1,100 @@
+Perfecto, y gracias por confirmar lo de "Perdieron Huella" — eso simplifica todo: no hay que arreglar nada ahí, solo hacerlo visible en el Excel para que puedas correlacionarlo con tus casos de "Efecto CO2-H = 0".
+
+Rastreé el pipeline para encontrar exactamente en qué momento se puede saber el origen del CO2-H de cada fila. Buena noticia: ya existen casi todos los "ganchos" necesarios (el flag que agregamos hace 2 turnos, y un historial de herencia que el motor de Grupo Económico ya guarda internamente) — solo hay que capturarlos en el momento correcto, antes de que se pisen entre sí.
+
+## Cómo se determina la fuente
+
+En el orden real en que tu pipeline completa el CO2-H:
+1. **Match inicial** (BD MSCI directa o Proxy, según el archivo consolidado) — se distingue mirando el campo `Plus` de ese mismo match: si es `"Proxies"` → vino de Proxy; si no → BD MSCI directa.
+2. Lo que sigue vacío se intenta llenar con **Perdieron Huella** (ya lo tenemos flageado).
+3. Lo que sigue vacío después de eso se intenta llenar con **Herencia por Grupo Económico** (tu motor ya guarda esta lista internamente, solo hay que leerla).
+4. Lo que sigue vacío → **Sin match** (cae a 0).
+
+---
+
+## Cambio 1 — Capturar el origen dentro de `ValorizacionBuilder`
+
+**Ctrl+F:**
+```
+        isin = df[self.isin_col].map(_to_string)
+        df[V_AJ] = [self._lookup_id(self.intensidad_post, i, s) for i, s in zip(isin, sbs)]
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+```
+
+**Reemplázalo por:**
+```python
+        isin = df[self.isin_col].map(_to_string)
+        df[V_AJ] = [self._lookup_id(self.intensidad_post, i, s) for i, s in zip(isin, sbs)]
+        # Trazabilidad del origen del CO2-H (solo diagnóstico, no afecta
+        # ningún cálculo): capturamos el estado ANTES de que Perdieron
+        # Huella y la Herencia por Grupo Económico lo modifiquen.
+        _co2h_ok_inicial = [v is not None and not (isinstance(v, float) and pd.isna(v))
+                            for v in df[V_AJ].tolist()]
+        _plus_inicial = [self._lookup_id(self.plus_lookup, i, s) for i, s in zip(isin, sbs)]
+        self._apply_perdieron(df, isin, sbs)
+        self._apply_inheritance(df)
+        _heredados = set()
+        if self.inherited_history is not None and not self.inherited_history.empty \
+                and "ISIN_heredado" in self.inherited_history.columns:
+            _heredados = set(self.inherited_history["ISIN_heredado"].astype(str))
+        _fuente = []
+        for k in range(len(df)):
+            if _co2h_ok_inicial[k]:
+                _fuente.append("Proxy" if _plus_inicial[k] == "Proxies" else "BD MSCI directa")
+            elif bool(df["PERDIO_HUELLA"].iat[k]):
+                _fuente.append("Perdieron Huella")
+            elif isin.iat[k] in _heredados:
+                _fuente.append("Herencia (Grupo Económico)")
+            else:
+                _fuente.append("Sin match")
+        df["CO2H_FUENTE"] = _fuente
+```
+
+---
+
+## Cambio 2 — Agregar las dos columnas al Excel de diagnóstico
+
+**Ctrl+F:**
+```
+        d["SubCat"] = d.apply(lambda r: _subcat_activo(r, r["Bloque"]), axis=1)
+        d["Es_Proxy"] = np.where(d[COL["plus"]] == "Proxies", "Sí", "No") \
+            if COL["plus"] in d.columns else "?"
+        filas.append(pd.DataFrame({
+            "AFP": afp,
+            "Portafolio": d[COL["portafolio"]] if COL["portafolio"] in d.columns else "",
+            "Nombre": d[COL["nombre"]] if COL["nombre"] in d.columns else "",
+            "Bloque": d["Bloque"],
+            "SubCat": d["SubCat"],
+            "Weight": d["Weight"] if "Weight" in d.columns else 0.0,
+            "Huella": d[COL["huella"]] if COL["huella"] in d.columns else 0.0,
+            "Intensidad": d[COL["intensidad"]] if COL["intensidad"] in d.columns else 0.0,
+            "CO2-H": d["CO2-H"] if "CO2-H" in d.columns else 0.0,
+            "Es_Proxy": d["Es_Proxy"],
+        }))
+```
+
+**Reemplázalo por:**
+```python
+        d["SubCat"] = d.apply(lambda r: _subcat_activo(r, r["Bloque"]), axis=1)
+        d["Es_Proxy"] = np.where(d[COL["plus"]] == "Proxies", "Sí", "No") \
+            if COL["plus"] in d.columns else "?"
+        filas.append(pd.DataFrame({
+            "AFP": afp,
+            "Portafolio": d[COL["portafolio"]] if COL["portafolio"] in d.columns else "",
+            "CODIGO_SBS": d["CODIGO_SBS"] if "CODIGO_SBS" in d.columns else "",
+            "Nombre": d[COL["nombre"]] if COL["nombre"] in d.columns else "",
+            "Bloque": d["Bloque"],
+            "SubCat": d["SubCat"],
+            "Weight": d["Weight"] if "Weight" in d.columns else 0.0,
+            "Huella": d[COL["huella"]] if COL["huella"] in d.columns else 0.0,
+            "Intensidad": d[COL["intensidad"]] if COL["intensidad"] in d.columns else 0.0,
+            "CO2-H": d["CO2-H"] if "CO2-H" in d.columns else 0.0,
+            "Es_Proxy": d["Es_Proxy"],
+            "CO2H_Fuente": d["CO2H_FUENTE"] if "CO2H_FUENTE" in d.columns else "?",
+        }))
+```
+
+---
+
+No hace falta tocar nada más: el Excel ya se genera automáticamente en cada corrida (`Universo_FFMM_ETF_Debug.xlsx`), y ahora vas a poder filtrar por `CO2H_Fuente = "Perdieron Huella"` y cruzarlo directamente contra los emisores que te aparecen con ◇ en el chart nuevo — si son los mismos nombres, confirma la hipótesis con datos, no solo con lógica.
