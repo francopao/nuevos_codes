@@ -1,0 +1,110 @@
+Buena forma de auditarlo. Aquí va un Excel con el universo completo (F1+F2+F3, todas las AFPs) tal cual queda **antes** de aplicar huella≠0, exclusión de Proxy, o exigencia de Intensidad≠0 — exactamente el punto de partida que usan `_peer_group_co2h` y `_peer_group_intensidad` antes de filtrar. Así puedes replicar en Excel los mismos 3 filtros y comparar contra lo que arroja el código.
+
+Columnas que incluye: AFP, Portafolio (F1/F2/F3), Nombre, Bloque (Equities/Fixed Income), SubCat, Weight, Huella, Intensidad, CO2-H, y Es_Proxy (Sí/No). La única restricción que sí aplico es `GyP_UNIVERSO_VALIDO==True` — porque esa es literalmente la definición de "es un FFMM/ETF" en tu pipeline (sin eso, arrastraría bonos y acciones directas que no son fondos). Si quieres que también incluya lo que quedó fuera de esa clasificación para revisar si algo se está perdiendo ahí, dímelo y lo agrego aparte.
+
+---
+
+## Cambio 1 — Nueva función que arma el Excel de diagnóstico
+
+**Ctrl+F:**
+```
+        prom = sub.groupby("__subcat")[COL["intensidad"]].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+**Reemplázalo por:**
+```python
+        prom = sub.groupby("__subcat")[COL["intensidad"]].mean()
+        for sc, v in prom.items():
+            out[bloque + "|" + str(sc)] = float(v)
+    return out
+
+
+def _exportar_universo_ffmm_debug(vals_ctx: dict, output_dir: str,
+                                   verbose: bool = True) -> Optional[str]:
+    """Excel de diagnóstico: TODO el universo FFMM/ETF (GyP_UNIVERSO_VALIDO),
+    F1+F2+F3 de TODAS las AFPs, SIN aplicar huella!=0, SIN excluir Proxy,
+    SIN exigir Intensidad!=0 — el universo exacto 'antes de filtros' que
+    usan _peer_group_co2h / _peer_group_intensidad antes de filtrar, para
+    poder replicar y auditar esos filtros a mano en Excel."""
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    filas = []
+    for afp, par in vals_ctx.items():
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)  # ya filtra a IN-FONDO1/2/3
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if d.empty:
+            continue
+        d = d.copy()
+        for c in [COL["huella"], COL["intensidad"], "CO2-H", "Weight"]:
+            if c in d.columns:
+                d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+        d["Bloque"] = d["GyP_ASSET_CLASS"].map(ac_map)
+        d = d[d["Bloque"].notna()]
+        if d.empty:
+            continue
+        d["SubCat"] = d.apply(lambda r: _subcat_activo(r, r["Bloque"]), axis=1)
+        d["Es_Proxy"] = np.where(d[COL["plus"]] == "Proxies", "Sí", "No") \
+            if COL["plus"] in d.columns else "?"
+        filas.append(pd.DataFrame({
+            "AFP": afp,
+            "Portafolio": d[COL["portafolio"]] if COL["portafolio"] in d.columns else "",
+            "Nombre": d[COL["nombre"]] if COL["nombre"] in d.columns else "",
+            "Bloque": d["Bloque"],
+            "SubCat": d["SubCat"],
+            "Weight": d["Weight"] if "Weight" in d.columns else 0.0,
+            "Huella": d[COL["huella"]] if COL["huella"] in d.columns else 0.0,
+            "Intensidad": d[COL["intensidad"]] if COL["intensidad"] in d.columns else 0.0,
+            "CO2-H": d["CO2-H"] if "CO2-H" in d.columns else 0.0,
+            "Es_Proxy": d["Es_Proxy"],
+        }))
+    if not filas:
+        if verbose:
+            print("  [Debug] Universo FFMM/ETF vacío, no se generó el Excel.")
+        return None
+    universo = pd.concat(filas, ignore_index=True)
+    ruta = str(FsPath(output_dir) / "Universo_FFMM_ETF_Debug.xlsx")
+    universo.to_excel(ruta, index=False, sheet_name="Universo")
+    if verbose:
+        print(f"  [Debug] Universo FFMM/ETF ({len(universo)} filas) -> {ruta}")
+    return ruta
+
+
+# ==============================================================================
+# PIVOTS — cada función replica una PivotTable de la hoja "Presentacion"
+# ==============================================================================
+class PresentacionBuilder:
+```
+
+---
+
+## Cambio 2 — Llamarla desde `run_pipeline_bd1s`
+
+**Ctrl+F:**
+```
+    peer_co2h = _peer_group_co2h(vals_ctx)
+    peer_intensidad = _peer_group_intensidad(vals_ctx)
+```
+
+**Reemplázalo por:**
+```python
+    peer_co2h = _peer_group_co2h(vals_ctx)
+    peer_intensidad = _peer_group_intensidad(vals_ctx)
+    _exportar_universo_ffmm_debug(vals_ctx, output_dir, verbose)
+```
+
+---
+
+Con esto, cada vez que corras el pipeline se genera `Universo_FFMM_ETF_Debug.xlsx` en tu carpeta de outputs, junto a `Huella_Historico.xlsx` y los demás. Una fila por instrumento × AFP × fondo — puedes filtrar por Bloque+SubCat en Excel, marcar tú mismo qué filas pasarían huella≠0 / Es_Proxy="No" / Intensidad≠0, y comparar tu promedio manual contra lo que te muestra el slicer del dashboard.p
