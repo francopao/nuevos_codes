@@ -1,0 +1,217 @@
+Sí, entendí perfectamente — y es una simplificación que además tiene una consecuencia bonita: al consolidar así, el bug de "RV Proxies" que encontramos recién queda resuelto de raíz (ya no hay una lista de categorías que se pueda "olvidar" un proxy, porque todos los proxies —menos Alts— caen en una sola porción). Antes de darte el código, un resumen de lo que va a pasar, para que confirmes que es exactamente esto:
+
+- **Materials, Utilities, Otros, RF, RV**: de ahora en adelante solo representan su porción MSCI-directa (sin proxy).
+- **Proxies**: una porción nueva y única = BU-proxy + RF-proxy + RV-proxy, todos juntos, sin distinguir origen.
+- **Alts**: no se toca — sigue siendo su propia porción, no se le resta nada hacia "Proxies" aunque internamente ya sea 100% proxy por naturaleza (Private Markets).
+- Dentro de la barra: la porción "Proxies" lleva su propia etiqueta interna "Proxies", centrada, igual que las demás.
+- Al costado de la barra: "Proxies" se suma como una 4ta "estrategia" visual junto a BU/TD/Alts — con su callout de valor en el período base, y valor + triángulo + % en el período actual — exactamente el mismo mecanismo que ya usan BU/TD/Alts, sin tocar el motor del chart.
+- Afecta a Chart 52 y Chart 63 por igual (ambos usan la misma función y el mismo objeto de datos), y de paso el chart "Comparables (Intensidad)" también va a quedar alineado, porque toma la data de la misma lista de categorías.
+
+**Una decisión de color que tomé, para que la conozcas**: "Proxies" necesita un color propio en la barra. En vez de inventar uno nuevo, reutilizo el que tenía "RF Proxies" (`#B7EEFF`), que deja de usarse porque esa categoría ya no existe por separado. Si prefieres otro de tu paleta, es un solo valor a cambiar.
+
+---
+
+## Cambio 1 — Lista de categorías
+
+**Ctrl+F:**
+```
+CATEGORIAS_SECTOR = ["Materials", "Utilities", "Otros", "RF", "RF Proxies",
+                     "ETF Sobs", "RV", "Alts"]
+```
+
+**Reemplázalo por:**
+```python
+CATEGORIAS_SECTOR = ["Materials", "Utilities", "Otros", "RF",
+                     "ETF Sobs", "RV", "Proxies", "Alts"]
+```
+
+---
+
+## Cambio 2 — Colores por categoría
+
+**Ctrl+F:**
+```
+COLORES_CATEGORIA = {
+    "Materials": "#E3F2ED",
+    "Utilities": "#C8E5DC",
+    "Otros": "#ACD7CA",
+    "RF": "#B7EEFF",
+    "RF Proxies": "#B7EEFF",
+    "ETF Sobs": "#AFC3E6",
+    "RV": "#D4EAF3",
+    "RV Proxies": "#D4EAF3",
+    "Alts": "#516FED",
+}
+```
+
+**Reemplázalo por:**
+```python
+COLORES_CATEGORIA = {
+    "Materials": "#E3F2ED",
+    "Utilities": "#C8E5DC",
+    "Otros": "#ACD7CA",
+    "RF": "#B7EEFF",
+    "ETF Sobs": "#AFC3E6",
+    "RV": "#D4EAF3",
+    "Proxies": "#B7EEFF",
+    "Alts": "#516FED",
+}
+```
+
+---
+
+## Cambio 3 — Consolidar todos los proxies (menos Alts) en una sola porción
+
+**Ctrl+F:**
+```
+    def sector_msci_vs_proxies(self) -> pd.DataFrame:
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+        met = [m for m in met if m in d.columns]
+
+        def suma(sub) -> dict:
+            return {m: float(sub[m].sum()) for m in met}
+
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        for sub in (bu_msci, bu_prox):
+            if not sub.empty:
+                sub["__sector"] = self._mapear_sector(sub)
+            else:
+                sub["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        filas = []
+
+        def agrega(bloque, categoria, sub):
+            filas.append({"Bloque": bloque, "Categoria": categoria, **suma(sub)})
+
+        for bloque, base in (("MSCI", bu_msci), ("Proxies", bu_prox)):
+            tot = suma(base)
+            for cat in ("Materials", "Utilities"):
+                agrega(bloque, cat, base[base["__sector"].eq(cat)])
+            usados = base[base["__sector"].isin(["Materials", "Utilities"])]
+            filas.append({"Bloque": bloque, "Categoria": "Otros",
+                          **{m: tot[m] - float(usados[m].sum()) for m in met}})
+
+        agrega("MSCI", "RF", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("Proxies", "RF Proxies",
+               td_prox[td_prox[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("MSCI", "RV", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+        agrega("Proxies", "RV Proxies",
+               td_prox[td_prox[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+        agrega("Proxies", "Alts", alt)
+
+        out = pd.DataFrame(filas)
+        # DIM_1 = Categoria, DIM_2 = Bloque (así lo consume el dashboard).
+        out = out[["Categoria", "Bloque"] + met]
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+```
+
+**Reemplázalo por:**
+```python
+    def sector_msci_vs_proxies(self) -> pd.DataFrame:
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+        met = [m for m in met if m in d.columns]
+
+        def suma(sub) -> dict:
+            return {m: float(sub[m].sum()) for m in met}
+
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        if not bu_msci.empty:
+            bu_msci["__sector"] = self._mapear_sector(bu_msci)
+        else:
+            bu_msci["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        filas = []
+
+        def agrega(bloque, categoria, sub):
+            filas.append({"Bloque": bloque, "Categoria": categoria, **suma(sub)})
+
+        # Materials/Utilities/Otros: SOLO la porción MSCI (no proxy) de BU.
+        tot_bu_msci = suma(bu_msci)
+        for cat in ("Materials", "Utilities"):
+            agrega("MSCI", cat, bu_msci[bu_msci["__sector"].eq(cat)])
+        usados = bu_msci[bu_msci["__sector"].isin(["Materials", "Utilities"])]
+        filas.append({"Bloque": "MSCI", "Categoria": "Otros",
+                      **{m: tot_bu_msci[m] - float(usados[m].sum()) for m in met}})
+
+        # RF / RV: SOLO la porción MSCI (no proxy).
+        agrega("MSCI", "RF", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("MSCI", "RV", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+
+        # Alts: se queda igual, NO se absorbe en "Proxies" — Private Markets
+        # no tiene cobertura ESG propia, todo Alts ya es proxy por diseño.
+        agrega("Proxies", "Alts", alt)
+
+        # "Proxies": TODO el universo proxy no-Alts consolidado en una sola
+        # porción — BU Proxies (Materials/Utilities/Otros) + RF Proxies +
+        # RV Proxies, sin distinguir origen.
+        proxies_todos = pd.concat([bu_prox, td_prox], ignore_index=True)
+        agrega("Proxies", "Proxies", proxies_todos)
+
+        out = pd.DataFrame(filas)
+        # DIM_1 = Categoria, DIM_2 = Bloque (así lo consume el dashboard).
+        out = out[["Categoria", "Bloque"] + met]
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+```
+
+---
+
+## Cambio 4 — Que "Proxies" se trate como una 4ta estrategia visual (JS)
+
+**Ctrl+F:**
+```
+const ESTRATEGIA_DE_CAT = {
+  'RF': 'TD', 'RF Proxies': 'TD', 'RV': 'TD', 'RV Proxies': 'TD', 'ETF Sobs': 'TD'
+};
+const estrategiaDeCategoria = cat => (cat === 'Alts') ? 'ALT' : (ESTRATEGIA_DE_CAT[cat] || 'BU');
+const ORDEN_ESTRATEGIAS = ['BU', 'TD', 'ALT'];
+const ETIQUETA_ESTRATEGIA = {BU:'BU', TD:'TD', ALT:'Alts'};
+const COLOR_ESTRATEGIA = {BU: CFG.color_texto, TD: CFG.color_texto, ALT: CFG.color_acento};
+```
+
+**Reemplázalo por:**
+```javascript
+const ESTRATEGIA_DE_CAT = {
+  'RF': 'TD', 'RV': 'TD', 'ETF Sobs': 'TD'
+};
+const estrategiaDeCategoria = cat => {
+  if (cat === 'Alts') return 'ALT';
+  if (cat === 'Proxies') return 'PROXIES';
+  return ESTRATEGIA_DE_CAT[cat] || 'BU';
+};
+const ORDEN_ESTRATEGIAS = ['BU', 'TD', 'PROXIES', 'ALT'];
+const ETIQUETA_ESTRATEGIA = {BU:'BU', TD:'TD', PROXIES:'Proxies', ALT:'Alts'};
+const COLOR_ESTRATEGIA = {BU: CFG.color_texto, TD: CFG.color_texto,
+                           PROXIES: CFG.color_texto, ALT: CFG.color_acento};
+```
+
+---
+
+No hace falta tocar nada más — ni `sectorEjecutivo` (el motor del chart no sabe ni le importa cuántas "estrategias" haya, simplemente itera sobre `ORDEN_ESTRATEGIAS`), ni `comparativoBenchmarksAfp` (usa la misma lista de categorías y el mismo `markerCategoria`, así que va a mostrar la porción "Proxies" y su total correcto automáticamente, sin que le toques una sola línea).
