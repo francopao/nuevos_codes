@@ -1,0 +1,299 @@
+Ahora sí, entendido correctamente — es un truco de doble eje: la barra sigue siendo 100% Intensidad (mismo largo, misma etiqueta de valor, mismo ranking), y el marcador vive en un eje X **separado y superpuesto**, con su propia escala de Huella, así que se mueve de forma independiente al largo de la barra. Es exactamente el mismo mecanismo de "eje secundario" que ya usa tu chart de "Mayores contribuyentes de Huella por AFP" (ahí lo usan con Weight en el eje Y2; acá lo replico con Huella en el eje X2).
+
+Solo hay que corregir la función que agregamos la vez pasada — el resto (el `safe()` que la llama) queda igual.
+
+## Cambio único — Reemplazar la función por la versión de doble eje
+
+**Ctrl+F:**
+```
+function contribuyentesBuTdPorIntensidad(div, objeto, corte, topN){
+  const mInt = agg(objeto, 'Intensidad', corte);
+  const mHuella = agg(objeto, 'Huella', corte);
+  const keys = [...mInt.keys()].filter(k=>k)
+    .sort((x,y)=>mInt.get(x)-mInt.get(y)).slice(-topN);
+  const vals = keys.map(k=>mHuella.get(k)||0);
+  const maxAbs = Math.max(1e-9, ...vals.map(v=>Math.abs(v)));
+  const tam = vals.map(v => 10 + 16*(Math.abs(v)/maxAbs));
+
+  const lay = LAYOUT();
+  lay.height = Math.max(CFG.alto, 26*keys.length + 130);
+  lay.margin = {l:250,r:80,t:20,b:40};
+  lay.showlegend = false;
+  lay.xaxis.title = 'Huella (Tn CO2)';
+
+  Plotly.react(div, [
+    {type:'bar', orientation:'h', x:vals, y:keys,
+     marker:{color:C_ACT}, text:vals.map(fmt), textposition:'outside',
+     cliponaxis:false, hoverinfo:'skip'},
+    {type:'scatter', mode:'markers', orientation:'h', x:vals, y:keys,
+     marker:{size:tam, color:C_ACT, line:{color:'#FFFFFF', width:1.5}},
+     hoverinfo:'skip', showlegend:false}
+  ], lay, OPTS);
+}
+```
+
+**Reemplázalo por:**
+```javascript
+function contribuyentesBuTdPorIntensidad(div, objeto, corte, topN){
+  const mInt = agg(objeto, 'Intensidad', corte);
+  const mHuella = agg(objeto, 'Huella', corte);
+  const keys = [...mInt.keys()].filter(k=>k)
+    .sort((x,y)=>mInt.get(x)-mInt.get(y)).slice(-topN);
+  const valInt = keys.map(k=>mInt.get(k)||0);
+  const valHuella = keys.map(k=>mHuella.get(k)||0);
+
+  const lay = LAYOUT();
+  lay.height = Math.max(CFG.alto, 26*keys.length + 130);
+  lay.margin = {l:250,r:80,t:20,b:40};
+  lay.showlegend = false;
+  // Eje real de la barra (Intensidad) — oculto a propósito, el largo de
+  // la barra lo sigue definiendo este eje, solo que no se muestra.
+  lay.xaxis = {visible:false};
+  // Eje que SÍ se ve, con escala de Huella — el marcador circular vive acá,
+  // así que se mueve horizontalmente según la Huella, independiente de la barra.
+  lay.xaxis2 = {overlaying:'x', side:'bottom', title:'Huella (Tn CO2)',
+                showgrid:true, gridcolor:CFG.color_grid, zeroline:true};
+
+  Plotly.react(div, [
+    {type:'bar', orientation:'h', x:valInt, y:keys,
+     marker:{color:C_ACT}, text:valInt.map(fmt), textposition:'outside',
+     cliponaxis:false, hoverinfo:'skip'},
+    {type:'scatter', mode:'markers', orientation:'h', x:valHuella, y:keys,
+     xaxis:'x2',
+     marker:{size:14, color:'#fff', line:{color:C_ACC, width:2.5}},
+     hoverinfo:'skip', showlegend:false}
+  ], lay, OPTS);
+}
+```
+
+No toques el `safe('gContribBUTD', ...)` de la vez pasada — sigue llamando a esta misma función con los mismos argumentos, así que no hay nada más que cambiar ahí.
+
+
+
+
+
+Antes del código, te confirmo cómo interpreté la primera parte porque la descripción tenía varias capas — dime si no es esto:
+
+- **Quién aparece y en qué orden** (el ranking) sigue siendo por Intensidad, exactamente igual que ahora. Eso no se toca.
+- **El largo de la barra** (eje X) pasa de mostrar Intensidad a mostrar Huella.
+- **El marcador circular** va en la punta de cada barra, y su tamaño crece o decrece según el nivel de Huella de ese emisor — es un refuerzo visual del mismo dato de la barra, no una tercera variable. Por eso dijiste que "no tiene relación con la elección de emisores": es puramente decorativo/informativo sobre Huella, la selección sigue siendo 100% por Intensidad.
+
+Buena noticia para esta parte: **no hace falta tocar nada de Python**. `Contrib_Variacion_Intensidad` (el objeto que ya alimenta este chart desde el cambio anterior) ya trae tanto Huella como Intensidad por emisor — es puramente un cambio de cómo el JS lee y dibuja esos datos.
+
+---
+
+## PARTE 1 — Chart "Mayores contribuyentes por Intensidad — BU + TD sin Proxy"
+
+### Cambio 1 — Nueva función de render (bar = Huella, orden = Intensidad, + marcador circular)
+
+**Ctrl+F:**
+```
+function ranking(div, objeto, corte, topN, metrica){
+```
+
+**Inserta esto justo ANTES de esa línea:**
+```javascript
+// --- gContribBUTD: barras = Huella, orden/selección = Intensidad (invisible),
+// + marcador circular en la punta que refuerza visualmente el nivel de
+// Huella (tamaño del círculo ∝ Huella). El ranking de emisores NO cambia.
+function contribuyentesBuTdPorIntensidad(div, objeto, corte, topN){
+  const mInt = agg(objeto, 'Intensidad', corte);
+  const mHuella = agg(objeto, 'Huella', corte);
+  const keys = [...mInt.keys()].filter(k=>k)
+    .sort((x,y)=>mInt.get(x)-mInt.get(y)).slice(-topN);
+  const vals = keys.map(k=>mHuella.get(k)||0);
+  const maxAbs = Math.max(1e-9, ...vals.map(v=>Math.abs(v)));
+  const tam = vals.map(v => 10 + 16*(Math.abs(v)/maxAbs));
+
+  const lay = LAYOUT();
+  lay.height = Math.max(CFG.alto, 26*keys.length + 130);
+  lay.margin = {l:250,r:80,t:20,b:40};
+  lay.showlegend = false;
+  lay.xaxis.title = 'Huella (Tn CO2)';
+
+  Plotly.react(div, [
+    {type:'bar', orientation:'h', x:vals, y:keys,
+     marker:{color:C_ACT}, text:vals.map(fmt), textposition:'outside',
+     cliponaxis:false, hoverinfo:'skip'},
+    {type:'scatter', mode:'markers', orientation:'h', x:vals, y:keys,
+     marker:{size:tam, color:C_ACT, line:{color:'#FFFFFF', width:1.5}},
+     hoverinfo:'skip', showlegend:false}
+  ], lay, OPTS);
+}
+
+function ranking(div, objeto, corte, topN, metrica){
+```
+
+Dejo `ranking()` intacta debajo — ya no la usa nada (después del cambio anterior), pero no la borro por si la quieres reusar más adelante para otro chart simple.
+
+### Cambio 2 — Apuntar el chart a la función nueva
+
+**Ctrl+F:**
+```
+  safe('gContribBUTD',  () => ranking('gContribBUTD','Contrib_Variacion_Intensidad',cAct,15,'Intensidad'));
+```
+
+**Reemplázalo por:**
+```javascript
+  safe('gContribBUTD',  () => contribuyentesBuTdPorIntensidad('gContribBUTD','Contrib_Variacion_Intensidad',cAct,15));
+```
+
+---
+
+## PARTE 2 — Chart "Mayores contribuyentes de Intensidad por AFP (G&P)"
+
+**Sobre Proxy**: revisé el método y ya excluye Proxies desde antes (`~self.df[COL["plus"]].isin([..., "Proxies"])`) — no hacía falta tocar eso, ya estaba. Lo que sí faltaba era GOB/SOB, que agrego ahora.
+
+**Sobre el traslape de textos**: la causa es que el nombre de la AFP se dibuja como una anotación aparte, posicionada justo al lado de donde Plotly decide (automáticamente, según el nombre más largo) poner las etiquetas de los emisores — como ese margen se ajusta solo, la anotación de la AFP termina cayendo encima. La forma confiable de arreglarlo es dejar de depender de ese margen automático: fijo un ancho y margen exactos, le doy a la AFP su propio carril reservado a la izquierda de los nombres, y recorto nombres de emisor muy largos para garantizar que no invadan ese carril. Como no puedo previsualizar el resultado, es posible que quieras ajustarme un par de números después de verlo — te aviso cuáles si hace falta.
+
+### Cambio 3 — Excluir GOB/SOB del universo (Python)
+
+**Ctrl+F:**
+```
+    def contribuyentes_intensidad_afp(self) -> pd.DataFrame:
+        """Ranking de intensidad para Chart 2 horizontal: universo amplio
+        (TD + BU + GOB, todos los emisores que NO sean Proxies ni Cash).
+        No filtra por GyP_UNIVERSO_VALIDO para no restringir a solo FM/ETF."""
+        d = self.df[~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra", "Proxies"])]
+        d = _sin_huella_cero(d)
+```
+
+**Reemplázalo por:**
+```python
+    def contribuyentes_intensidad_afp(self) -> pd.DataFrame:
+        """Ranking de intensidad para Chart 2 horizontal: universo TD + BU
+        (se excluyen Proxies, Cash, Cuestionario Integra, y GOB/SOB —
+        soberanos ya tienen su propio chart dedicado). No filtra por
+        GyP_UNIVERSO_VALIDO para no restringir a solo FM/ETF."""
+        d = self.df[
+            ~self.df[COL["plus"]].isin(["Cash", "Cuestionario Integra", "Proxies"])
+            & ~self.df[COL["estrategia"]].isin(["GOB", "SOB"])
+        ]
+        d = _sin_huella_cero(d)
+```
+
+### Cambio 4 — Espacio propio para la etiqueta de AFP (JS)
+
+**Ctrl+F:**
+```
+function contribuyentesGyPIntensidad(div, corte){
+  const ZWSP = '\u200B';
+  const afpOrden = ['Integra','Profuturo','Prima','Habitat'];
+  const nombres=[], afpFila=[], intVals=[], wVals=[], bloques=[];
+  let cursor=0;
+  afpOrden.forEach((afp,bi) => {
+    const intMap=new Map(), wMap=new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Contrib_Intensidad_AFP' || String(r.FECHA_CORTE)!==String(corte) ||
+         r.AFP!==afp || !r.DIM_1) continue;
+      if(r.METRICA==='Intensidad') intMap.set(r.DIM_1,(intMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+      if(r.METRICA==='Weight') wMap.set(r.DIM_1,(wMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+    }
+    const top=[...intMap.keys()].sort((a,b)=>(intMap.get(b)||0)-(intMap.get(a)||0)).slice(0,5);
+    if(!top.length) return;
+    const start=cursor;
+    top.reverse().forEach(n=>{
+      nombres.push(n+ZWSP.repeat(bi)); afpFila.push(afp);
+      intVals.push(intMap.get(n)||0); wVals.push(wMap.get(n)||0);
+      cursor++;
+    });
+    bloques.push({afp, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  if(!nombres.length){ document.getElementById(div).innerHTML=''; return; }
+  const colores = afpFila.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad (Tn CO2 / USD MM)',
+     x:wVals, y:nombres, marker:{color:colores},
+     text:intVals.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:wVals, y:nombres,
+     marker:{size:14, color:'#fff', line:{width:2.5, color:'#002060'}}}
+  ];
+  const lay = LAYOUT();
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:'',
+               automargin:true};
+  lay.xaxis = {title:'Weight (F1+F2+F3)', tickformat:'.1%', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  lay.margin = {l:180, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, nombres.length*26 + 120);
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x domain', yref:'y',
+    x0:0, x1:1, y0:b.start-0.5, y1:b.start-0.5,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:-0.01, xref:'x domain', y:b.centro, yref:'y', xanchor:'right',
+    text:'<b>'+b.afp+'</b>', showarrow:false,
+    font:{size:11, color:CFG.color_texto}
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+**Reemplázalo por:**
+```javascript
+function contribuyentesGyPIntensidad(div, corte){
+  const ZWSP = '\u200B';
+  const afpOrden = ['Integra','Profuturo','Prima','Habitat'];
+  const nombres=[], afpFila=[], intVals=[], wVals=[], bloques=[];
+  const truncar = (s,n) => (s && s.length > n) ? s.slice(0, n-1) + '…' : (s||'');
+  let cursor=0;
+  afpOrden.forEach((afp,bi) => {
+    const intMap=new Map(), wMap=new Map();
+    for(const r of HIST){
+      if(r.OBJETO!=='Contrib_Intensidad_AFP' || String(r.FECHA_CORTE)!==String(corte) ||
+         r.AFP!==afp || !r.DIM_1) continue;
+      if(r.METRICA==='Intensidad') intMap.set(r.DIM_1,(intMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+      if(r.METRICA==='Weight') wMap.set(r.DIM_1,(wMap.get(r.DIM_1)||0)+(+r.VALOR||0));
+    }
+    const top=[...intMap.keys()].sort((a,b)=>(intMap.get(b)||0)-(intMap.get(a)||0)).slice(0,5);
+    if(!top.length) return;
+    const start=cursor;
+    top.reverse().forEach(n=>{
+      nombres.push(truncar(n,24)+ZWSP.repeat(bi)); afpFila.push(afp);
+      intVals.push(intMap.get(n)||0); wVals.push(wMap.get(n)||0);
+      cursor++;
+    });
+    bloques.push({afp, start, end:cursor-1, centro:(start+cursor-1)/2});
+  });
+  if(!nombres.length){ document.getElementById(div).innerHTML=''; return; }
+  const colores = afpFila.map((_,i) => P[i % P.length]);
+  const traces = [
+    {type:'bar', orientation:'h', name:'Intensidad (Tn CO2 / USD MM)',
+     x:wVals, y:nombres, marker:{color:colores},
+     text:intVals.map(v=>v.toFixed(2)), textposition:'outside', cliponaxis:false,
+     textfont:{size:10,color:CFG.color_texto}},
+    {type:'scatter', mode:'markers', name:'Weight (F1+F2+F3)',
+     x:wVals, y:nombres,
+     marker:{size:14, color:'#fff', line:{width:2.5, color:'#002060'}}}
+  ];
+  const lay = LAYOUT();
+  lay.width = 900;
+  lay.yaxis = {type:'category', showgrid:false, showline:false, ticks:''};
+  lay.xaxis = {title:'Weight (F1+F2+F3)', tickformat:'.1%', showgrid:true,
+               gridcolor:CFG.color_grid, zeroline:true};
+  lay.legend = {orientation:'h', yanchor:'bottom', y:1.05, x:0, bgcolor:'rgba(0,0,0,0)'};
+  // Carril propio para el nombre de AFP (0-40px) + carril de emisores
+  // (40-220px) — ancho fijo para que ninguno de los dos invada al otro.
+  lay.margin = {l:220, r:60, t:55, b:45};
+  lay.height = Math.max(CFG.alto, nombres.length*26 + 120);
+  lay.shapes = bloques.slice(1).map(b => ({
+    type:'line', xref:'x domain', yref:'y',
+    x0:0, x1:1, y0:b.start-0.5, y1:b.start-0.5,
+    line:{color:'#B8C2CC', width:1, dash:'dot'}
+  }));
+  lay.annotations = bloques.map(b => ({
+    x:22/lay.width, xref:'paper', y:b.centro, yref:'y', xanchor:'center',
+    text:'<b>'+b.afp+'</b>', showarrow:false,
+    font:{size:11, color:CFG.color_texto}
+  }));
+  Plotly.react(div, traces, lay, OPTS);
+}
+```
+
+---
+
+Con esto: el chart de contribuyentes BU+TD ahora mide y dibuja Huella (con el marcador circular reforzando esa misma lectura) sin tocar el ranking por Intensidad; y el chart por AFP excluye Proxy (ya lo hacía) y GOB/SOB (nuevo), con la etiqueta de AFP en su propio carril fijo a la izquierda, separada de los nombres de emisor. Avísame cuando lo veas — si el carril de 22px queda muy angosto o los nombres truncados a 24 caracteres cortan información que necesitas, es un ajuste de un par de números.
+
