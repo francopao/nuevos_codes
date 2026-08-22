@@ -1,0 +1,43 @@
+**Bloque 1 (opcional, recomendado) — Buscar con Ctrl+F:** `prefs = {'download.default_directory'`
+
+Reemplaza esa línea por:
+
+```python
+prefs = {
+    'download.default_directory': r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Construcción\BD\INEI',
+    'download.prompt_for_download': False,
+    'download.directory_upgrade': True,
+    'safebrowsing.enabled': True
+}
+```
+
+**Bloque 2 (el fix principal) — Buscar con Ctrl+F:** `Corrio Correctamente y se descargó`
+
+Justo debajo de esa línea verás estas 4 líneas (dentro del mismo `if`):
+
+```python
+    Descargar = driver.find_element(By.XPATH,"/html/body/span/div[3]/div/div[1]/div/div[1]/form[2]/span/table/tbody/tr[1]/td/table/tbody/tr/td[3]/button/span[2]")
+    Descargar.click()
+    time.sleep(1)
+    driver.quit()
+```
+
+Reemplázalas por:
+
+```python
+    Descargar = driver.find_element(By.XPATH,"/html/body/span/div[3]/div/div[1]/div/div[1]/form[2]/span/table/tbody/tr[1]/td/table/tbody/tr/td[3]/button/span[2]")
+    Descargar.click()
+
+    tiempo_max = 60
+    tiempo_transcurrido = 0
+    while tiempo_transcurrido < tiempo_max:
+        archivos_temp = [f for f in os.listdir(folder_path) if f.endswith('.crdownload') or f.endswith('.tmp')]
+        if not archivos_temp:
+            break
+        time.sleep(1)
+        tiempo_transcurrido += 1
+
+    driver.quit()
+```
+
+El bug era ese `time.sleep(1)` fijo: cierra el driver antes de que Chrome termine de escribir el Excel, y queda el archivo temporal a medio descargar. El Bloque 2 espera (hasta 60s) a que ese temporal desaparezca antes de cerrar el navegador.Si después de aplicar el Bloque 2 sigue quedando el archivo temporal, probablemente Chrome esté mostrando un aviso de "este tipo de archivo puede ser dañino" (pasa con algunos .xlsx grandes) y ahí sí habría que agregar manejo de ese diálogo — avísame y lo vemos.
