@@ -1,0 +1,161 @@
+Analicé el archivo que adjuntaste y encontré la causa real del problema de Alts — no es un bug en el código del Excel, es un tema de la data fuente. Antes de darte el parche, te explico lo que encontré, porque cambia lo que hay que arreglar.
+
+## Por qué Alts sale en cero
+
+Revisé `202606_BD1_S_Huella.xlsx` (el insumo del pipeline) directamente:
+
+- La columna **`Strategy`** (que termina siendo tu `Estrategia`) solo tiene 3 valores en todo el archivo: `BU`, `TD`, `SOB`. **Ningún registro trae `ALT`.**
+- Sin embargo, la columna **`Categoria`** sí tiene 732 instrumentos con código terminado en "ALT" (`53ALT`: 577, `51ALT`: 143, `48ALT`: 12).
+
+Como `sector_msci_vs_proxies()` filtra Alts exigiendo `Estrategia == "ALT"`, y esa etiqueta no existe en la data actual, el filtro siempre devuelve vacío → 0. Es decir: esos 732 instrumentos con código "*ALT" sí están en la cartera, pero hoy se están clasificando (y sumando) dentro de BU o TD, no en el bloque Alts. Esto no lo puedo corregir yo solo — es una pregunta para quien genera `BD1_S_Huella.xlsx`: ¿debería `Categoria` terminando en "ALT" mapear a `Strategy = "ALT"` y no lo está haciendo, o es intencional que ahora Alts se trackee dentro de BU/TD? Con el cambio que sigue abajo (columna SBS + Emisor) vas a poder ubicar exactamente esos 732 instrumentos y ver en qué categoría están cayendo hoy.
+
+## Agregar Emisor + SBS a Huella/Intensidad por Sector
+
+Estas dos hojas hoy salen de `Sector_MSCI_Proxies`, que es un objeto **ya agregado** en el pipeline (Módulo 12) — la data por instrumento nunca llega al HISTORICO. Para exportar Emisor+SBS necesito una fuente nueva a nivel instrumento. Esto implica 4 cambios: 2 en el Módulo 12 (pipeline) y 2 en el Módulo 15 (tu exportador). **Ojo: como esto agrega un objeto nuevo al HISTORICO, necesitas correr el pipeline completo de nuevo (no solo reabrir el Excel) para que aparezca.**
+
+---
+
+**BLOQUE 1 — Nuevo método en `PresentacionBuilder` (mismo criterio, sin agregar)**
+
+Ubica (Ctrl+F) el final exacto del método `sector_msci_vs_proxies`:
+```python
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+```
+Y pega **justo debajo** (dentro de la misma clase, mismo nivel de indentación):
+
+```python
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+
+    def sector_msci_vs_proxies_detalle(self) -> pd.DataFrame:
+        """Igual clasificación Categoria/Bloque que sector_msci_vs_proxies(),
+        pero SIN agregar: una fila por instrumento (Emisor + SBS), para
+        poder auditar qué instrumentos caen en cada categoría."""
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+        met = [m for m in met if m in d.columns]
+
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        if not bu_msci.empty:
+            bu_msci["__sector"] = self._mapear_sector(bu_msci)
+        else:
+            bu_msci["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        piezas = []
+
+        def _marcar(sub, bloque, categoria):
+            if sub.empty:
+                return
+            t = sub.copy()
+            t["Bloque"] = bloque
+            t["Categoria"] = categoria
+            piezas.append(t)
+
+        for cat in ("Materials", "Utilities"):
+            _marcar(bu_msci[bu_msci["__sector"].eq(cat)], "MSCI", cat)
+        usados = bu_msci["__sector"].isin(["Materials", "Utilities"])
+        _marcar(bu_msci[~usados], "MSCI", "Otros")
+
+        _marcar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")], "MSCI", "RF")
+        _marcar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")], "MSCI", "RV")
+
+        _marcar(alt, "Proxies", "Alts")
+        _marcar(pd.concat([bu_prox, td_prox], ignore_index=True), "Proxies", "Proxies")
+
+        if not piezas:
+            return pd.DataFrame()
+
+        out = pd.concat(piezas, ignore_index=True)
+        out["__SBS"] = out[COL["sbs"]].astype(str) if COL["sbs"] in out.columns else ""
+        out["__CatTipo"] = out["Categoria"] + "|" + out["Bloque"]
+        result = out[[COL["nombre"], "__SBS", "__CatTipo"] + met].copy()
+        result = result.rename(columns={COL["nombre"]: "Nombre", "__SBS": "SBS",
+                                         "__CatTipo": "Categoria_Tipo"})
+        return result.reset_index(drop=True)
+```
+*Por qué:* mismas reglas de clasificación exactas que ya usas (Materials/Utilities por sector GICS, RF/RV por tipo de renta, Alts y Proxies), pero sin sumar — deja una fila por instrumento. `Categoria_Tipo` empaqueta "Categoria|Bloque" en un solo campo porque `to_long()` solo soporta 3 dimensiones (DIM_1/2/3) y ya necesitamos Nombre + SBS.
+
+---
+
+**BLOQUE 2 — Registrar el objeto nuevo en `build_all()`**
+
+Ubica (Ctrl+F):
+```python
+            "Sector_MSCI_Proxies": self.sector_msci_vs_proxies(),
+```
+Reemplaza con:
+```python
+            "Sector_MSCI_Proxies": self.sector_msci_vs_proxies(),
+            "Sector_MSCI_Proxies_Detalle": self.sector_msci_vs_proxies_detalle(),
+```
+
+---
+
+**BLOQUE 3 — Actualizar `_tabla_sector` (Módulo 15) para leer el detalle**
+
+Ubica (Ctrl+F):
+```python
+def _tabla_sector(hist: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Sector_MSCI_Proxies") & (hist["METRICA"] == metrica)].copy()
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Categoria",
+                             "DIM_2": "Tipo_Dato", "VALOR": "Valor"})
+    df["Metrica"] = metrica
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    return df[["Corte", "Corte_Rol", "AFP", "Categoria", "Tipo_Dato", "Metrica", "Valor"]] \
+             .sort_values(["Corte", "AFP", "Categoria", "Tipo_Dato"], ignore_index=True)
+```
+Reemplaza con:
+```python
+def _tabla_sector(hist: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Sector_MSCI_Proxies_Detalle") & (hist["METRICA"] == metrica)].copy()
+    cat_tipo = df["DIM_3"].str.split("|", n=1, expand=True)
+    df["Categoria"] = cat_tipo[0]
+    df["Tipo_Dato"] = cat_tipo[1]
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Emisor",
+                             "DIM_2": "SBS", "VALOR": "Valor"})
+    df["Metrica"] = metrica
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    cols = ["Corte", "Corte_Rol", "AFP", "Categoria", "Tipo_Dato", "Emisor", "SBS", "Metrica", "Valor"]
+    return df[cols].sort_values(["Corte", "AFP", "Categoria", "Emisor"], ignore_index=True)
+```
+*Por qué:* ahora cada fila es un instrumento (Emisor + SBS), no una categoría agregada — vas a tener muchas más filas, como esperabas.
+
+---
+
+**BLOQUE 4 — Arreglar el rango de la fórmula en `_agregar_chart_sector` (columna Valor se movió de G a I)**
+
+Como la tabla ahora tiene 2 columnas más (Emisor, SBS) antes de Metrica/Valor, la columna `Valor` pasó de ser la G a ser la **I**. Sin este cambio los totales del gráfico saldrían en cero.
+
+Ubica (Ctrl+F):
+```python
+            f = (f'=SUMIFS($G$2:$G${ultima_fila},$C$2:$C${ultima_fila},"Integra",'
+                 f'$D$2:$D${ultima_fila},{col_l}${fila_r},'
+                 f'$E$2:$E${ultima_fila},"{tipo_val}",'
+                 f'$A$2:$A${ultima_fila},"{corte_val}")')
+```
+Reemplaza con:
+```python
+            f = (f'=SUMIFS($I$2:$I${ultima_fila},$C$2:$C${ultima_fila},"Integra",'
+                 f'$D$2:$D${ultima_fila},{col_l}${fila_r},'
+                 f'$E$2:$E${ultima_fila},"{tipo_val}",'
+                 f'$A$2:$A${ultima_fila},"{corte_val}")')
+```
+
+---
+
+Con esto: corre el pipeline completo, revisa "Huella por Sector"/"Intensidad por Sector" — deberías ver Emisor y SBS como columnas nuevas, muchas más filas, y con eso puedes filtrar por SBS/Emisor para ubicar esos 732 instrumentos "*ALT" y confirmar en qué categoría están cayendo hoy. El gráfico debería seguir viéndose igual (sigue agregando por Categoria vía `groupby`, eso no cambió). Avísame qué encuentras con el tema Alts y seguimos con Intensidad FFMM.
