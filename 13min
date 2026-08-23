@@ -1,0 +1,198 @@
+Antes de mandarte el código, encontré la causa real de que las fechas no se vean en el eje X: openpyxl trae un bug de fábrica donde el eje de categorías nace con `axPos="l"` (posición "izquierda") en vez de `"b"` (abajo) — lo corregí explícitamente.
+
+También validé todo esto ejecutándolo en un sandbox (no solo por lectura de código) antes de dártelo, porque la API de gráficos de openpyxl es delicada. Un hallazgo importante ahí: **openpyxl no permite texto personalizado combinado en una etiqueta de dato** (no puede mostrar "Total: 530,003" y "▼ -4%" en una sola cajita — solo puede formatear el valor numérico que ya trae ese punto). Por eso:
+
+- **"Total: X"** sí queda idéntico — es un truco de formato numérico (`"Total: "#,##0`) sobre el valor real, así que sigue vivo/vinculado a la data.
+- **La flechita con el %** no puede ir flotando sobre el gráfico como en Plotly (limitación real de Excel/openpyxl, no de esfuerzo). La reemplacé por un **icon set nativo de Excel** (▲/▼ verde-rojo) en una celda junto al gráfico, con fórmula viva — es el "marcador visual dentro de las posibilidades de Python" que mencionaste como alternativa.
+
+---
+
+**BLOQUE A (actualización) — imports adicionales**
+
+Ubica (Ctrl+F):
+```python
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.shapes import GraphicalProperties
+```
+Reemplaza con:
+```python
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.text import RichText
+from openpyxl.chart.marker import Marker
+from openpyxl.drawing.text import Paragraph, ParagraphProperties, CharacterProperties
+from openpyxl.drawing.line import LineProperties
+from openpyxl.formatting.rule import IconSetRule
+```
+
+---
+
+**BLOQUE B (reemplazo completo) — función `_agregar_chart_soberanos`**
+
+Busca (Ctrl+F) el inicio de la función que ya insertaste:
+```python
+def _agregar_chart_soberanos(ws, tabla: pd.DataFrame, corte_actual: str,
+                              corte_comparacion: str, titulo: str) -> None:
+```
+y selecciona **toda la función** (hasta la línea `ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")` inclusive, que es la última línea). Reemplaza todo ese bloque por esta versión nueva:
+
+```python
+def _agregar_chart_soberanos(ws, tabla: pd.DataFrame, corte_actual: str,
+                              corte_comparacion: str) -> None:
+    """Agrega, en la misma hoja, una tabla-resumen (fórmulas SUMIFS sobre la
+    tabla tidy A:G) + un gráfico de barras apiladas por país — escenario
+    AFP=Integra, cortes Actual/Comparación (el default del dashboard).
+    Sin título, sin líneas de cuadrícula, sin leyenda; nombre del país
+    como etiqueta dentro de cada segmento, caja 'Total: X' encima de cada
+    barra, y marcador de variación % (icon set nativo) junto al gráfico.
+    Todo vinculado a la tabla tidy vía fórmulas."""
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1
+
+    d = tabla[(tabla["AFP"] == "Integra") & (tabla["Corte"].isin([corte_actual, corte_comparacion]))]
+    tot_por_pais = d.groupby("Pais")["Valor"].sum()
+    paises = [p for p in tot_por_pais.index if abs(tot_por_pais[p]) > 1e-9]
+
+    def _clave_orden(p):
+        try:
+            i = ORDEN_PAISES.index(p)
+        except ValueError:
+            i = 999
+        return (i, -tot_por_pais.get(p, 0.0))
+    paises = sorted(paises, key=_clave_orden)
+    if not paises:
+        return
+
+    col_label = ws.max_column + 2
+    col_total = col_label + 1 + len(paises)
+    col_var = col_total + 1
+    fila_r = 1
+
+    ws.cell(row=fila_r, column=col_label, value="Corte")
+    for j, pais in enumerate(paises):
+        ws.cell(row=fila_r, column=col_label + 1 + j, value=pais)
+    ws.cell(row=fila_r, column=col_total, value="Total")
+
+    for i, corte_val in enumerate([corte_comparacion, corte_actual]):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=_etiqueta_corte(corte_val))
+        for j, pais in enumerate(paises):
+            col_l = get_column_letter(col_label + 1 + j)
+            f = (f'=SUMIFS($G$2:$G${ultima_fila},$C$2:$C${ultima_fila},"Integra",'
+                 f'$D$2:$D${ultima_fila},{col_l}${fila_r},$A$2:$A${ultima_fila},"{corte_val}")')
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+        rango_fila = (f"{get_column_letter(col_label+1)}{fr}:"
+                      f"{get_column_letter(col_label+len(paises))}{fr}")
+        ws.cell(row=fr, column=col_total, value=f"=SUM({rango_fila})")
+
+    # --- Variación % (marcador visual nativo con icon set, junto al gráfico) ---
+    ws.cell(row=fila_r, column=col_var, value="Variación %")
+    fr_cmp, fr_act = fila_r + 1, fila_r + 2
+    ws.cell(row=fr_act, column=col_var,
+            value=f'=IFERROR({get_column_letter(col_total)}{fr_act}/'
+                  f'{get_column_letter(col_total)}{fr_cmp}-1,"")')
+    ws.cell(row=fr_act, column=col_var).number_format = '+0%;-0%'
+    ws.conditional_formatting.add(
+        f"{get_column_letter(col_var)}{fr_act}",
+        IconSetRule(icon_style="3Arrows", type="num",
+                    values=[0, -0.0001, 0.0001], showValue=True, reverse=False))
+
+    # --- Gráfico de barras apiladas (colores + estructura del dashboard) ---
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 7.5
+    chart.width = 15
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + len(paises),
+                          min_row=fila_r, max_row=fila_r + 2)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + 2)
+    chart.set_categories(cats_ref)
+
+    for i, serie in enumerate(chart.series):
+        serie.graphicalProperties = GraphicalProperties(solidFill=_color_pais(paises[i], i))
+        dl = DataLabelList()
+        dl.showSerName = True
+        dl.showVal = False
+        dl.showCatName = False
+        dl.showLegendKey = False
+        dl.showPercent = False
+        dl.showBubbleSize = False
+        dl.position = "ctr"
+        serie.dLbls = dl
+
+    # --- Serie invisible (línea) solo para la caja "Total: X" sobre cada barra ---
+    total_ref = Reference(ws, min_col=col_total, max_col=col_total,
+                           min_row=fila_r, max_row=fila_r + 2)
+    linea = LineChart()
+    linea.add_data(total_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    serie_total = linea.series[0]
+    serie_total.graphicalProperties = GraphicalProperties()
+    serie_total.graphicalProperties.line = LineProperties(noFill=True)
+    serie_total.marker = Marker(symbol="none")
+    serie_total.smooth = False
+
+    dl_total = DataLabelList()
+    dl_total.showVal = True
+    dl_total.showSerName = False
+    dl_total.showCatName = False
+    dl_total.showLegendKey = False
+    dl_total.showPercent = False
+    dl_total.showBubbleSize = False
+    dl_total.dLblPos = "t"
+    dl_total.numFmt = '"Total: "#,##0'
+    dl_total.spPr = GraphicalProperties(solidFill="EDEFF2")
+    cp = CharacterProperties(sz=1100, b=True, solidFill="1F2933")
+    dl_total.txPr = RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+    serie_total.dLbls = dl_total
+
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.x_axis.delete = True
+
+    chart += linea
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")
+```
+
+---
+
+**BLOQUE C (actualización) — quitar el argumento `titulo` en las 2 llamadas**
+
+Ubica (Ctrl+F):
+```python
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  corte_actual, corte_comparacion, "Huella Soberanos")
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_INT],
+                                  corte_actual, corte_comparacion, "Intensidad Soberanos")
+```
+Reemplaza con:
+```python
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  corte_actual, corte_comparacion)
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_INT],
+                                  corte_actual, corte_comparacion)
+```
+
+---
+
+Corre el pipeline y revisa las dos hojas. Deberías ver: sin título, sin cuadrícula, sin leyenda, país dentro de cada segmento, "Total: X" arriba de cada barra, fechas Dic25/Jun26 en el eje X, y una celda con flecha ▲/▼ verde o roja junto a la tabla-resumen. Avísame si algo no calza y seguimos con Chart 52/63.
