@@ -1,0 +1,346 @@
+Con las 3 decisiones ya tomadas, aquí están los bloques para agregar/modificar. Son 7 bloques: 1 constante nueva, 1 módulo nuevo completo (la pieza grande — genera las 7 hojas de datos + hoja de Auditoría), 4 mini-cambios para conectarlo al pipeline, y el renombrado de los 7 charts en el dashboard.
+
+---
+
+**BLOQUE 1 — Nueva constante de nombre de archivo**
+
+Ubica (Ctrl+F) esta línea exacta:
+```python
+NOMBRE_DASHBOARD = "Dashboard_Huella.html"
+```
+Y agrega debajo:
+```python
+NOMBRE_DASHBOARD = "Dashboard_Huella.html"
+NOMBRE_DATOS_GRAFICOS = "Datos_Graficos_Huella.xlsx"
+```
+*Por qué:* nombre del archivo nuevo, junto a los otros dos nombres de salida.
+
+---
+
+**BLOQUE 2 — Módulo nuevo completo (Datos_Graficos_Huella)**
+
+Ubica (Ctrl+F) este bloque exacto (es el final de la función `construir_dashboard`, justo antes del banner "ORQUESTADOR"):
+```python
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(html, encoding="utf-8")
+    print(f"  [Módulo 14] Dashboard -> {ruta}")
+    return str(ruta)
+```
+Y **justo debajo de esas 4 líneas** (sin tocarlas) pega todo esto:
+
+```python
+###############################################################################
+#                                                                             #
+#   MÓDULO 15 — EXPORTADOR EXCEL NATIVO (Datos_Graficos_Huella)              #
+#   Base de datos maestra (tidy) por chart, para que el usuario arme sus     #
+#   propias Tablas Dinámicas / Slicers / gráficos nativos en Excel.          #
+#   Se apoya en el mismo HISTORICO largo que consume el Dashboard (M14).     #
+###############################################################################
+
+NOMBRE_HOJA_SOBERANOS_HUELLA = "Huella Soberanos"
+NOMBRE_HOJA_SOBERANOS_INT = "Intensidad Soberanos"
+NOMBRE_HOJA_SECTOR_HUELLA = "Huella por Sector"
+NOMBRE_HOJA_SECTOR_INT = "Intensidad por Sector"
+NOMBRE_HOJA_ASSET_PERF = "Intensidad FFMM"
+NOMBRE_HOJA_COMP_BENCH = "Intensidad y Benchmarks"
+NOMBRE_HOJA_CONTRIB_BUTD = "Mayores contribuyentes"
+NOMBRE_HOJA_AUDITORIA = "Auditoría"
+
+
+def _corte_rol_map(cortes: list) -> tuple:
+    """Mismo criterio que el Dashboard (M14) para marcar el par por
+    defecto: corte más reciente = 'Actual', su T-1 (o el segundo más
+    reciente si no existe T-1) = 'Comparación'."""
+    cortes_ord = sorted(cortes, reverse=True)
+    corte_actual = cortes_ord[0]
+    comp_default = _semestre_anterior(corte_actual)
+    if comp_default not in cortes_ord:
+        comp_default = cortes_ord[1] if len(cortes_ord) > 1 else corte_actual
+    rol = {c: "" for c in cortes_ord}
+    rol[corte_actual] = "Actual"
+    rol[comp_default] = "Comparación"
+    return corte_actual, comp_default, rol
+
+
+def _tabla_soberanos(hist: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Soberanos") & (hist["METRICA"] == metrica)
+              & (hist["DIM_1"] != "")].copy()
+    df["Pais"] = df["DIM_1"].map(lambda n: PAIS_POR_EMISOR_SOBERANO.get(n, n))
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Emisor", "VALOR": "Valor"})
+    df["Metrica"] = metrica
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    return df[["Corte", "Corte_Rol", "AFP", "Pais", "Emisor", "Metrica", "Valor"]] \
+             .sort_values(["Corte", "AFP", "Pais", "Emisor"], ignore_index=True)
+
+
+def _tabla_sector(hist: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Sector_MSCI_Proxies") & (hist["METRICA"] == metrica)].copy()
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Categoria",
+                             "DIM_2": "Tipo_Dato", "VALOR": "Valor"})
+    df["Metrica"] = metrica
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    return df[["Corte", "Corte_Rol", "AFP", "Categoria", "Tipo_Dato", "Metrica", "Valor"]] \
+             .sort_values(["Corte", "AFP", "Categoria", "Tipo_Dato"], ignore_index=True)
+
+
+def _tabla_asset_perf(hist: pd.DataFrame, rol_map: dict, corte_actual: str,
+                       bench_ffmm: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "TopSubCat_Asset") &
+              (hist["METRICA"].isin(["Intensidad", "Weight"]))].copy()
+    filas = []
+    for _, r in df.iterrows():
+        dim1, dim2, dim3 = r["DIM_1"], r["DIM_2"], r["DIM_3"]
+        if dim1 in ("_BENCH_", "_BENCH_SUBCAT_", "_BENCH_SUBCAT_UNADJ_"):
+            if r["METRICA"] != "Intensidad":
+                continue
+            tipo = {"_BENCH_": "Escalar_Portafolio",
+                    "_BENCH_SUBCAT_": "Comparables_Subcat_Ajustado (x Weight del instrumento)",
+                    "_BENCH_SUBCAT_UNADJ_": "Comparables_Subcat_SinAjustar"}[dim1]
+            bloque_ref, _, subcat_ref = str(dim2).partition("|")
+            filas.append({
+                "Corte": r["FECHA_CORTE"], "AFP": r["AFP"], "Tipo_Fila": "Benchmark",
+                "Bloque": bloque_ref if dim1 != "_BENCH_" else "",
+                "Gestion": "", "Instrumento": "",
+                "SubCategoria": subcat_ref if dim1 != "_BENCH_" else "",
+                "Benchmark_Tipo": tipo,
+                "Benchmark_Nombre": dim2 if dim1 == "_BENCH_" else "",
+                "Metrica": "Intensidad", "Valor": r["VALOR"],
+            })
+        else:
+            mgmt, _, nombre = str(dim2).partition("|")
+            filas.append({
+                "Corte": r["FECHA_CORTE"], "AFP": r["AFP"], "Tipo_Fila": "Instrumento",
+                "Bloque": dim1,
+                "Gestion": {"A": "Active", "P": "Passive"}.get(mgmt, mgmt),
+                "Instrumento": nombre, "SubCategoria": dim3,
+                "Benchmark_Tipo": "", "Benchmark_Nombre": "",
+                "Metrica": r["METRICA"], "Valor": r["VALOR"],
+            })
+    for fondo, fce in bench_ffmm.items():
+        filas.append({
+            "Corte": corte_actual, "AFP": "", "Tipo_Fila": "Benchmark",
+            "Bloque": "", "Gestion": "", "Instrumento": "", "SubCategoria": "",
+            "Benchmark_Tipo": "FFMM (x Weight del instrumento)", "Benchmark_Nombre": fondo,
+            "Metrica": "Intensidad", "Valor": fce,
+        })
+    out = pd.DataFrame(filas)
+    if out.empty:
+        return out
+    out["Corte_Rol"] = out["Corte"].map(rol_map).fillna("")
+    cols = ["Corte", "Corte_Rol", "AFP", "Tipo_Fila", "Bloque", "Gestion", "Instrumento",
+            "SubCategoria", "Benchmark_Tipo", "Benchmark_Nombre", "Metrica", "Valor"]
+    return out[cols].sort_values(["Corte", "Tipo_Fila", "Bloque", "Instrumento"], ignore_index=True)
+
+
+def _tabla_comp_bench_afp(hist: pd.DataFrame, rol_map: dict) -> pd.DataFrame:
+    filas = []
+    d1 = hist[(hist["OBJETO"] == "Sector_MSCI_Proxies") & (hist["METRICA"] == "Intensidad")
+              & (hist["AFP"].isin(["Integra", "Prima", "Profuturo", "Habitat"]))]
+    for _, r in d1.iterrows():
+        filas.append({"Corte": r["FECHA_CORTE"], "AFP": r["AFP"], "Segmento": "AFP_Categoria",
+                      "Categoria": r["DIM_1"], "Tipo_Dato": r["DIM_2"], "Pais": "",
+                      "Emisor": "", "Benchmark_Nombre": "", "Metrica": "Intensidad",
+                      "Valor": r["VALOR"]})
+    d2 = hist[(hist["OBJETO"] == "Comparables") & (hist["METRICA"] == "Intensidad")
+              & (hist["AFP"] == "Integra") & (hist["DIM_1"].isin(["ACWI", "ILF", "CEMB", "EMB"]))]
+    for _, r in d2.iterrows():
+        filas.append({"Corte": r["FECHA_CORTE"], "AFP": "", "Segmento": "Benchmark_Mercado",
+                      "Categoria": "", "Tipo_Dato": "", "Pais": "", "Emisor": "",
+                      "Benchmark_Nombre": r["DIM_1"], "Metrica": "Intensidad",
+                      "Valor": r["VALOR"]})
+    d3 = hist[(hist["OBJETO"] == "Soberanos") & (hist["METRICA"] == "Intensidad")
+              & (hist["AFP"] == "Integra") & (hist["DIM_1"] != "")]
+    for _, r in d3.iterrows():
+        filas.append({"Corte": r["FECHA_CORTE"], "AFP": "Integra", "Segmento": "Soberano_GOB",
+                      "Categoria": "", "Tipo_Dato": "",
+                      "Pais": PAIS_POR_EMISOR_SOBERANO.get(r["DIM_1"], r["DIM_1"]),
+                      "Emisor": r["DIM_1"], "Benchmark_Nombre": "", "Metrica": "Intensidad",
+                      "Valor": r["VALOR"]})
+    out = pd.DataFrame(filas)
+    if out.empty:
+        return out
+    out["Corte_Rol"] = out["Corte"].map(rol_map).fillna("")
+    cols = ["Corte", "Corte_Rol", "AFP", "Segmento", "Categoria", "Tipo_Dato", "Pais",
+            "Emisor", "Benchmark_Nombre", "Metrica", "Valor"]
+    return out[cols].sort_values(["Corte", "Segmento"], ignore_index=True)
+
+
+def _tabla_contrib_butd(hist: pd.DataFrame, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Contrib_Variacion_Intensidad") & (hist["DIM_1"] != "")].copy()
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Emisor",
+                             "METRICA": "Metrica", "VALOR": "Valor"})
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    return df[["Corte", "Corte_Rol", "AFP", "Emisor", "Metrica", "Valor"]] \
+             .sort_values(["Corte", "AFP", "Emisor"], ignore_index=True)
+
+
+def _tabla_auditoria(corte_actual: str, corte_comparacion: str) -> pd.DataFrame:
+    filas = [
+        {"Hoja": NOMBRE_HOJA_SOBERANOS_HUELLA, "Objeto(s) en HISTORICO": "Soberanos",
+         "Metrica(s)": "Huella", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": corte_comparacion,
+         "AFP default dashboard": "Integra",
+         "Nota / fórmula": "País se obtiene mapeando Emisor con PAIS_POR_EMISOR_SOBERANO. "
+                            "También existen en HISTORICO '% Huella', '% AUM' e "
+                            "'Intensidad implícita' para este objeto, no incluidas aquí."},
+        {"Hoja": NOMBRE_HOJA_SOBERANOS_INT, "Objeto(s) en HISTORICO": "Soberanos",
+         "Metrica(s)": "Intensidad", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": corte_comparacion,
+         "AFP default dashboard": "Integra",
+         "Nota / fórmula": "Intensidad = CO2-H x Weight (no Huella x Weight)."},
+        {"Hoja": NOMBRE_HOJA_SECTOR_HUELLA, "Objeto(s) en HISTORICO": "Sector_MSCI_Proxies",
+         "Metrica(s)": "Huella", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": corte_comparacion,
+         "AFP default dashboard": "Integra",
+         "Nota / fórmula": "Tipo_Dato distingue MSCI (dato directo) vs Proxies. 'Proxies' "
+                            "consolida RF+RV+BU proxy sin distinguir origen."},
+        {"Hoja": NOMBRE_HOJA_SECTOR_INT, "Objeto(s) en HISTORICO": "Sector_MSCI_Proxies",
+         "Metrica(s)": "Intensidad", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": corte_comparacion,
+         "AFP default dashboard": "Integra", "Nota / fórmula": "Igual a la hoja anterior, métrica Intensidad."},
+        {"Hoja": NOMBRE_HOJA_ASSET_PERF, "Objeto(s) en HISTORICO": "TopSubCat_Asset",
+         "Metrica(s)": "Intensidad, Weight", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": "No aplica (el chart solo usa el corte actual)",
+         "AFP default dashboard": "Integra",
+         "Nota / fórmula": "Los benchmarks 'Comparables_Subcat_Ajustado' y 'FFMM' son valores base que "
+                            "el dashboard multiplica por el Weight PROPIO de cada instrumento antes de "
+                            "graficar; esa multiplicación no viene precalculada aquí. Los benchmarks FFMM "
+                            "reflejan solo el corte actual (misma limitación que el dashboard)."},
+        {"Hoja": NOMBRE_HOJA_COMP_BENCH,
+         "Objeto(s) en HISTORICO": "Sector_MSCI_Proxies, Comparables, Soberanos",
+         "Metrica(s)": "Intensidad", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": "No aplica (el chart solo usa el corte actual)",
+         "AFP default dashboard": "Integra, Prima, Profuturo, Habitat (según segmento)",
+         "Nota / fórmula": "Combina 3 fuentes distintas identificadas por la columna Segmento."},
+        {"Hoja": NOMBRE_HOJA_CONTRIB_BUTD, "Objeto(s) en HISTORICO": "Contrib_Variacion_Intensidad",
+         "Metrica(s)": "Huella, Intensidad, Inv MM$, PERDIO_HUELLA", "Corte Actual (default)": corte_actual,
+         "Corte Comparación (default)": "No aplica (el chart solo usa el corte actual)",
+         "AFP default dashboard": "Integra",
+         "Nota / fórmula": "El dashboard muestra solo el Top 15 por Intensidad; aquí va el universo "
+                            "BU+TD sin Proxy completo. PERDIO_HUELLA=1 marca emisores con dato de respaldo "
+                            "de la hoja 'Perdieron Huella' (símbolo ◇ en el dashboard)."},
+    ]
+    return pd.DataFrame(filas)
+
+
+def construir_excel_graficos(ruta_historico, ruta_salida) -> str:
+    """Genera Datos_Graficos_Huella.xlsx: una hoja 'tidy' por cada uno de
+    los 7 charts seleccionados + hoja de Auditoría, para que el usuario
+    arme sus propias Tablas Dinámicas / Slicers / gráficos nativos."""
+    hist = HistoricoExporter(str(ruta_historico)).cargar_historico()
+    if hist.empty:
+        raise ValueError("El histórico está vacío: ejecutar el pipeline primero.")
+    hist = hist.copy()
+    hist["FECHA_CORTE"] = hist["FECHA_CORTE"].astype(str)
+    for c in ["DIM_1", "DIM_2", "DIM_3", "OBJETO", "METRICA"]:
+        if c in hist.columns:
+            hist[c] = hist[c].fillna("").astype(str)
+    if "AFP" not in hist.columns:
+        hist["AFP"] = "Integra"
+    else:
+        hist["AFP"] = hist["AFP"].fillna("Integra").astype(str)
+    hist["VALOR"] = pd.to_numeric(hist["VALOR"], errors="coerce").fillna(0.0).round(6)
+
+    cortes = sorted(hist["FECHA_CORTE"].unique())
+    corte_actual, corte_comparacion, rol_map = _corte_rol_map(cortes)
+
+    _anio = corte_actual[:4] if len(corte_actual) >= 6 else "2026"
+    _mes = corte_actual[4:6] if len(corte_actual) >= 6 else "06"
+    bench_ffmm = _cargar_benchmarks_ffmm(_anio, _mes)
+
+    hojas = {
+        NOMBRE_HOJA_SOBERANOS_HUELLA: _tabla_soberanos(hist, "Huella", rol_map),
+        NOMBRE_HOJA_SOBERANOS_INT: _tabla_soberanos(hist, "Intensidad", rol_map),
+        NOMBRE_HOJA_SECTOR_HUELLA: _tabla_sector(hist, "Huella", rol_map),
+        NOMBRE_HOJA_SECTOR_INT: _tabla_sector(hist, "Intensidad", rol_map),
+        NOMBRE_HOJA_ASSET_PERF: _tabla_asset_perf(hist, rol_map, corte_actual, bench_ffmm),
+        NOMBRE_HOJA_COMP_BENCH: _tabla_comp_bench_afp(hist, rol_map),
+        NOMBRE_HOJA_CONTRIB_BUTD: _tabla_contrib_butd(hist, rol_map),
+        NOMBRE_HOJA_AUDITORIA: _tabla_auditoria(corte_actual, corte_comparacion),
+    }
+
+    ruta = FsPath(str(ruta_salida))
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(str(ruta), engine="openpyxl") as xw:
+        for nombre, df in hojas.items():
+            (df if not df.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+                .to_excel(xw, sheet_name=nombre[:31], index=False)
+    print(f"  [Módulo 15] Datos_Graficos_Huella -> {ruta}")
+    return str(ruta)
+```
+*Por qué:* esta es toda la exportación. Cada `_tabla_*` replica exactamente la lógica del chart correspondiente en el dashboard (mismo objeto/métrica/filtro), pero sin recortar por AFP ni por Top-N, para que tengas el universo completo y lo filtres tú en Excel. `Corte_Rol` marca qué corte es el "Actual"/"Comparación" por defecto del dashboard, sin descartar el resto del histórico.
+
+---
+
+**BLOQUE 3 — Nuevo parámetro en `run_pipeline_bd1s`**
+
+Ubica (Ctrl+F):
+```python
+                      ruta_dashboard: Optional[str] = None,
+                      hoja_proxy_yyyymm: Optional[str] = None,
+```
+Reemplaza con:
+```python
+                      ruta_dashboard: Optional[str] = None,
+                      ruta_datos_graficos: Optional[str] = None,
+                      hoja_proxy_yyyymm: Optional[str] = None,
+```
+
+---
+
+**BLOQUE 4 — Resolver la ruta por defecto**
+
+Ubica (Ctrl+F):
+```python
+    ruta_dashboard = ruta_dashboard or str(out / NOMBRE_DASHBOARD)
+```
+Reemplaza con:
+```python
+    ruta_dashboard = ruta_dashboard or str(out / NOMBRE_DASHBOARD)
+    ruta_datos_graficos = ruta_datos_graficos or str(out / NOMBRE_DATOS_GRAFICOS)
+```
+
+---
+
+**BLOQUE 5 — Llamar la función nueva + agregarla al resultado**
+
+Ubica (Ctrl+F):
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+
+    return {
+        "config": cfg, "resultados": all_results,
+        "ruta_historico": ruta_historico, "ruta_dashboard": ruta_dashboard,
+    }
+```
+Reemplaza con:
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos)
+
+    return {
+        "config": cfg, "resultados": all_results,
+        "ruta_historico": ruta_historico, "ruta_dashboard": ruta_dashboard,
+        "ruta_datos_graficos": ruta_datos_graficos,
+    }
+```
+
+---
+
+**BLOQUE 6 — Renombrar los 7 charts en el dashboard**
+
+Busca cada texto exacto de la izquierda y reemplázalo por el de la derecha (son 7 cambios, todos en la lista `tarjetas`):
+
+| Buscar (Ctrl+F) | Reemplazar por |
+|---|---|
+| `"Exposición soberana por emisor — comparación entre cortes"` | `"Huella Soberanos"` |
+| `"Intensidad soberana por emisor — comparación entre cortes"` | `"Intensidad Soberanos"` |
+| `"Huella por categoría — MSCI vs Proxies (Chart 52)"` | `"Huella por Sector"` |
+| `"Intensidad por categoría — MSCI vs Proxies (Chart 63)"` | `"Intensidad por Sector"` |
+| `"Mayores contribuyentes por Intensidad — BU + TD sin Proxy (solo corte seleccionado)"` | `"Mayores contribuyentes"` |
+| `"Asset Performance — top instrumento por subcategoría (Active vs Passive)"` | `"Intensidad FFMM"` |
+| `"Comparables (Intensidad) — Integra vs otras AFPs vs Benchmarks"` | `"Intensidad y Benchmarks"` |
+
+---
+
+Con esto, cada corrida de `run_pipeline_bd1s` va a dejar `Datos_Graficos_Huella.xlsx` junto al Dashboard y al Histórico, con las 7 hojas nombradas igual que los charts + una hoja "Auditoría". Corre el pipeline y valida que las cifras de cada hoja calcen con lo que ves en el dashboard antes de armar tus Tablas Dinámicas — avísame si algún número no cuadra.
