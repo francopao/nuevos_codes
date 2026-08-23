@@ -1,0 +1,7 @@
+Para estos dos charts de excel faltan agregar estas mejoras Eliminar el título superior ("Intensidad Soberanos").
+	•	Eliminar las líneas de cuadrícula horizontales.
+	•	Quitar la leyenda inferior.
+	•	Agregar etiquetas dentro de las barras (Perú, Brasil, Colombia, etc.).
+	•	Agregar cajas de texto superiores (que son las etiquetas de cada barra pero vienen con ese formato de caja) con los totales de cada chart ("Total: 530,003" y "Total: 510,396").
+	•	Agregar la flecha y variación porcentual entre barras ("→ -4%") o si no se puede por ser excel, algun otro marcador visual que lo reemplace en el chart de excel que este dentro de las posibilidades de python.
+	•	Mostrar los nombres de las fechas de cada periodo, en el eje X (por ejemplo Dic25 si se trata de una fecha de diciembre 2025 ,y Jun26 si se trata de Junio 2026)
