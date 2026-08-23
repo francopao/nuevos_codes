@@ -1,0 +1,153 @@
+Encontré la causa exacta — es una regresión real que introduje yo, no algo que estés haciendo mal. Primero lo urgente:
+
+**Detén la ejecución ahora (Ctrl+C / kill del kernel).** No va a terminar en un tiempo razonable tal como está: no está trabado, está genuinamente reprocesando de más, y va a seguir empeorando con cada AFP.
+
+## Qué pasó
+
+`HistoricoExporter.exportar()` (que se ejecuta **una vez por cada AFP**, o sea 5 veces por corrida) hace esto en cada llamada:
+1. Lee el Excel `Huella_Historico.xlsx` **completo** (todas las hojas, con `pd.read_excel(..., sheet_name=None)`).
+2. Reescribe el archivo **completo** de nuevo.
+
+Con la hoja `Sector_MSCI_Proxies` agregada (7 filas por AFP) esto era liviano. Pero `Sector_MSCI_Proxies_Detalle` es a nivel instrumento — miles de filas por AFP. Como esa hoja también quedó registrada en `build_all()`, ahora se cuela dentro del flujo que se lee/reescribe completo 5 veces por corrida, y el archivo se hace pesado progresivamente en cada AFP (AFP 2 relee lo que AFP 1 ya escribió, ya agrandado; así sucesivamente). Eso es lo que multiplicó tu tiempo de corrida.
+
+## La solución: sacar el detalle de instrumento del Histórico
+
+El detalle de Emisor/SBS no necesita vivir en `Huella_Historico.xlsx` (que se relee/reescribe por AFP) — solo lo necesita `Datos_Graficos_Huella.xlsx`, que se genera una sola vez al final. Lo calculo directamente desde los objetos `pres` que ya están en memoria durante la corrida, sin tocar el Histórico.
+
+---
+
+**BLOQUE 1 — Deshacer el registro en `build_all()` (saca el detalle del Histórico)**
+
+Ubica (Ctrl+F):
+```python
+            "Sector_MSCI_Proxies": self.sector_msci_vs_proxies(),
+            "Sector_MSCI_Proxies_Detalle": self.sector_msci_vs_proxies_detalle(),
+```
+Reemplaza con:
+```python
+            "Sector_MSCI_Proxies": self.sector_msci_vs_proxies(),
+```
+*(el método `sector_msci_vs_proxies_detalle` se queda definido en la clase, solo dejamos de registrarlo en `build_all()`/HISTORICO — lo vamos a llamar directo más abajo).*
+
+---
+
+**BLOQUE 2 — Recolectar el detalle en memoria durante el loop de AFPs**
+
+Ubica (Ctrl+F):
+```python
+    all_results: Dict[str, dict] = {}
+    vals_ctx: Dict[str, tuple] = {}
+```
+Reemplaza con:
+```python
+    all_results: Dict[str, dict] = {}
+    vals_ctx: Dict[str, tuple] = {}
+    _detalle_sector_partes: List[pd.DataFrame] = []
+```
+
+Ahora ubica (Ctrl+F):
+```python
+            objetos = pres.build_all()
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+Reemplaza con:
+```python
+            objetos = pres.build_all()
+
+            # --- Detalle Emisor/SBS por categoría, SOLO para el Excel de
+            # gráficos (no va al Histórico: son miles de filas por AFP y
+            # HistoricoExporter relee/reescribe el archivo completo). ---
+            _det = pres.sector_msci_vs_proxies_detalle()
+            if not _det.empty:
+                _det = _det.copy()
+                _det.insert(0, "AFP", afp)
+                _det.insert(0, "FECHA_CORTE", cfg.semestre)
+                _detalle_sector_partes.append(_det)
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+
+---
+
+**BLOQUE 3 — Pasar el detalle acumulado a `construir_excel_graficos`**
+
+Ubica (Ctrl+F):
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos)
+```
+Reemplaza con:
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    detalle_sector = (pd.concat(_detalle_sector_partes, ignore_index=True)
+                       if _detalle_sector_partes else pd.DataFrame())
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, detalle_sector=detalle_sector)
+```
+
+---
+
+**BLOQUE 4 — `construir_excel_graficos` recibe el detalle como parámetro (no lo lee del Histórico)**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida) -> str:
+```
+Reemplaza con:
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              detalle_sector: pd.DataFrame = None) -> str:
+```
+
+Ahora ubica (Ctrl+F):
+```python
+        NOMBRE_HOJA_SECTOR_HUELLA: _tabla_sector(hist, "Huella", rol_map),
+        NOMBRE_HOJA_SECTOR_INT: _tabla_sector(hist, "Intensidad", rol_map),
+```
+Reemplaza con:
+```python
+        NOMBRE_HOJA_SECTOR_HUELLA: _tabla_sector(detalle_sector, "Huella", rol_map),
+        NOMBRE_HOJA_SECTOR_INT: _tabla_sector(detalle_sector, "Intensidad", rol_map),
+```
+
+---
+
+**BLOQUE 5 — `_tabla_sector` ahora arma la tabla desde el detalle en memoria (no desde HISTORICO)**
+
+Ubica (Ctrl+F) toda la función actual:
+```python
+def _tabla_sector(hist: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    df = hist[(hist["OBJETO"] == "Sector_MSCI_Proxies_Detalle") & (hist["METRICA"] == metrica)].copy()
+    cat_tipo = df["DIM_3"].str.split("|", n=1, expand=True)
+    df["Categoria"] = cat_tipo[0]
+    df["Tipo_Dato"] = cat_tipo[1]
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "DIM_1": "Emisor",
+                             "DIM_2": "SBS", "VALOR": "Valor"})
+    df["Metrica"] = metrica
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    cols = ["Corte", "Corte_Rol", "AFP", "Categoria", "Tipo_Dato", "Emisor", "SBS", "Metrica", "Valor"]
+    return df[cols].sort_values(["Corte", "AFP", "Categoria", "Emisor"], ignore_index=True)
+```
+Reemplaza con:
+```python
+def _tabla_sector(detalle_sector: pd.DataFrame, metrica: str, rol_map: dict) -> pd.DataFrame:
+    if detalle_sector is None or detalle_sector.empty or metrica not in detalle_sector.columns:
+        return pd.DataFrame()
+    df = detalle_sector.copy()
+    cat_tipo = df["Categoria_Tipo"].str.split("|", n=1, expand=True)
+    df["Categoria"] = cat_tipo[0]
+    df["Tipo_Dato"] = cat_tipo[1]
+    df = df.rename(columns={"FECHA_CORTE": "Corte", "Nombre": "Emisor"})
+    df["Corte"] = df["Corte"].astype(str)
+    df["Metrica"] = metrica
+    df["Valor"] = pd.to_numeric(df[metrica], errors="coerce").fillna(0.0)
+    df["Corte_Rol"] = df["Corte"].map(rol_map).fillna("")
+    cols = ["Corte", "Corte_Rol", "AFP", "Categoria", "Tipo_Dato", "Emisor", "SBS", "Metrica", "Valor"]
+    return df[cols].sort_values(["Corte", "AFP", "Categoria", "Emisor"], ignore_index=True)
+```
+
+---
+
+No hace falta tocar `_agregar_chart_sector`: el orden de columnas de la tabla (A=Corte … I=Valor) queda igual que antes, así que las fórmulas SUMIFS que ya arreglamos siguen apuntando bien.
+
+Corre de nuevo — debería volver a los tiempos de antes (los ~10 minutos que recordabas), porque el Histórico deja de cargar el detalle pesado. Avísame cómo sale y seguimos con Intensidad FFMM.
