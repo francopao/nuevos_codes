@@ -1,0 +1,165 @@
+Entendido. Antes de lanzar los 7, dos cosas rápidas que necesitas saber (para que no te sorprenda el resultado), y luego el código de los primeros 2 charts (Huella Soberanos / Intensidad Soberanos) como prueba de concepto — sigo con los otros 5 en cuanto confirmes que este patrón te sirve.
+
+**Lo que SÍ va a quedar fiel:** colores exactos (tomados de las mismas constantes `COLORES_PAIS`, `COLORES_CATEGORIA`, `COLOR_ACTUAL/COMPARA`, etc. que usa el dashboard), la estructura de barras apiladas, el orden de series, y el vínculo vivo a la data — agrego una tabla-resumen con fórmulas `SUMIFS` sobre tu tabla tidy (no valores fijos), así que si editas un `Valor`, el gráfico se recalcula solo.
+
+**Lo que NO es posible en un chart nativo de Excel (limitación real, no de esfuerzo):** las anotaciones de texto flotante de Plotly (los "Total: X", la flechita con el % de variación, las etiquetas de país dentro de cada segmento) no existen como objeto en un gráfico de Excel — Excel solo permite título, leyenda y etiquetas de dato estándar. Mi solución: esas cifras (Total Comparación, Total Actual, Variación %) las pongo en celdas normales junto al gráfico, también con fórmula, para que sigan siendo "vivas" aunque no floten sobre las barras. El patrón rayado de "Proxies" (Charts 52/63, cuando lleguemos ahí) tampoco existe nativamente — te aviso la alternativa cuando construya esos dos.
+
+---
+
+**BLOQUE A — Imports para los charts nativos**
+
+Ubica (Ctrl+F):
+```python
+NOMBRE_HOJA_AUDITORIA = "Auditoría"
+```
+Y agrega debajo:
+```python
+NOMBRE_HOJA_AUDITORIA = "Auditoría"
+
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.shapes import GraphicalProperties
+```
+*Por qué:* son las clases de openpyxl para construir gráficos nativos (no vienen con el `import openpyxl` genérico que ya tenías).
+
+---
+
+**BLOQUE B — Funciones nuevas: tabla-resumen + chart nativo (Soberanos)**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida) -> str:
+```
+Y pega esto **justo arriba** (antes de esa línea):
+
+```python
+def _etiqueta_corte(corte: str) -> str:
+    """'202606' -> 'Jun26' (mismo formato que el eje X del dashboard)."""
+    c = str(corte)
+    meses = {"06": "Jun", "12": "Dic"}
+    mes = meses.get(c[4:6], c[4:6]) if len(c) >= 6 else c
+    return mes + (c[2:4] if len(c) >= 4 else "")
+
+
+def _color_pais(pais: str, idx: int) -> str:
+    hexc = COLORES_PAIS.get(pais) or COLORES_PAIS_FALLBACK[idx % len(COLORES_PAIS_FALLBACK)]
+    return hexc.lstrip("#")
+
+
+def _agregar_chart_soberanos(ws, tabla: pd.DataFrame, corte_actual: str,
+                              corte_comparacion: str, titulo: str) -> None:
+    """Agrega, en la misma hoja, una tabla-resumen (fórmulas SUMIFS sobre la
+    tabla tidy A:G) + un gráfico de barras apiladas por país — escenario
+    AFP=Integra, cortes Actual/Comparación (el default del dashboard).
+    Si se edita un Valor en la tabla tidy, todo se recalcula solo."""
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1  # header en fila 1, datos 2..ultima_fila
+
+    d = tabla[(tabla["AFP"] == "Integra") & (tabla["Corte"].isin([corte_actual, corte_comparacion]))]
+    tot_por_pais = d.groupby("Pais")["Valor"].sum()
+    paises = [p for p in tot_por_pais.index if abs(tot_por_pais[p]) > 1e-9]
+
+    def _clave_orden(p):
+        try:
+            i = ORDEN_PAISES.index(p)
+        except ValueError:
+            i = 999
+        return (i, -tot_por_pais.get(p, 0.0))
+    paises = sorted(paises, key=_clave_orden)
+    if not paises:
+        return
+
+    col_label = ws.max_column + 2   # deja 1 columna de separación
+    fila_r = 1
+
+    ws.cell(row=fila_r, column=col_label, value="Corte")
+    for j, pais in enumerate(paises):
+        ws.cell(row=fila_r, column=col_label + 1 + j, value=pais)
+
+    for i, (corte_val) in enumerate([corte_comparacion, corte_actual]):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=_etiqueta_corte(corte_val))
+        for j, pais in enumerate(paises):
+            col_l = get_column_letter(col_label + 1 + j)
+            f = (f'=SUMIFS($G$2:$G${ultima_fila},$C$2:$C${ultima_fila},"Integra",'
+                 f'$D$2:$D${ultima_fila},{col_l}${fila_r},$A$2:$A${ultima_fila},"{corte_val}")')
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+
+    rango_cmp = (f"{get_column_letter(col_label+1)}{fila_r+1}:"
+                 f"{get_column_letter(col_label+len(paises))}{fila_r+1}")
+    rango_act = (f"{get_column_letter(col_label+1)}{fila_r+2}:"
+                 f"{get_column_letter(col_label+len(paises))}{fila_r+2}")
+    ws.cell(row=fila_r + 4, column=col_label, value="Total Comparación")
+    ws.cell(row=fila_r + 4, column=col_label + 1, value=f"=SUM({rango_cmp})")
+    ws.cell(row=fila_r + 5, column=col_label, value="Total Actual")
+    ws.cell(row=fila_r + 5, column=col_label + 1, value=f"=SUM({rango_act})")
+    ws.cell(row=fila_r + 6, column=col_label, value="Variación %")
+    ws.cell(row=fila_r + 6, column=col_label + 1,
+            value=f'=IFERROR({get_column_letter(col_label+1)}{fila_r+5}/'
+                  f'{get_column_letter(col_label+1)}{fila_r+4}-1,"s/d")')
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.title = titulo
+    chart.y_axis.delete = True
+    chart.legend.position = "b"
+    chart.height = 7.5
+    chart.width = 15
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + len(paises),
+                          min_row=fila_r, max_row=fila_r + 2)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + 2)
+    chart.set_categories(cats_ref)
+    for i, serie in enumerate(chart.series):
+        serie.graphicalProperties = GraphicalProperties(solidFill=_color_pais(paises[i], i))
+
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")
+
+```
+*Por qué:* `_agregar_chart_soberanos` es reutilizable para las dos hojas (Huella e Intensidad Soberanos) porque ambas comparten exactamente la misma estructura (Pais/Emisor); solo cambia qué hoja le pasas.
+
+---
+
+**BLOQUE C — Llamar la función nueva dentro de `construir_excel_graficos`**
+
+Ubica (Ctrl+F) el bloque final de la función (el `with pd.ExcelWriter`):
+```python
+    ruta = FsPath(str(ruta_salida))
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(str(ruta), engine="openpyxl") as xw:
+        for nombre, df in hojas.items():
+            (df if not df.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+                .to_excel(xw, sheet_name=nombre[:31], index=False)
+    print(f"  [Módulo 15] Datos_Graficos_Huella -> {ruta}")
+    return str(ruta)
+```
+Reemplaza con:
+```python
+    ruta = FsPath(str(ruta_salida))
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(str(ruta), engine="openpyxl") as xw:
+        for nombre, df in hojas.items():
+            (df if not df.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+                .to_excel(xw, sheet_name=nombre[:31], index=False)
+
+        # --- Charts nativos vinculados a cada hoja de datos ---
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_HUELLA],
+                                  corte_actual, corte_comparacion, "Huella Soberanos")
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_INT],
+                                  corte_actual, corte_comparacion, "Intensidad Soberanos")
+
+    print(f"  [Módulo 15] Datos_Graficos_Huella -> {ruta}")
+    return str(ruta)
+```
+
+---
+
+Corre el pipeline y revisa las hojas "Huella Soberanos" e "Intensidad Soberanos": deberías ver la tabla tidy a la izquierda, la tabla-resumen + Total/Variación un poco más a la derecha, y el gráfico apilado debajo de esa tabla-resumen, con los mismos colores por país que el dashboard. Si el resultado te convence, sigo con Chart por Sector (52/63), Intensidad FFMM, Intensidad y Benchmarks, y Mayores contribuyentes en los próximos mensajes.
