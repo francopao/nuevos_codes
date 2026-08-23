@@ -1,0 +1,189 @@
+
+
+Mismo tratamiento que Soberanos, con un plus: para estos dos charts sí logré el patrón rayado nativo de "Proxies" (Alts y Proxies), no solo color sólido — lo validé en sandbox antes de mandártelo.
+
+---
+
+**BLOQUE A (actualización) — 2 imports más**
+
+Ubica (Ctrl+F):
+```python
+from openpyxl.formatting.rule import IconSetRule
+```
+Y agrega debajo:
+```python
+from openpyxl.formatting.rule import IconSetRule
+from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+```
+
+---
+
+**BLOQUE B — Nueva función `_agregar_chart_sector`**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida) -> str:
+```
+Y pega esto **justo arriba** (antes de esa línea, después de `_agregar_chart_soberanos`):
+
+```python
+def _agregar_chart_sector(ws, tabla: pd.DataFrame, corte_actual: str,
+                           corte_comparacion: str) -> None:
+    """Igual tratamiento que _agregar_chart_soberanos, pero agrupado por
+    Categoria (MSCI vs Proxies) — Chart 52/63. Las categorías Bloque=Proxies
+    (Alts, Proxies) llevan relleno con patrón rayado, igual que en el
+    dashboard; el resto, relleno sólido."""
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1
+
+    d = tabla[(tabla["AFP"] == "Integra") & (tabla["Corte"].isin([corte_actual, corte_comparacion]))]
+    tot_por_cat = d.groupby("Categoria")["Valor"].sum()
+    tipo_por_cat = d.groupby("Categoria")["Tipo_Dato"].first()
+    categorias = [c for c in tot_por_cat.index if abs(tot_por_cat[c]) > 1e-9]
+    categorias = sorted(categorias, key=lambda c: (
+        CATEGORIAS_SECTOR.index(c) if c in CATEGORIAS_SECTOR else 99))
+    if not categorias:
+        return
+
+    col_label = ws.max_column + 2
+    col_total = col_label + 1 + len(categorias)
+    col_var = col_total + 1
+    fila_r = 1
+
+    ws.cell(row=fila_r, column=col_label, value="Corte")
+    for j, cat in enumerate(categorias):
+        ws.cell(row=fila_r, column=col_label + 1 + j, value=cat)
+    ws.cell(row=fila_r, column=col_total, value="Total")
+
+    for i, corte_val in enumerate([corte_comparacion, corte_actual]):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=_etiqueta_corte(corte_val))
+        for j, cat in enumerate(categorias):
+            col_l = get_column_letter(col_label + 1 + j)
+            tipo_val = tipo_por_cat.get(cat, "MSCI")
+            f = (f'=SUMIFS($G$2:$G${ultima_fila},$C$2:$C${ultima_fila},"Integra",'
+                 f'$D$2:$D${ultima_fila},{col_l}${fila_r},'
+                 f'$E$2:$E${ultima_fila},"{tipo_val}",'
+                 f'$A$2:$A${ultima_fila},"{corte_val}")')
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+        rango_fila = (f"{get_column_letter(col_label+1)}{fr}:"
+                      f"{get_column_letter(col_label+len(categorias))}{fr}")
+        ws.cell(row=fr, column=col_total, value=f"=SUM({rango_fila})")
+
+    ws.cell(row=fila_r, column=col_var, value="Variación %")
+    fr_cmp, fr_act = fila_r + 1, fila_r + 2
+    ws.cell(row=fr_act, column=col_var,
+            value=f'=IFERROR({get_column_letter(col_total)}{fr_act}/'
+                  f'{get_column_letter(col_total)}{fr_cmp}-1,"")')
+    ws.cell(row=fr_act, column=col_var).number_format = '+0%;-0%'
+    ws.conditional_formatting.add(
+        f"{get_column_letter(col_var)}{fr_act}",
+        IconSetRule(icon_style="3Arrows", type="num",
+                    values=[0, -0.0001, 0.0001], showValue=True, reverse=False))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 7.5
+    chart.width = 15
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + len(categorias),
+                          min_row=fila_r, max_row=fila_r + 2)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + 2)
+    chart.set_categories(cats_ref)
+
+    for i, serie in enumerate(chart.series):
+        cat = categorias[i]
+        hexcolor = COLORES_CATEGORIA.get(cat, "ACD7CA").lstrip("#")
+        gp = GraphicalProperties()
+        if tipo_por_cat.get(cat) == "Proxies":
+            gp.pattFill = PatternFillProperties(
+                prst="ltUpDiag",
+                fgClr=ColorChoice(srgbClr=hexcolor),
+                bgClr=ColorChoice(srgbClr="FFFFFF"))
+        else:
+            gp.solidFill = hexcolor
+        serie.graphicalProperties = gp
+        dl = DataLabelList()
+        dl.showSerName = True
+        dl.showVal = False
+        dl.showCatName = False
+        dl.showLegendKey = False
+        dl.showPercent = False
+        dl.showBubbleSize = False
+        dl.position = "ctr"
+        serie.dLbls = dl
+
+    total_ref = Reference(ws, min_col=col_total, max_col=col_total,
+                           min_row=fila_r, max_row=fila_r + 2)
+    linea = LineChart()
+    linea.add_data(total_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    serie_total = linea.series[0]
+    serie_total.graphicalProperties = GraphicalProperties()
+    serie_total.graphicalProperties.line = LineProperties(noFill=True)
+    serie_total.marker = Marker(symbol="none")
+    serie_total.smooth = False
+
+    dl_total = DataLabelList()
+    dl_total.showVal = True
+    dl_total.showSerName = False
+    dl_total.showCatName = False
+    dl_total.showLegendKey = False
+    dl_total.showPercent = False
+    dl_total.showBubbleSize = False
+    dl_total.dLblPos = "t"
+    dl_total.numFmt = '"Total: "#,##0'
+    dl_total.spPr = GraphicalProperties(solidFill="EDEFF2")
+    cp = CharacterProperties(sz=1100, b=True, solidFill="1F2933")
+    dl_total.txPr = RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+    serie_total.dLbls = dl_total
+
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.x_axis.delete = True
+
+    chart += linea
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")
+
+```
+*Por qué:* misma lógica que Soberanos, pero agrupando por `Categoria` en vez de `Pais`, con `$E$` (Tipo_Dato) como criterio extra en el SUMIFS para separar MSCI de Proxies, y relleno rayado (`pattFill`) cuando la categoría es Proxies.
+
+---
+
+**BLOQUE C — Llamar la función nueva dentro de `construir_excel_graficos`**
+
+Ubica (Ctrl+F):
+```python
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_INT],
+                                  corte_actual, corte_comparacion)
+```
+Reemplaza con:
+```python
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT],
+                                  hojas[NOMBRE_HOJA_SOBERANOS_INT],
+                                  corte_actual, corte_comparacion)
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_HUELLA],
+                               hojas[NOMBRE_HOJA_SECTOR_HUELLA],
+                               corte_actual, corte_comparacion)
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_INT],
+                               hojas[NOMBRE_HOJA_SECTOR_INT],
+                               corte_actual, corte_comparacion)
+```
+
+---
+
+Corre el pipeline y revisa "Huella por Sector" e "Intensidad por Sector": deberías ver Materials/Utilities/Otros/RF/RV sólidos y Alts/Proxies con rayado diagonal, mismos colores que el dashboard. Avísame y sigo con Intensidad FFMM.
