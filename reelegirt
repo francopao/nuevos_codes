@@ -1,0 +1,654 @@
+Con esto validado en sandbox (incluyendo las fórmulas cruzando de la hoja del chart hacia `'BD'`), aquí está el diseño completo. Es un cambio grande — toca 8 puntos. Asumo que ya tienes aplicado el parche de la corrida anterior (el que sacó el detalle del Histórico y usa `detalle_sector`); si algún ancla no calza exactamente, dime en qué línea difiere y lo ajustamos.
+
+**Un ajuste que tuve que resolver de oficio:** `BD` (a diferencia de la tabla local anterior) no se acumulaba entre corridas — solo tendría el corte que acabas de procesar, y las 4 hojas necesitan Actual+Comparación. Por eso `construir_excel_graficos` ahora lee el `BD` que ya existe en el archivo de salida (si lo hay), descarta las filas del corte que se está reprocesando, y le agrega lo nuevo — igual que hace el Histórico, pero una sola vez (no 5 veces por AFP), así que no reintroduce el problema de rendimiento.
+
+---
+
+**BLOQUE 1 — Constante de la hoja BD**
+
+Ubica (Ctrl+F):
+```python
+NOMBRE_HOJA_AUDITORIA = "Auditoría"
+```
+Agrega debajo:
+```python
+NOMBRE_HOJA_AUDITORIA = "Auditoría"
+NOMBRE_HOJA_BD = "BD"
+```
+
+---
+
+**BLOQUE 2 — Helpers de limpieza/canonicalización de Emisor**
+
+Ubica (Ctrl+F):
+```python
+def _etiqueta_corte(corte: str) -> str:
+```
+Pega **justo arriba**:
+```python
+def _limpiar_emisor(nombre) -> str:
+    """Quita asteriscos sobrantes (en cualquier posición) y espacios
+    repetidos. El asterisco final se repone después solo para
+    Perdieron Huella."""
+    s = str(nombre or "").strip()
+    s = re.sub(r"\*+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _clave_norm_emisor(nombre: str) -> str:
+    """Clave de agrupación: mayúsculas, sin tildes, sin puntuación —
+    para que 'peru', 'PERU' y 'Perú' caigan en el mismo grupo."""
+    s = _limpiar_emisor(nombre).upper()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Z0-9 ]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _riqueza_variante(s: str) -> tuple:
+    """Puntaje para elegir la variante 'oficial' dentro de un grupo: más
+    caracteres acentuados, luego más minúsculas (Title Case > MAYÚSCULAS)."""
+    acentos = sum(1 for ch in s if unicodedata.normalize("NFKD", ch) != ch)
+    minusculas = sum(1 for ch in s if ch.islower())
+    return (acentos, minusculas)
+
+
+def _agregar_emisor_limpio(bd: pd.DataFrame) -> pd.DataFrame:
+    """Agrega la columna Emisor (limpia y canonicalizada) a partir de
+    Nombre_Original. Solo lleva '*' final si PERDIO_HUELLA es True."""
+    bd = bd.copy()
+    limpio = bd["Nombre_Original"].map(_limpiar_emisor)
+    clave = limpio.map(_clave_norm_emisor)
+    tmp = pd.DataFrame({"limpio": limpio, "clave": clave})
+    oficial_por_clave = {}
+    for clave_g, grupo in tmp.groupby("clave"):
+        if clave_g == "":
+            continue
+        conteo = grupo["limpio"].value_counts()
+        mejor = max(conteo.index, key=lambda v: (_riqueza_variante(v), conteo[v]))
+        oficial_por_clave[clave_g] = mejor
+    emisor = clave.map(oficial_por_clave).fillna(limpio)
+    perdio = (bd["PERDIO_HUELLA"].fillna(False).astype(bool)
+              if "PERDIO_HUELLA" in bd.columns else pd.Series(False, index=bd.index))
+    bd["Emisor"] = emisor.where(~perdio, emisor + "*")
+    return bd
+
+
+def _cargar_bd_existente(ruta_salida) -> pd.DataFrame:
+    """Lee la hoja 'BD' del Datos_Graficos_Huella.xlsx anterior, si existe,
+    para acumular cortes entre corridas (una sola lectura, no por AFP)."""
+    ruta = FsPath(str(ruta_salida))
+    if not ruta.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_excel(str(ruta), sheet_name=NOMBRE_HOJA_BD, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame()
+
+
+```
+
+---
+
+**BLOQUE 3 — Nuevo método `construir_bd_instrumentos` en `PresentacionBuilder`**
+
+Ubica (Ctrl+F) el final del método `sector_msci_vs_proxies_detalle` (justo antes del comentario de Charts 49/48/39):
+```python
+        result = result.rename(columns={COL["nombre"]: "Nombre", "__SBS": "SBS",
+                                         "__CatTipo": "Categoria_Tipo"})
+        return result.reset_index(drop=True)
+    # --------------------------------------------------------------------------
+    # Charts 49, 48 y 39 — portafolio vs benchmarks.
+```
+Reemplaza con (agrega el método nuevo entre medio):
+```python
+        result = result.rename(columns={COL["nombre"]: "Nombre", "__SBS": "SBS",
+                                         "__CatTipo": "Categoria_Tipo"})
+        return result.reset_index(drop=True)
+
+    def construir_bd_instrumentos(self) -> pd.DataFrame:
+        """Base de datos única a nivel instrumento (por Fondo/SBS) que
+        alimenta, vía SUMIFS en Excel, las hojas Huella/Intensidad
+        Soberanos, Huella/Intensidad por Sector y Mayores Contribuyentes.
+        Cada fila queda etiquetada con 'Universo' para que cada hoja
+        filtre solo lo suyo."""
+        met = [COL["huella"], COL["intensidad"], "CO2-H", "Weight", COL["inv"]]
+        met = [m for m in met if m in self.df.columns]
+        ident = [COL["nombre"], COL["sbs"], COL["isin"], COL["portafolio"], COL["estrategia"]]
+        ident = [c for c in ident if c in self.df.columns]
+        tiene_perdio = "PERDIO_HUELLA" in self.df.columns
+
+        piezas = []
+
+        def _tomar(sub, universo, categoria, tipo_dato, pais_serie=None):
+            if sub.empty:
+                return
+            cols = ident + met + (["PERDIO_HUELLA"] if tiene_perdio else [])
+            t = sub[cols].copy()
+            t["Universo"] = universo
+            t["Categoria"] = categoria
+            t["Tipo_Dato"] = tipo_dato
+            t["Pais"] = pais_serie if pais_serie is not None else ""
+            piezas.append(t)
+
+        # --- Universo Soberanos ---
+        d = _sin_huella_cero(self.df[self.df[COL["estrategia"]].isin(["GOB", "SOB"])])
+        if not d.empty:
+            pais = d[COL["nombre"]].map(lambda n: PAIS_POR_EMISOR_SOBERANO.get(n, n))
+            _tomar(d, "Soberanos", "GOB", "", pais_serie=pais)
+
+        # --- Universo Sector (misma clasificación que sector_msci_vs_proxies) ---
+        d = _sin_huella_cero(self.df)
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        if not bu_msci.empty:
+            bu_msci["__sector"] = self._mapear_sector(bu_msci)
+        else:
+            bu_msci["__sector"] = pd.Series(dtype=object)
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        for cat in ("Materials", "Utilities"):
+            _tomar(bu_msci[bu_msci["__sector"].eq(cat)], "Sector", cat, "MSCI")
+        usados = bu_msci["__sector"].isin(["Materials", "Utilities"])
+        _tomar(bu_msci[~usados], "Sector", "Otros", "MSCI")
+        _tomar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")], "Sector", "RF", "MSCI")
+        _tomar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")], "Sector", "RV", "MSCI")
+        _tomar(alt, "Sector", "Alts", "Proxies")
+        _tomar(pd.concat([bu_prox, td_prox], ignore_index=True), "Sector", "Proxies", "Proxies")
+
+        # --- Universo Mayores Contribuyentes (BU+TD sin Proxy) ---
+        d2 = self.df[
+            self.df[COL["estrategia"]].isin(["BU", "TD"])
+            & ~self.df[COL["plus_1"]].isin(["SOV", "Alts"])
+            & (self.df[COL["plus"]] != "Proxies")
+        ]
+        d2 = _sin_huella_cero(d2)
+        _tomar(d2, "Mayores", "", "")
+
+        if not piezas:
+            return pd.DataFrame()
+
+        out = pd.concat(piezas, ignore_index=True)
+        out = out.rename(columns={
+            COL["nombre"]: "Nombre_Original", COL["sbs"]: "SBS", COL["isin"]: "ISIN",
+            COL["portafolio"]: "Portafolio", COL["estrategia"]: "Estrategia",
+            COL["huella"]: "Huella", COL["intensidad"]: "Intensidad", COL["inv"]: "Inv_MM_USD",
+        })
+        if "PERDIO_HUELLA" not in out.columns:
+            out["PERDIO_HUELLA"] = False
+        out["Fondo"] = "F" + out["Portafolio"].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        return out
+
+    # --------------------------------------------------------------------------
+    # Charts 49, 48 y 39 — portafolio vs benchmarks.
+```
+
+---
+
+**BLOQUE 4 — Reemplazar la recolección en `run_pipeline_bd1s` (usa BD en vez de solo Sector)**
+
+Ubica (Ctrl+F):
+```python
+    all_results: Dict[str, dict] = {}
+    vals_ctx: Dict[str, tuple] = {}
+    _detalle_sector_partes: List[pd.DataFrame] = []
+```
+Reemplaza con:
+```python
+    all_results: Dict[str, dict] = {}
+    vals_ctx: Dict[str, tuple] = {}
+    _bd_partes: List[pd.DataFrame] = []
+```
+
+Ahora ubica (Ctrl+F):
+```python
+            objetos = pres.build_all()
+
+            # --- Detalle Emisor/SBS por categoría, SOLO para el Excel de
+            # gráficos (no va al Histórico: son miles de filas por AFP y
+            # HistoricoExporter relee/reescribe el archivo completo). ---
+            _det = pres.sector_msci_vs_proxies_detalle()
+            if not _det.empty:
+                _det = _det.copy()
+                _det.insert(0, "AFP", afp)
+                _det.insert(0, "FECHA_CORTE", cfg.semestre)
+                _detalle_sector_partes.append(_det)
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+Reemplaza con:
+```python
+            objetos = pres.build_all()
+
+            # --- BD a nivel instrumento, SOLO para el Excel de gráficos
+            # (no va al Histórico: son miles de filas por AFP y
+            # HistoricoExporter relee/reescribe el archivo completo). ---
+            _bd_afp = pres.construir_bd_instrumentos()
+            if not _bd_afp.empty:
+                _bd_afp = _bd_afp.copy()
+                _bd_afp.insert(0, "AFP", afp)
+                _bd_afp.insert(0, "Corte", cfg.semestre)
+                _bd_partes.append(_bd_afp)
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+
+---
+
+**BLOQUE 5 — Reemplazar la llamada final**
+
+Ubica (Ctrl+F):
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    detalle_sector = (pd.concat(_detalle_sector_partes, ignore_index=True)
+                       if _detalle_sector_partes else pd.DataFrame())
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, detalle_sector=detalle_sector)
+```
+Reemplaza con:
+```python
+    construir_dashboard(ruta_historico, ruta_dashboard)
+    bd_instrumentos = (pd.concat(_bd_partes, ignore_index=True)
+                        if _bd_partes else pd.DataFrame())
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, bd_instrumentos=bd_instrumentos)
+```
+
+---
+
+**BLOQUE 6 — Reescribir `construir_excel_graficos` completo**
+
+Ubica (Ctrl+F) y reemplaza **toda la función**, desde `def construir_excel_graficos(ruta_historico, ruta_salida,` hasta el `return str(ruta)` que le sigue (la que quedó del parche anterior, la que recibía `detalle_sector`):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              detalle_sector: pd.DataFrame = None) -> str:
+```
+… (todo el cuerpo hasta) …
+```python
+    print(f"  [Módulo 15] Datos_Graficos_Huella -> {ruta}")
+    return str(ruta)
+```
+Por esta versión nueva completa:
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None) -> str:
+    """Genera Datos_Graficos_Huella.xlsx: hoja 'BD' única a nivel
+    instrumento (fuente de Huella/Intensidad Soberanos y Huella/Intensidad
+    por Sector vía SUMIFS), más Intensidad FFMM / Intensidad y Benchmarks /
+    Mayores contribuyentes (desde HISTORICO) + Auditoría."""
+    hist = HistoricoExporter(str(ruta_historico)).cargar_historico()
+    if hist.empty:
+        raise ValueError("El histórico está vacío: ejecutar el pipeline primero.")
+    hist = hist.copy()
+    hist["FECHA_CORTE"] = hist["FECHA_CORTE"].astype(str)
+    for c in ["DIM_1", "DIM_2", "DIM_3", "OBJETO", "METRICA"]:
+        if c in hist.columns:
+            hist[c] = hist[c].fillna("").astype(str)
+    if "AFP" not in hist.columns:
+        hist["AFP"] = "Integra"
+    else:
+        hist["AFP"] = hist["AFP"].fillna("Integra").astype(str)
+    hist["VALOR"] = pd.to_numeric(hist["VALOR"], errors="coerce").fillna(0.0).round(6)
+
+    # --- BD: fusiona lo nuevo de esta corrida con lo ya acumulado (si el
+    # archivo de salida ya existe), purgando los cortes que se reprocesan.
+    bd_nuevo = bd_instrumentos.copy() if bd_instrumentos is not None else pd.DataFrame()
+    if not bd_nuevo.empty:
+        bd_nuevo["Corte"] = bd_nuevo["Corte"].astype(str)
+    bd_prev = _cargar_bd_existente(ruta_salida)
+    if not bd_prev.empty and "Corte" in bd_prev.columns and not bd_nuevo.empty:
+        cortes_nuevos = set(bd_nuevo["Corte"].unique())
+        bd_prev = bd_prev[~bd_prev["Corte"].astype(str).isin(cortes_nuevos)]
+    bd = (pd.concat([bd_prev, bd_nuevo], ignore_index=True)
+          if not bd_prev.empty else bd_nuevo)
+
+    if not bd.empty:
+        bd["Corte"] = bd["Corte"].astype(str)
+        bd = _agregar_emisor_limpio(bd)
+        cols_final = ["Corte", "AFP", "Fondo", "Portafolio", "SBS", "ISIN", "Estrategia",
+                      "Universo", "Categoria", "Tipo_Dato", "Pais", "Nombre_Original",
+                      "Emisor", "PERDIO_HUELLA", "CO2-H", "Weight", "Inv_MM_USD",
+                      "Huella", "Intensidad"]
+        for c in cols_final:
+            if c not in bd.columns:
+                bd[c] = ""
+        bd = bd[cols_final].reset_index(drop=True)
+        col_co2h = get_column_letter(cols_final.index("CO2-H") + 1)
+        col_weight = get_column_letter(cols_final.index("Weight") + 1)
+        col_inv = get_column_letter(cols_final.index("Inv_MM_USD") + 1)
+        filas_excel = range(2, len(bd) + 2)
+        bd["Huella_Verif"] = [f"={col_co2h}{r}*{col_inv}{r}" for r in filas_excel]
+        bd["Intensidad_Verif"] = [f"={col_co2h}{r}*{col_weight}{r}" for r in filas_excel]
+
+    cortes = sorted(set(hist["FECHA_CORTE"].unique())
+                     | (set(bd["Corte"].unique()) if not bd.empty else set()))
+    corte_actual, corte_comparacion, rol_map = _corte_rol_map(cortes)
+
+    _anio = corte_actual[:4] if len(corte_actual) >= 6 else "2026"
+    _mes = corte_actual[4:6] if len(corte_actual) >= 6 else "06"
+    bench_ffmm = _cargar_benchmarks_ffmm(_anio, _mes)
+
+    hojas = {
+        NOMBRE_HOJA_ASSET_PERF: _tabla_asset_perf(hist, rol_map, corte_actual, bench_ffmm),
+        NOMBRE_HOJA_COMP_BENCH: _tabla_comp_bench_afp(hist, rol_map),
+        NOMBRE_HOJA_CONTRIB_BUTD: _tabla_contrib_butd(hist, rol_map),
+        NOMBRE_HOJA_AUDITORIA: _tabla_auditoria(corte_actual, corte_comparacion),
+    }
+
+    ruta = FsPath(str(ruta_salida))
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(str(ruta), engine="openpyxl") as xw:
+        (bd if not bd.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+            .to_excel(xw, sheet_name=NOMBRE_HOJA_BD, index=False)
+        for nombre in (NOMBRE_HOJA_SOBERANOS_HUELLA, NOMBRE_HOJA_SOBERANOS_INT,
+                       NOMBRE_HOJA_SECTOR_HUELLA, NOMBRE_HOJA_SECTOR_INT):
+            xw.book.create_sheet(nombre)
+        for nombre, df in hojas.items():
+            (df if not df.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+                .to_excel(xw, sheet_name=nombre[:31], index=False)
+
+        fila_max_bd = len(bd) + 1
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_HUELLA], bd, "Huella",
+                                  corte_actual, corte_comparacion, fila_max_bd)
+        _agregar_chart_soberanos(xw.sheets[NOMBRE_HOJA_SOBERANOS_INT], bd, "Intensidad",
+                                  corte_actual, corte_comparacion, fila_max_bd)
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_HUELLA], bd, "Huella",
+                               corte_actual, corte_comparacion, fila_max_bd)
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_INT], bd, "Intensidad",
+                               corte_actual, corte_comparacion, fila_max_bd)
+
+    print(f"  [Módulo 15] Datos_Graficos_Huella -> {ruta}")
+    return str(ruta)
+```
+
+---
+
+**BLOQUE 7 — Reescribir `_agregar_chart_soberanos` completo (ahora lee de BD)**
+
+Ubica (Ctrl+F) y reemplaza toda la función actual (desde `def _agregar_chart_soberanos(ws, tabla: pd.DataFrame, corte_actual: str,` hasta el `ws.add_chart(...)` final de esa función) por:
+```python
+def _agregar_chart_soberanos(ws, bd: pd.DataFrame, metrica: str, corte_actual: str,
+                              corte_comparacion: str, fila_max_bd: int) -> None:
+    """Misma presentación de siempre (sin título, sin cuadrícula, sin
+    leyenda, país dentro de cada segmento, caja 'Total: X', variación %),
+    pero la tabla-resumen ahora lee con SUMIFS desde la hoja 'BD'
+    (Universo='Soberanos') en vez de una tabla local."""
+    if bd.empty or fila_max_bd < 2:
+        return
+    d = bd[(bd["Universo"] == "Soberanos") & (bd["AFP"] == "Integra")
+           & (bd["Corte"].isin([corte_actual, corte_comparacion]))]
+    if d.empty:
+        return
+    tot_por_pais = d.groupby("Pais")[metrica].sum()
+    paises = [p for p in tot_por_pais.index if abs(tot_por_pais[p]) > 1e-9]
+
+    def _clave_orden(p):
+        try:
+            i = ORDEN_PAISES.index(p)
+        except ValueError:
+            i = 999
+        return (i, -tot_por_pais.get(p, 0.0))
+    paises = sorted(paises, key=_clave_orden)
+    if not paises:
+        return
+
+    col_metrica = "R" if metrica == "Huella" else "S"
+    col_label = ws.max_column + 2
+    col_total = col_label + 1 + len(paises)
+    col_var = col_total + 1
+    fila_r = 1
+
+    ws.cell(row=fila_r, column=col_label, value="Corte")
+    for j, pais in enumerate(paises):
+        ws.cell(row=fila_r, column=col_label + 1 + j, value=pais)
+    ws.cell(row=fila_r, column=col_total, value="Total")
+
+    for i, corte_val in enumerate([corte_comparacion, corte_actual]):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=_etiqueta_corte(corte_val))
+        for j, pais in enumerate(paises):
+            col_l = get_column_letter(col_label + 1 + j)
+            f = (f"=SUMIFS('BD'!${col_metrica}$2:${col_metrica}${fila_max_bd},"
+                 f"'BD'!$H$2:$H${fila_max_bd},\"Soberanos\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\","
+                 f"'BD'!$K$2:$K${fila_max_bd},{col_l}${fila_r},"
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_val}\")")
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+        rango_fila = (f"{get_column_letter(col_label+1)}{fr}:"
+                      f"{get_column_letter(col_label+len(paises))}{fr}")
+        ws.cell(row=fr, column=col_total, value=f"=SUM({rango_fila})")
+
+    ws.cell(row=fila_r, column=col_var, value="Variación %")
+    fr_cmp, fr_act = fila_r + 1, fila_r + 2
+    ws.cell(row=fr_act, column=col_var,
+            value=f'=IFERROR({get_column_letter(col_total)}{fr_act}/'
+                  f'{get_column_letter(col_total)}{fr_cmp}-1,"")')
+    ws.cell(row=fr_act, column=col_var).number_format = '+0%;-0%'
+    ws.conditional_formatting.add(
+        f"{get_column_letter(col_var)}{fr_act}",
+        IconSetRule(icon_style="3Arrows", type="num",
+                    values=[0, -0.0001, 0.0001], showValue=True, reverse=False))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 7.5
+    chart.width = 15
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + len(paises),
+                          min_row=fila_r, max_row=fila_r + 2)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + 2)
+    chart.set_categories(cats_ref)
+
+    for i, serie in enumerate(chart.series):
+        serie.graphicalProperties = GraphicalProperties(solidFill=_color_pais(paises[i], i))
+        dl = DataLabelList()
+        dl.showSerName = True
+        dl.showVal = False
+        dl.showCatName = False
+        dl.showLegendKey = False
+        dl.showPercent = False
+        dl.showBubbleSize = False
+        dl.position = "ctr"
+        serie.dLbls = dl
+
+    total_ref = Reference(ws, min_col=col_total, max_col=col_total,
+                           min_row=fila_r, max_row=fila_r + 2)
+    linea = LineChart()
+    linea.add_data(total_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    serie_total = linea.series[0]
+    serie_total.graphicalProperties = GraphicalProperties()
+    serie_total.graphicalProperties.line = LineProperties(noFill=True)
+    serie_total.marker = Marker(symbol="none")
+    serie_total.smooth = False
+
+    dl_total = DataLabelList()
+    dl_total.showVal = True
+    dl_total.showSerName = False
+    dl_total.showCatName = False
+    dl_total.showLegendKey = False
+    dl_total.showPercent = False
+    dl_total.showBubbleSize = False
+    dl_total.dLblPos = "t"
+    dl_total.numFmt = '"Total: "#,##0'
+    dl_total.spPr = GraphicalProperties(solidFill="EDEFF2")
+    cp = CharacterProperties(sz=1100, b=True, solidFill="1F2933")
+    dl_total.txPr = RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+    serie_total.dLbls = dl_total
+
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.x_axis.delete = True
+
+    chart += linea
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")
+```
+
+---
+
+**BLOQUE 8 — Reescribir `_agregar_chart_sector` completo (ahora lee de BD)**
+
+Mismo reemplazo, para la función `_agregar_chart_sector`:
+```python
+def _agregar_chart_sector(ws, bd: pd.DataFrame, metrica: str, corte_actual: str,
+                           corte_comparacion: str, fila_max_bd: int) -> None:
+    """Misma presentación de siempre (Materials/Utilities/Otros/RF/RV
+    sólidos, Alts/Proxies rayado), pero la tabla-resumen ahora lee con
+    SUMIFS desde 'BD' (Universo='Sector') en vez de una tabla local."""
+    if bd.empty or fila_max_bd < 2:
+        return
+    d = bd[(bd["Universo"] == "Sector") & (bd["AFP"] == "Integra")
+           & (bd["Corte"].isin([corte_actual, corte_comparacion]))]
+    if d.empty:
+        return
+    tot_por_cat = d.groupby("Categoria")[metrica].sum()
+    tipo_por_cat = d.groupby("Categoria")["Tipo_Dato"].first()
+    categorias = [c for c in tot_por_cat.index if abs(tot_por_cat[c]) > 1e-9]
+    categorias = sorted(categorias, key=lambda c: (
+        CATEGORIAS_SECTOR.index(c) if c in CATEGORIAS_SECTOR else 99))
+    if not categorias:
+        return
+
+    col_metrica = "R" if metrica == "Huella" else "S"
+    col_label = ws.max_column + 2
+    col_total = col_label + 1 + len(categorias)
+    col_var = col_total + 1
+    fila_r = 1
+
+    ws.cell(row=fila_r, column=col_label, value="Corte")
+    for j, cat in enumerate(categorias):
+        ws.cell(row=fila_r, column=col_label + 1 + j, value=cat)
+    ws.cell(row=fila_r, column=col_total, value="Total")
+
+    for i, corte_val in enumerate([corte_comparacion, corte_actual]):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=_etiqueta_corte(corte_val))
+        for j, cat in enumerate(categorias):
+            col_l = get_column_letter(col_label + 1 + j)
+            tipo_val = tipo_por_cat.get(cat, "MSCI")
+            f = (f"=SUMIFS('BD'!${col_metrica}$2:${col_metrica}${fila_max_bd},"
+                 f"'BD'!$H$2:$H${fila_max_bd},\"Sector\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\","
+                 f"'BD'!$I$2:$I${fila_max_bd},{col_l}${fila_r},"
+                 f"'BD'!$J$2:$J${fila_max_bd},\"{tipo_val}\","
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_val}\")")
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+        rango_fila = (f"{get_column_letter(col_label+1)}{fr}:"
+                      f"{get_column_letter(col_label+len(categorias))}{fr}")
+        ws.cell(row=fr, column=col_total, value=f"=SUM({rango_fila})")
+
+    ws.cell(row=fila_r, column=col_var, value="Variación %")
+    fr_cmp, fr_act = fila_r + 1, fila_r + 2
+    ws.cell(row=fr_act, column=col_var,
+            value=f'=IFERROR({get_column_letter(col_total)}{fr_act}/'
+                  f'{get_column_letter(col_total)}{fr_cmp}-1,"")')
+    ws.cell(row=fr_act, column=col_var).number_format = '+0%;-0%'
+    ws.conditional_formatting.add(
+        f"{get_column_letter(col_var)}{fr_act}",
+        IconSetRule(icon_style="3Arrows", type="num",
+                    values=[0, -0.0001, 0.0001], showValue=True, reverse=False))
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.gapWidth = 60
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 7.5
+    chart.width = 15
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + len(categorias),
+                          min_row=fila_r, max_row=fila_r + 2)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + 2)
+    chart.set_categories(cats_ref)
+
+    for i, serie in enumerate(chart.series):
+        cat = categorias[i]
+        hexcolor = COLORES_CATEGORIA.get(cat, "ACD7CA").lstrip("#")
+        gp = GraphicalProperties()
+        if tipo_por_cat.get(cat) == "Proxies":
+            gp.pattFill = PatternFillProperties(
+                prst="ltUpDiag",
+                fgClr=ColorChoice(srgbClr=hexcolor),
+                bgClr=ColorChoice(srgbClr="FFFFFF"))
+        else:
+            gp.solidFill = hexcolor
+        serie.graphicalProperties = gp
+        dl = DataLabelList()
+        dl.showSerName = True
+        dl.showVal = False
+        dl.showCatName = False
+        dl.showLegendKey = False
+        dl.showPercent = False
+        dl.showBubbleSize = False
+        dl.position = "ctr"
+        serie.dLbls = dl
+
+    total_ref = Reference(ws, min_col=col_total, max_col=col_total,
+                           min_row=fila_r, max_row=fila_r + 2)
+    linea = LineChart()
+    linea.add_data(total_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    serie_total = linea.series[0]
+    serie_total.graphicalProperties = GraphicalProperties()
+    serie_total.graphicalProperties.line = LineProperties(noFill=True)
+    serie_total.marker = Marker(symbol="none")
+    serie_total.smooth = False
+
+    dl_total = DataLabelList()
+    dl_total.showVal = True
+    dl_total.showSerName = False
+    dl_total.showCatName = False
+    dl_total.showLegendKey = False
+    dl_total.showPercent = False
+    dl_total.showBubbleSize = False
+    dl_total.dLblPos = "t"
+    dl_total.numFmt = '"Total: "#,##0'
+    dl_total.spPr = GraphicalProperties(solidFill="EDEFF2")
+    cp = CharacterProperties(sz=1100, b=True, solidFill="1F2933")
+    dl_total.txPr = RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+    serie_total.dLbls = dl_total
+
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.x_axis.delete = True
+
+    chart += linea
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + 8}")
+```
+
+---
+
+## Notas finales
+
+- **`_tabla_soberanos` y `_tabla_sector` quedan huérfanas** (ya no se llaman desde ningún lado) — no hace falta borrarlas, no estorban.
+- **Mayores Contribuyentes** sigue leyendo del HISTORICO por ahora (sin cambios en esta hoja). `BD` ya tiene las filas `Universo='Mayores'` listas — cuando construyamos su gráfico nativo (el que sigue en la lista original), lo conecto a `BD` con SUMIFS tal como elegiste.
+- La primera vez que corras esto, como no existe un `BD` previo en `Datos_Graficos_Huella.xlsx`, solo vas a tener el corte actual (sin comparación) hasta que corras un segundo corte — o, si ya tienes una corrida anterior de otro corte en ese mismo archivo, la comparación va a aparecer directo.
+
+Corre el pipeline y revisa: hoja `BD` con Emisor limpio + fórmulas de verificación, y los 4 charts con la misma apariencia de siempre. Avísame cómo sale.
