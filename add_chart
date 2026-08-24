@@ -1,0 +1,294 @@
+Good — confirms the BD consolidation patch is fully applied. Reading the exact current state of the 3 remaining tables before writing chart code.Now the imports block, to confirm `DataPoint` isn't already imported:All 3 validated in sandbox. Delivering code only.
+
+**BLOQUE 1 — Imports**
+
+Ubica (Ctrl+F):
+```python
+from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+```
+Agrega debajo:
+```python
+from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+from openpyxl.chart.series import DataPoint
+```
+
+**BLOQUE 2 — Las 3 funciones nuevas**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+```
+Pega **justo arriba**:
+```python
+def _agregar_chart_asset_perf(ws, tabla: pd.DataFrame, corte_actual: str) -> None:
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1
+    d = tabla[(tabla["Corte"] == corte_actual) & (tabla["Tipo_Fila"] == "Instrumento")
+              & (tabla["AFP"] == "Integra")].copy()
+    if d.empty:
+        return
+    orden_bloque = {"Equities": 0, "Fixed Income": 1}
+    d["__ord_bloque"] = d["Bloque"].map(orden_bloque).fillna(9)
+    d = d.sort_values(["__ord_bloque", "Valor"], ascending=[True, False]).reset_index(drop=True)
+
+    bench = tabla[(tabla["Corte"] == corte_actual) & (tabla["Tipo_Fila"] == "Benchmark")
+                  & (tabla["Benchmark_Nombre"] == "Total_Integra") & (tabla["AFP"] == "Integra")]
+    bench_val = float(bench["Valor"].iloc[0]) if not bench.empty else None
+
+    n = len(d)
+    col_label = ws.max_column + 2
+    fila_r = 1
+    ws.cell(row=fila_r, column=col_label, value="Instrumento")
+    ws.cell(row=fila_r, column=col_label + 1, value="Intensidad")
+    if bench_val is not None:
+        ws.cell(row=fila_r, column=col_label + 2, value="Benchmark")
+
+    for i, (_, r) in enumerate(d.iterrows()):
+        fr = fila_r + 1 + i
+        etiqueta = f"{r['Instrumento']} ({r['Bloque']})"
+        ws.cell(row=fr, column=col_label, value=etiqueta)
+        inst_esc = str(r["Instrumento"]).replace('"', '""')
+        f = (f'=SUMIFS($L$2:$L${ultima_fila},$G$2:$G${ultima_fila},"{inst_esc}",'
+             f'$E$2:$E${ultima_fila},"{r["Bloque"]}",$D$2:$D${ultima_fila},"Instrumento",'
+             f'$C$2:$C${ultima_fila},"Integra",$A$2:$A${ultima_fila},"{corte_actual}")')
+        ws.cell(row=fr, column=col_label + 1, value=f)
+        if bench_val is not None:
+            ws.cell(row=fr, column=col_label + 2, value=bench_val)
+
+    chart = BarChart()
+    chart.type = "bar"
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "l"
+    chart.y_axis.axPos = "b"
+    chart.height = 10
+    chart.width = 16
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + 1,
+                          min_row=fila_r, max_row=fila_r + n)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + n)
+    chart.set_categories(cats_ref)
+
+    serie = chart.series[0]
+    serie.graphicalProperties = GraphicalProperties(solidFill="00AECB")
+    for i, (_, r) in enumerate(d.iterrows()):
+        color = "00AECB" if r["Gestion"] == "Active" else "AFC3E6"
+        pt = DataPoint(idx=i)
+        pt.graphicalProperties = GraphicalProperties(solidFill=color)
+        serie.data_points.append(pt)
+    dl = DataLabelList()
+    dl.showVal = True
+    dl.showSerName = False
+    dl.showCatName = False
+    dl.showLegendKey = False
+    dl.numFmt = "#,##0"
+    serie.dLbls = dl
+
+    if bench_val is not None:
+        bench_ref = Reference(ws, min_col=col_label + 2, max_col=col_label + 2,
+                               min_row=fila_r, max_row=fila_r + n)
+        linea = LineChart()
+        linea.add_data(bench_ref, titles_from_data=True)
+        linea.set_categories(cats_ref)
+        st = linea.series[0]
+        st.graphicalProperties = GraphicalProperties()
+        st.graphicalProperties.line = LineProperties(solidFill="C0392B", prstDash="dash", w=15000)
+        st.marker = Marker(symbol="none")
+        st.smooth = False
+        linea.y_axis.delete = True
+        linea.y_axis.majorGridlines = None
+        linea.x_axis.delete = True
+        chart += linea
+
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + n + 3}")
+
+
+def _agregar_chart_comp_bench(ws, tabla: pd.DataFrame, corte_actual: str) -> None:
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1
+    d = tabla[tabla["Corte"] == corte_actual]
+    if d.empty:
+        return
+
+    items = []
+    for afp in ("Integra", "Prima", "Profuturo", "Habitat"):
+        sub = d[(d["Segmento"] == "AFP_Categoria") & (d["AFP"] == afp)]
+        if not sub.empty and abs(sub["Valor"].sum()) > 1e-9:
+            items.append(("AFP_Categoria", afp, afp))
+    for b in ("ACWI", "ILF", "CEMB", "EMB"):
+        sub = d[(d["Segmento"] == "Benchmark_Mercado") & (d["Benchmark_Nombre"] == b)]
+        if not sub.empty and abs(sub["Valor"].sum()) > 1e-9:
+            items.append(("Benchmark_Mercado", b, b))
+    gob = d[d["Segmento"] == "Soberano_GOB"]
+    for emisor in gob["Emisor"].unique():
+        sub = gob[gob["Emisor"] == emisor]
+        if abs(sub["Valor"].sum()) > 1e-9:
+            items.append(("Soberano_GOB", emisor, emisor))
+    if not items:
+        return
+
+    col_label = ws.max_column + 2
+    fila_r = 1
+    ws.cell(row=fila_r, column=col_label, value="Serie")
+    ws.cell(row=fila_r, column=col_label + 1, value="Intensidad")
+    for i, (segmento, clave, etiqueta) in enumerate(items):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=etiqueta)
+        clave_esc = str(clave).replace('"', '""')
+        if segmento == "AFP_Categoria":
+            f = (f'=SUMIFS($K$2:$K${ultima_fila},$D$2:$D${ultima_fila},"AFP_Categoria",'
+                 f'$C$2:$C${ultima_fila},"{clave_esc}",$A$2:$A${ultima_fila},"{corte_actual}")')
+        elif segmento == "Benchmark_Mercado":
+            f = (f'=SUMIFS($K$2:$K${ultima_fila},$D$2:$D${ultima_fila},"Benchmark_Mercado",'
+                 f'$I$2:$I${ultima_fila},"{clave_esc}",$A$2:$A${ultima_fila},"{corte_actual}")')
+        else:
+            f = (f'=SUMIFS($K$2:$K${ultima_fila},$D$2:$D${ultima_fila},"Soberano_GOB",'
+                 f'$H$2:$H${ultima_fila},"{clave_esc}",$A$2:$A${ultima_fila},"{corte_actual}")')
+        ws.cell(row=fr, column=col_label + 1, value=f)
+
+    n = len(items)
+    chart = BarChart()
+    chart.type = "col"
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 8
+    chart.width = 18
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + 1,
+                          min_row=fila_r, max_row=fila_r + n)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + n)
+    chart.set_categories(cats_ref)
+
+    serie = chart.series[0]
+    colores_segmento = {"Benchmark_Mercado": "8A99A8", "Soberano_GOB": "516FED"}
+    for i, (segmento, clave, _etq) in enumerate(items):
+        color = COLORES_AFP.get(clave, "00AECB") if segmento == "AFP_Categoria" \
+            else colores_segmento.get(segmento, "AFC3E6")
+        pt = DataPoint(idx=i)
+        pt.graphicalProperties = GraphicalProperties(solidFill=color)
+        serie.data_points.append(pt)
+    dl = DataLabelList()
+    dl.showVal = True
+    dl.showSerName = False
+    dl.showCatName = False
+    dl.showLegendKey = False
+    dl.numFmt = "#,##0"
+    dl.dLblPos = "outEnd"
+    serie.dLbls = dl
+
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + n + 3}")
+
+
+def _agregar_chart_mayores(ws, bd: pd.DataFrame, corte_actual: str, fila_max_bd: int,
+                            top_n: int = 15) -> None:
+    if bd.empty or fila_max_bd < 2:
+        return
+    d = bd[(bd["Universo"] == "Mayores") & (bd["AFP"] == "Integra") & (bd["Corte"] == corte_actual)]
+    if d.empty:
+        return
+    agg = d.groupby("Emisor")[["Intensidad", "Huella"]].sum()
+    top = agg.sort_values("Intensidad", ascending=False).head(top_n)
+    emisores = list(top.index)
+    if not emisores:
+        return
+
+    col_label = ws.max_column + 2
+    fila_r = 1
+    ws.cell(row=fila_r, column=col_label, value="Emisor")
+    ws.cell(row=fila_r, column=col_label + 1, value="Intensidad")
+    ws.cell(row=fila_r, column=col_label + 2, value="Huella")
+    for i, emisor in enumerate(emisores):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=emisor)
+        emisor_esc = str(emisor).replace('"', '""')
+        f_int = (f"=SUMIFS('BD'!$S$2:$S${fila_max_bd},'BD'!$H$2:$H${fila_max_bd},\"Mayores\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\",'BD'!$M$2:$M${fila_max_bd},\"{emisor_esc}\","
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_actual}\")")
+        f_hue = (f"=SUMIFS('BD'!$R$2:$R${fila_max_bd},'BD'!$H$2:$H${fila_max_bd},\"Mayores\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\",'BD'!$M$2:$M${fila_max_bd},\"{emisor_esc}\","
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_actual}\")")
+        ws.cell(row=fr, column=col_label + 1, value=f_int)
+        ws.cell(row=fr, column=col_label + 2, value=f_hue)
+
+    n = len(emisores)
+    chart = BarChart()
+    chart.type = "bar"
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "l"
+    chart.y_axis.axPos = "b"
+    chart.height = 12
+    chart.width = 16
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + 1,
+                          min_row=fila_r, max_row=fila_r + n)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + n)
+    chart.set_categories(cats_ref)
+    serie = chart.series[0]
+    serie.graphicalProperties = GraphicalProperties(solidFill="00AECB")
+    dl = DataLabelList()
+    dl.showVal = True
+    dl.showSerName = False
+    dl.showCatName = False
+    dl.showLegendKey = False
+    dl.numFmt = "#,##0"
+    serie.dLbls = dl
+
+    bench_ref = Reference(ws, min_col=col_label + 2, max_col=col_label + 2,
+                           min_row=fila_r, max_row=fila_r + n)
+    linea = LineChart()
+    linea.add_data(bench_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    linea.y_axis.axId = 200
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.y_axis.crosses = "max"
+    st = linea.series[0]
+    st.graphicalProperties = GraphicalProperties()
+    st.graphicalProperties.line = LineProperties(noFill=True)
+    st.marker = Marker(symbol="diamond", size=7)
+    st.marker.graphicalProperties = GraphicalProperties(solidFill="C0392B")
+    st.smooth = False
+    chart += linea
+
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + n + 3}")
+
+
+```
+
+**BLOQUE 3 — Llamar las 3 funciones**
+
+Ubica (Ctrl+F):
+```python
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_INT], bd, "Intensidad",
+                               corte_actual, corte_comparacion, fila_max_bd)
+```
+Reemplaza con:
+```python
+        _agregar_chart_sector(xw.sheets[NOMBRE_HOJA_SECTOR_INT], bd, "Intensidad",
+                               corte_actual, corte_comparacion, fila_max_bd)
+        _agregar_chart_asset_perf(xw.sheets[NOMBRE_HOJA_ASSET_PERF],
+                                   hojas[NOMBRE_HOJA_ASSET_PERF], corte_actual)
+        _agregar_chart_comp_bench(xw.sheets[NOMBRE_HOJA_COMP_BENCH],
+                                   hojas[NOMBRE_HOJA_COMP_BENCH], corte_actual)
+        _agregar_chart_mayores(xw.sheets[NOMBRE_HOJA_CONTRIB_BUTD], bd, corte_actual, fila_max_bd)
+```
