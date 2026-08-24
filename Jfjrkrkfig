@@ -1,0 +1,310 @@
+Confirmado, y con una simplificación importante: como ahora se funde todo en un solo bloque sólido por categoría, **no hace falta tocar el JS del dashboard en absoluto** — el dashboard ya decide sólido-vs-rayado mirando si Python le manda una fila separada con `Bloque="Proxies"` para esa categoría. Si Python deja de mandarla (porque ya la fusionó), el dashboard automáticamente la muestra sólida. Solo toco Python.
+
+**BLOQUE 1 — Actualizar categorías y colores**
+
+Ubica (Ctrl+F):
+```python
+CATEGORIAS_SECTOR = ["Materials", "Utilities", "Otros", "RF",
+                     "ETF Sobs", "RV", "Proxies", "Alts"]
+```
+Reemplaza con:
+```python
+CATEGORIAS_SECTOR = ["Materials", "Utilities", "Otros BU", "RF",
+                     "RV", "Otros TD", "Alts"]
+```
+
+Ubica (Ctrl+F):
+```python
+COLORES_CATEGORIA = {
+    "Materials": "#E3F2ED",
+    "Utilities": "#C8E5DC",
+    "Otros": "#ACD7CA",
+    "RF": "#B7EEFF",
+    "ETF Sobs": "#AFC3E6",
+    "RV": "#D4EAF3",
+    "Proxies": "#B7EEFF",
+    "Alts": "#516FED",
+}
+```
+Reemplaza con:
+```python
+COLORES_CATEGORIA = {
+    "Materials": "#E3F2ED",
+    "Utilities": "#C8E5DC",
+    "Otros BU": "#ACD7CA",
+    "RF": "#B7EEFF",
+    "Otros TD": "#AFC3E6",
+    "RV": "#D4EAF3",
+    "Proxies": "#B7EEFF",
+    "Alts": "#516FED",
+}
+```
+
+**BLOQUE 2 — `sector_msci_vs_proxies()` (alimenta el Dashboard)**
+
+Ubica (Ctrl+F) toda la función completa (incluye las líneas duplicadas al final, es código muerto que aprovecho para limpiar):
+```python
+    def sector_msci_vs_proxies(self) -> pd.DataFrame:
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+        met = [m for m in met if m in d.columns]
+
+        def suma(sub) -> dict:
+            return {m: float(sub[m].sum()) for m in met}
+
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        if not bu_msci.empty:
+            bu_msci["__sector"] = self._mapear_sector(bu_msci)
+        else:
+            bu_msci["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        filas = []
+
+        def agrega(bloque, categoria, sub):
+            filas.append({"Bloque": bloque, "Categoria": categoria, **suma(sub)})
+
+        # Materials/Utilities/Otros: SOLO la porción MSCI (no proxy) de BU.
+        tot_bu_msci = suma(bu_msci)
+        for cat in ("Materials", "Utilities"):
+            agrega("MSCI", cat, bu_msci[bu_msci["__sector"].eq(cat)])
+        usados = bu_msci[bu_msci["__sector"].isin(["Materials", "Utilities"])]
+        filas.append({"Bloque": "MSCI", "Categoria": "Otros",
+                      **{m: tot_bu_msci[m] - float(usados[m].sum()) for m in met}})
+
+        # RF / RV: SOLO la porción MSCI (no proxy).
+        agrega("MSCI", "RF", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("MSCI", "RV", td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+
+        # Alts: se queda igual, NO se absorbe en "Proxies" — Private Markets
+        # no tiene cobertura ESG propia, todo Alts ya es proxy por diseño.
+        agrega("Proxies", "Alts", alt)
+
+        # "Proxies": TODO el universo proxy no-Alts consolidado en una sola
+        # porción — BU Proxies (Materials/Utilities/Otros) + RF Proxies +
+        # RV Proxies, sin distinguir origen.
+        proxies_todos = pd.concat([bu_prox, td_prox], ignore_index=True)
+        agrega("Proxies", "Proxies", proxies_todos)
+
+        out = pd.DataFrame(filas)
+        # DIM_1 = Categoria, DIM_2 = Bloque (así lo consume el dashboard).
+        out = out[["Categoria", "Bloque"] + met]
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+```
+Reemplaza con:
+```python
+    def sector_msci_vs_proxies(self) -> pd.DataFrame:
+        """BU y TD se clasifican igual sean MSCI-directo o Proxy (mismo
+        criterio: sector por SBS/Nombre para BU, TIPO_RENTA para TD) — ya
+        no hay un bloque 'Proxies' separado. Lo no identificado cae en
+        'Otros BU' / 'Otros TD'. Alts se mantiene aparte (100% proxy)."""
+        d = _sin_huella_cero(self.df)
+        met = [COL["huella"], COL["intensidad"], COL["intensidad_m"], COL["inv"]]
+        met = [m for m in met if m in d.columns]
+
+        def suma(sub) -> dict:
+            return {m: float(sub[m].sum()) for m in met}
+
+        bu = d[d[COL["estrategia"]].eq("BU")].copy()
+        if not bu.empty:
+            bu["__sector"] = self._mapear_sector(bu)
+        else:
+            bu["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        filas = []
+
+        def agrega(bloque, categoria, sub):
+            filas.append({"Bloque": bloque, "Categoria": categoria, **suma(sub)})
+
+        for cat in ("Materials", "Utilities"):
+            agrega("MSCI", cat, bu[bu["__sector"].eq(cat)])
+        usados = bu["__sector"].isin(["Materials", "Utilities"])
+        agrega("MSCI", "Otros BU", bu[~usados])
+
+        agrega("MSCI", "RF", td[td[COL["tipo_renta"]].eq("RENTA FIJA")])
+        agrega("MSCI", "RV", td[td[COL["tipo_renta"]].eq("RENTA VARIABLE")])
+        sin_tipo_renta = td[~td[COL["tipo_renta"]].isin(["RENTA FIJA", "RENTA VARIABLE"])]
+        agrega("MSCI", "Otros TD", sin_tipo_renta)
+
+        agrega("Proxies", "Alts", alt)
+
+        out = pd.DataFrame(filas)
+        out = out[["Categoria", "Bloque"] + met]
+        out["__ord"] = out["Categoria"].map(
+            {c: i for i, c in enumerate(CATEGORIAS_SECTOR)}).fillna(99)
+        return (out.sort_values(["__ord", "Bloque"])
+                   .drop(columns="__ord").reset_index(drop=True))
+```
+
+**BLOQUE 3 — `construir_bd_instrumentos()`: mismo criterio a nivel instrumento (BD/Excel)**
+
+Ubica (Ctrl+F):
+```python
+        # --- Universo Sector (misma clasificación que sector_msci_vs_proxies) ---
+        d = _sin_huella_cero(self.df)
+        bu = d[d[COL["estrategia"]].eq("BU")]
+        bu_msci = bu[bu[COL["plus"]].eq("Portafolio")].copy()
+        bu_prox = bu[bu[COL["plus"]].eq("Proxies")].copy()
+        if not bu_msci.empty:
+            bu_msci["__sector"] = self._mapear_sector(bu_msci)
+        else:
+            bu_msci["__sector"] = pd.Series(dtype=object)
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+        td_msci = td[td[COL["plus"]].isin(["ETF", "Portafolio"])]
+        td_prox = td[td[COL["plus"]].eq("Proxies")]
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        for cat in ("Materials", "Utilities"):
+            _tomar(bu_msci[bu_msci["__sector"].eq(cat)], "Sector", cat, "MSCI")
+        usados = bu_msci["__sector"].isin(["Materials", "Utilities"])
+        _tomar(bu_msci[~usados], "Sector", "Otros", "MSCI")
+        _tomar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA FIJA")], "Sector", "RF", "MSCI")
+        _tomar(td_msci[td_msci[COL["tipo_renta"]].eq("RENTA VARIABLE")], "Sector", "RV", "MSCI")
+        _tomar(alt, "Sector", "Alts", "Proxies")
+        _tomar(pd.concat([bu_prox, td_prox], ignore_index=True), "Sector", "Proxies", "Proxies")
+```
+Reemplaza con:
+```python
+        # --- Universo Sector: BU y TD se clasifican igual sean MSCI-directo
+        # o Proxy (mismo criterio que sector_msci_vs_proxies). Tipo_Dato se
+        # conserva por fila para auditoría, pero ya no define un bloque
+        # visual separado — eso lo decide el chart, no esta función.
+        d = _sin_huella_cero(self.df)
+        bu = d[d[COL["estrategia"]].eq("BU")].copy()
+        if not bu.empty:
+            bu["__sector"] = self._mapear_sector(bu)
+            bu["__tipo_dato"] = bu[COL["plus"]].map(
+                lambda p: "Proxies" if p == "Proxies" else "MSCI")
+        else:
+            bu["__sector"] = pd.Series(dtype=object)
+            bu["__tipo_dato"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])].copy()
+        if not td.empty:
+            td["__tipo_dato"] = td[COL["plus"]].map(
+                lambda p: "Proxies" if p == "Proxies" else "MSCI")
+
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        def _por_tipo(sub, categoria):
+            if sub.empty:
+                return
+            for tipo, sub_t in sub.groupby("__tipo_dato"):
+                _tomar(sub_t, "Sector", categoria, tipo)
+
+        for cat in ("Materials", "Utilities"):
+            _por_tipo(bu[bu["__sector"].eq(cat)], cat)
+        usados = bu["__sector"].isin(["Materials", "Utilities"])
+        _por_tipo(bu[~usados], "Otros BU")
+
+        _por_tipo(td[td[COL["tipo_renta"]].eq("RENTA FIJA")], "RF")
+        _por_tipo(td[td[COL["tipo_renta"]].eq("RENTA VARIABLE")], "RV")
+        _por_tipo(td[~td[COL["tipo_renta"]].isin(["RENTA FIJA", "RENTA VARIABLE"])], "Otros TD")
+
+        _tomar(alt, "Sector", "Alts", "Proxies")
+```
+
+**BLOQUE 4 — `_agregar_chart_sector`: un solo bloque sólido por categoría (rayado solo en Alts)**
+
+Ubica (Ctrl+F):
+```python
+    d = bd[(bd["Universo"] == "Sector") & (bd["AFP"] == "Integra")
+           & (bd["Corte"].isin([corte_actual, corte_comparacion]))]
+    if d.empty:
+        return
+    tot_por_cat = d.groupby("Categoria")[metrica].sum()
+    tipo_por_cat = d.groupby("Categoria")["Tipo_Dato"].first()
+    categorias = [c for c in tot_por_cat.index if abs(tot_por_cat[c]) > 1e-9]
+```
+Reemplaza con:
+```python
+    d = bd[(bd["Universo"] == "Sector") & (bd["AFP"] == "Integra")
+           & (bd["Corte"].isin([corte_actual, corte_comparacion]))]
+    if d.empty:
+        return
+    tot_por_cat = d.groupby("Categoria")[metrica].sum()
+    categorias = [c for c in tot_por_cat.index if abs(tot_por_cat[c]) > 1e-9]
+```
+
+Ubica (Ctrl+F):
+```python
+        for j, cat in enumerate(categorias):
+            col_l = get_column_letter(col_label + 1 + j)
+            tipo_val = tipo_por_cat.get(cat, "MSCI")
+            f = (f"=SUMIFS('BD'!${col_metrica}$2:${col_metrica}${fila_max_bd},"
+                 f"'BD'!$H$2:$H${fila_max_bd},\"Sector\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\","
+                 f"'BD'!$I$2:$I${fila_max_bd},{col_l}${fila_r},"
+                 f"'BD'!$J$2:$J${fila_max_bd},\"{tipo_val}\","
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_val}\")")
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+```
+Reemplaza con:
+```python
+        for j, cat in enumerate(categorias):
+            col_l = get_column_letter(col_label + 1 + j)
+            f = (f"=SUMIFS('BD'!${col_metrica}$2:${col_metrica}${fila_max_bd},"
+                 f"'BD'!$H$2:$H${fila_max_bd},\"Sector\","
+                 f"'BD'!$B$2:$B${fila_max_bd},\"Integra\","
+                 f"'BD'!$I$2:$I${fila_max_bd},{col_l}${fila_r},"
+                 f"'BD'!$A$2:$A${fila_max_bd},\"{corte_val}\")")
+            ws.cell(row=fr, column=col_label + 1 + j, value=f)
+```
+
+Ubica (Ctrl+F):
+```python
+        cat = categorias[i]
+        hexcolor = COLORES_CATEGORIA.get(cat, "ACD7CA").lstrip("#")
+        gp = GraphicalProperties()
+        if tipo_por_cat.get(cat) == "Proxies":
+            gp.pattFill = PatternFillProperties(
+                prst="ltUpDiag",
+                fgClr=ColorChoice(srgbClr=hexcolor),
+                bgClr=ColorChoice(srgbClr="FFFFFF"))
+        else:
+            gp.solidFill = hexcolor
+```
+Reemplaza con:
+```python
+        cat = categorias[i]
+        hexcolor = COLORES_CATEGORIA.get(cat, "ACD7CA").lstrip("#")
+        gp = GraphicalProperties()
+        if cat == "Alts":
+            gp.pattFill = PatternFillProperties(
+                prst="ltUpDiag",
+                fgClr=ColorChoice(srgbClr=hexcolor),
+                bgClr=ColorChoice(srgbClr="FFFFFF"))
+        else:
+            gp.solidFill = hexcolor
+```
+
+Corre el pipeline completo (toca el Histórico también, por el cambio en `sector_msci_vs_proxies`). Revisa el Dashboard y el Excel: deberías ver 6 bloques (Materials, Utilities, Otros BU, RF, RV, Otros TD) sólidos, más Alts rayado — sin la porción "Proxies" separada, y los totales por categoría deberían ser iguales o mayores que antes (porque ahora suman su parte proxy).
