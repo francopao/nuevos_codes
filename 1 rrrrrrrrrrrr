@@ -2300,6 +2300,11 @@ class ValorizacionBuilder:
                 print(f"  [Módulo 10] Estrategia -> 'ALT' por GyP_ASSET_CLASS: "
                       f"{int(_es_alt.sum())} fila(s).")
             df.loc[_es_alt, V_AN] = "ALT"
+            # Plus_1='Alts' es lo que el resto del script (Sector, rol_map,
+            # dashboard) usa para reconocer estas filas como el bucket "Alts".
+            # El filtro Plus=='Proxies' (ya existente aguas abajo) sigue siendo
+            # el que decide si de verdad tienen CO2-H de proxy o no.
+            df.loc[_es_alt, V_AR] = "Alts"
         else:
             df["GyP_SBS_TIPO"] = None
             df["GyP_ASSET_CLASS"] = None
