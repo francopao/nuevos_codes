@@ -1,0 +1,703 @@
+Todo probado end-to-end (Python + JS) contra tu Excel real, sin errores. Aquí están únicamente los bloques a modificar en **Dash FEN - Mining 2**, en orden de arriba hacia abajo del archivo.
+
+---
+
+## CAMBIO 1 — Nuevas paletas/config (Proyectos renovables y Producción eléctrica)
+
+**Buscar (Ctrl+F):**
+```
+    ("Nuevas Minas o Ampliaciones", "En Planificación"): COLOR_COMPS,
+}
+```
+Justo después de esa línea `}` (cierre de `GRUPO_COLOR`), **pega esto debajo**:
+
+```python
+
+# ---- Chart 5: "Proyectos de energía renovable" ---------------------------
+SHEET_RENOVABLES = "Proyectos renovables"
+TECNOLOGIA_COLOR = {
+    "Solar": "#C00000", "Eólica": "#4BACC6", "Hidroeléctrica": "#1F3864",
+}
+# Departamento asignado a cada proyecto (dato no incluido en la hoja fuente;
+# ajustar aquí si se requiere reubicar algún proyecto).
+RENOVABLE_DPTO = {
+    "San Gabán III": "Puno", "San Martín Solar": "Moquegua",
+    "Sunny (F1-F2)": "Moquegua", "Wayra Solar": "Arequipa",
+    "Exp. Intipampa": "Moquegua", "Caravelí": "Arequipa",
+    "San José": "Ica", "Illa": "Arequipa", "Lupi": "Arequipa",
+    "Solimana": "Arequipa", "Emma": "Arequipa",
+    "Bayóvar (Fase 1)": "Piura", "Guarango": "Ica",
+    "Muyu": "Lambayeque", "Chachani": "Arequipa",
+    "Hanaqpampa": "Arequipa", "Mórrope": "Lambayeque",
+    "Pichu Pichu": "Arequipa",
+}
+
+# ---- Chart 6: "Producción eléctrica" --------------------------------------
+SHEET_PRODELEC = "Produccion Electrica"
+TIPO_COLOR = {"Hidro": "#1F3864", "Termo": "#BF8F00", "RER": "#548235"}
+MACROZONA_DPTO = {"Norte": "Piura", "Centro": "Lima", "Sur": "Arequipa"}
+```
+
+---
+
+## CAMBIO 2 — Reescribir `construir_chart1` (timeline por bloques)
+
+**Buscar:** `def construir_chart1(df):`
+Selecciona **toda la función**, hasta la línea `return dict(columnas=columnas, puntos=puntos)` (inclusive), y reemplázala por:
+
+```python
+def construir_chart1(df):
+    """'Proyectos mineros': línea de tiempo horizontal por bloques (año de
+    inicio de construcción), con burbujas coloreadas por categoría/etapa y
+    un bloque agregado 'Por Definir' para proyectos sin fecha de inicio."""
+    con_fecha, sin_fecha = [], []
+    for _, r in df.iterrows():
+        proyecto = str(r["proyecto"]).strip()
+        if not proyecto or proyecto.lower() == "nan":
+            continue
+        anio = extraer_anio_inicio(r["inicio_fin"])
+        capex = float(r["capex"]) if r["capex"] is not None and str(r["capex"]) != "nan" else 0.0
+        categoria = clasificar_categoria(proyecto)
+        etapa_grp = clasificar_etapa_grupo(str(r["etapa"]) if r["etapa"] is not None else "")
+        item = dict(
+            proyecto=proyecto,
+            operador=str(r["operador"]) if r["operador"] is not None else "",
+            departamento=str(r["departamento"]) if r["departamento"] is not None else "",
+            producto=str(r["producto"]) if r["producto"] is not None else "",
+            etapa=str(r["etapa"]) if r["etapa"] is not None else "",
+            capex=round(capex, 1), categoria=categoria, etapa_grupo=etapa_grp,
+            color=GRUPO_COLOR[(categoria, etapa_grp)],
+        )
+        if anio is not None:
+            item["anio"] = anio
+            con_fecha.append(item)
+        else:
+            sin_fecha.append(item)
+
+    anios = sorted({it["anio"] for it in con_fecha})
+    columnas = [str(a) for a in anios]
+    if sin_fecha:
+        columnas.append("Por Definir")
+
+    max_dated = max([it["capex"] for it in con_fecha] + [0.1])
+    agregado_capex = sum(it["capex"] for it in sin_fecha)
+    max_global = max(max_dated, agregado_capex, 0.1)
+
+    def size_px(capex_val):
+        capex_val = max(capex_val, 0.1)
+        return 22 + 58 * math.sqrt(capex_val / max_global)
+
+    puntos = []
+    for idx_col, col in enumerate(columnas):
+        if col == "Por Definir":
+            n = len(sin_fecha)
+            puntos.append(dict(
+                x=idx_col, y=0.0, size=size_px(agregado_capex),
+                proyecto=f"{n} proyectos", operador="", departamento="",
+                producto="", etapa="Por Definir", categoria="Por Definir",
+                etapa_grupo="Por Definir",
+                capex=round(agregado_capex, 1), agregado=True, n=n,
+                color=COLOR_COMPS,
+            ))
+            continue
+        items = [it for it in con_fecha if it["anio"] == int(col)]
+        items.sort(key=lambda it: it["capex"], reverse=True)
+        for k, it in enumerate(items):
+            dx, dy = spiral_offset(k, spacing=0.30)
+            puntos.append(dict(
+                x=idx_col + dx, y=dy, size=size_px(it["capex"]),
+                proyecto=it["proyecto"], operador=it["operador"],
+                departamento=it["departamento"], producto=it["producto"],
+                etapa=it["etapa"], categoria=it["categoria"],
+                etapa_grupo=it["etapa_grupo"],
+                capex=it["capex"], agregado=False,
+                color=it["color"],
+            ))
+
+    log(f"Chart1 'Proyectos mineros': {len(puntos)} burbujas en "
+        f"{len(columnas)} bloques temporales ({', '.join(columnas)}).")
+    return dict(columnas=columnas, puntos=puntos)
+```
+
+---
+
+## CAMBIO 3 — Numerar proyectos en `construir_chart2`
+
+**Buscar:**
+```
+        capex = float(r["capex"]) if r["capex"] is not None and str(r["capex"]) != "nan" else 0.0
+        registros.append(dict(
+```
+(esta es la **segunda** aparición de esa línea `capex = float(...)`, dentro de `construir_chart2`, justo antes de `registros.append`)
+
+**Reemplazar por:**
+```python
+        capex = float(r["capex"]) if r["capex"] is not None and str(r["capex"]) != "nan" else 0.0
+        etiqueta = str(len(registros) + 1)
+        registros.append(dict(
+```
+
+Y dos líneas más abajo, dentro del mismo `dict(...)`, **buscar:**
+```
+            capex=round(capex, 1), categoria=categoria, etapa_grupo=etapa_grp,
+            color=GRUPO_COLOR[(categoria, etapa_grp)],
+            lat=round(coords[0] + jdy * 0.05, 4),
+```
+**Reemplazar por:**
+```python
+            capex=round(capex, 1), categoria=categoria, etapa_grupo=etapa_grp,
+            etiqueta=etiqueta,
+            color=GRUPO_COLOR[(categoria, etapa_grp)],
+            lat=round(coords[0] + jdy * 0.05, 4),
+```
+
+---
+
+## CAMBIO 4 — Nuevas funciones `construir_chart5` / `construir_chart6`
+
+**Buscar:**
+```
+# ------------------------------------------------------------------ EXTRACT
+```
+**Pega esto justo ANTES** de esa línea (deja el comentario `EXTRACT` donde está):
+
+```python
+# ------------------------------------------------------------------ CHART 5
+def construir_chart5(df):
+    """'Proyectos de energía renovable': mapa de Perú con los proyectos
+    ubicados por departamento, coloreados por tecnología."""
+    registros = []
+    conteo_coord = {}
+    omitidos = []
+    for _, r in df.iterrows():
+        proyecto = str(r["proyecto"]).strip()
+        if not proyecto or proyecto.lower() == "nan":
+            continue
+        dpto = RENOVABLE_DPTO.get(proyecto, "Lima")
+        coords = DEPTO_COORDS.get(dpto)
+        if not coords:
+            omitidos.append(proyecto)
+            continue
+        tecnologia = str(r["tecnologia"]).strip()
+        k = conteo_coord.get(dpto, 0)
+        conteo_coord[dpto] = k + 1
+        jdx, jdy = spiral_offset(k, spacing=0.4)
+        monto = float(r["monto"]) if r["monto"] is not None and str(r["monto"]) != "nan" else 0.0
+        registros.append(dict(
+            proyecto=proyecto,
+            horizonte=str(r["horizonte"]) if r["horizonte"] is not None else "",
+            tecnologia=tecnologia,
+            empresa=str(r["empresa"]) if r["empresa"] is not None else "",
+            monto=round(monto, 1),
+            departamento=dpto,
+            color=TECNOLOGIA_COLOR.get(tecnologia, "#8C8C8C"),
+            lat=round(coords[0] + jdy * 0.06, 4),
+            lon=round(coords[1] + jdx * 0.06, 4),
+        ))
+    if omitidos:
+        warn(f"Chart5: {len(omitidos)} proyecto(s) sin departamento asignado: "
+             f"{', '.join(omitidos)}")
+    log(f"Chart5 'Proyectos de energía renovable': {len(registros)} proyectos ubicados.")
+    return registros
+
+
+# ------------------------------------------------------------------ CHART 6
+def construir_chart6(df):
+    """'Producción eléctrica': empresas ubicadas por macrozona, coloreadas
+    según su fuente de generación dominante (Hidro/Termo/RER), más el
+    resumen Hidro/Termo/RER promedio por macrozona."""
+    registros = []
+    conteo_coord = {}
+    for _, r in df.iterrows():
+        empresa = str(r["empresa"]).strip() if r["empresa"] is not None else ""
+        if not empresa or empresa.lower() == "nan":
+            continue
+        macro = str(r["macrozona"]).strip()
+        dpto = MACROZONA_DPTO.get(macro)
+        coords = DEPTO_COORDS.get(dpto)
+        if not coords:
+            continue
+        hidro = float(r["hidro_pct"] or 0)
+        termo = float(r["termo_pct"] or 0)
+        rer = float(r["rer_pct"] or 0)
+        dominante = max([("Hidro", hidro), ("Termo", termo), ("RER", rer)],
+                         key=lambda x: x[1])[0]
+        k = conteo_coord.get(macro, 0)
+        conteo_coord[macro] = k + 1
+        jdx, jdy = spiral_offset(k, spacing=0.5)
+        registros.append(dict(
+            empresa=empresa, region=str(r["region"]) if r["region"] is not None else "",
+            macrozona=macro, hidro=hidro, termo=termo, rer=rer,
+            dominante=dominante, color=TIPO_COLOR[dominante],
+            lat=round(coords[0] + jdy * 0.08, 4),
+            lon=round(coords[1] + jdx * 0.08, 4),
+        ))
+
+    resumen = {}
+    for macro in ["Norte", "Centro", "Sur"]:
+        filas = [x for x in registros if x["macrozona"] == macro]
+        if not filas:
+            continue
+        resumen[macro] = dict(
+            hidro=round(sum(f["hidro"] for f in filas) / len(filas), 1),
+            termo=round(sum(f["termo"] for f in filas) / len(filas), 1),
+            rer=round(sum(f["rer"] for f in filas) / len(filas), 1),
+            n=len(filas),
+        )
+    total_n = sum(v["n"] for v in resumen.values()) or 1
+    distribucion = {m: round(100 * v["n"] / total_n, 1) for m, v in resumen.items()}
+
+    log(f"Chart6 'Producción eléctrica': {len(registros)} empresas en "
+        f"{len(resumen)} macrozonas.")
+    return dict(empresas=registros, resumen=resumen, distribucion=distribucion)
+
+
+```
+
+---
+
+## CAMBIO 5 — Ampliar `construir_dataset`
+
+**Buscar (todo el bloque):**
+```python
+def construir_dataset(xlsx_path):
+    import pandas as pd
+
+    log(f"Leyendo hoja '{SHEET_NAME}' (columnas A:H) de {os.path.basename(xlsx_path)}...")
+    df = pd.read_excel(xlsx_path, sheet_name=SHEET_NAME, header=0, usecols="A:H")
+    df.columns = ["inicio_fin", "puesta_marcha", "proyecto", "operador",
+                  "departamento", "producto", "etapa", "capex"]
+    df = df[df["proyecto"].notna()].reset_index(drop=True)
+    df = df.where(df.notna(), None)
+    log(f"Proyectos leídos: {len(df)}")
+
+    chart1 = construir_chart1(df)
+    chart2 = construir_chart2(df)
+    return chart1, chart2
+```
+**Reemplazar por:**
+```python
+def construir_dataset(xlsx_path):
+    import pandas as pd
+
+    log(f"Leyendo hoja '{SHEET_NAME}' (columnas A:H) de {os.path.basename(xlsx_path)}...")
+    df = pd.read_excel(xlsx_path, sheet_name=SHEET_NAME, header=0, usecols="A:H")
+    df.columns = ["inicio_fin", "puesta_marcha", "proyecto", "operador",
+                  "departamento", "producto", "etapa", "capex"]
+    df = df[df["proyecto"].notna()].reset_index(drop=True)
+    df = df.where(df.notna(), None)
+    log(f"Proyectos leídos: {len(df)}")
+
+    chart1 = construir_chart1(df)
+    chart2 = construir_chart2(df)
+
+    log(f"Leyendo hoja '{SHEET_RENOVABLES}' de {os.path.basename(xlsx_path)}...")
+    df_renov = pd.read_excel(xlsx_path, sheet_name=SHEET_RENOVABLES, header=0, usecols="A:E")
+    df_renov.columns = ["horizonte", "tecnologia", "proyecto", "monto", "empresa"]
+    df_renov = df_renov[df_renov["proyecto"].notna()].reset_index(drop=True)
+    df_renov = df_renov.where(df_renov.notna(), None)
+    chart5 = construir_chart5(df_renov)
+
+    log(f"Leyendo hoja '{SHEET_PRODELEC}' de {os.path.basename(xlsx_path)}...")
+    df_prod = pd.read_excel(xlsx_path, sheet_name=SHEET_PRODELEC, header=0, usecols="A:F")
+    df_prod.columns = ["empresa", "region", "macrozona", "hidro_pct", "termo_pct", "rer_pct"]
+    df_prod = df_prod[df_prod["empresa"].notna()].reset_index(drop=True)
+    df_prod = df_prod.where(df_prod.notna(), None)
+    chart6 = construir_chart6(df_prod)
+
+    return chart1, chart2, chart5, chart6
+```
+
+---
+
+## CAMBIO 6 — Firma de `build_html`
+
+**Buscar:** `def build_html(chart1, chart2, logo_uri):`
+**Reemplazar por:** `def build_html(chart1, chart2, chart5, chart6, logo_uri):`
+
+---
+
+## CAMBIO 7 — `payload` (agregar chart5/chart6)
+
+**Buscar:**
+```python
+    payload = {
+        "chart1": chart1,
+        "chart2": chart2,
+        "chart3": {"amenazas": AMENAZAS_DATA, "ticks": AMENAZAS_TICKS},
+        "chart4": {
+            "guia": GUIA_DPTOS, "conflicto": CONFLICTO_DPTOS,
+            "tabla": TABLA_EMPRESAS, "colores": EMPRESA_COLOR,
+            "coords": coords_usados,
+        },
+        "colors": {"target": COLOR_TARGET, "comps": COLOR_COMPS, "indiv": COLOR_INDIV},
+    }
+```
+**Reemplazar por:**
+```python
+    payload = {
+        "chart1": chart1,
+        "chart2": chart2,
+        "chart3": {"amenazas": AMENAZAS_DATA, "ticks": AMENAZAS_TICKS},
+        "chart4": {
+            "guia": GUIA_DPTOS, "conflicto": CONFLICTO_DPTOS,
+            "tabla": TABLA_EMPRESAS, "colores": EMPRESA_COLOR,
+            "coords": coords_usados,
+        },
+        "chart5": chart5,
+        "chart6": chart6,
+        "colors": {"target": COLOR_TARGET, "comps": COLOR_COMPS, "indiv": COLOR_INDIV,
+                   "tipo": TIPO_COLOR},
+    }
+```
+
+---
+
+## CAMBIO 8 — HTML: simplificar Chart 4 y agregar tarjetas Chart 5/6
+
+**Buscar (todo el bloque, incluida la línea `<div class="hint">`):**
+```html
+  <div class="card wide">
+    <h3 id="c4_title">Chart 4 — Conflictos sociales y minería</h3>
+    <div class="c4-flex">
+      <div class="c4-side">
+        <div class="c4-guia-title">Guía dptos.</div>
+        <div id="c4_guia" class="c4-guia"></div>
+        <table class="c4-tabla">
+          <thead><tr><th>Empresa</th><th>Dpto.</th><th>Ing.</th><th>%</th></tr></thead>
+          <tbody id="c4_tabla_body"></tbody>
+        </table>
+      </div>
+      <div id="c4_plot" class="plot" style="flex:1;height:420px;min-width:280px;"></div>
+    </div>
+  </div>
+</div>
+<div class="hint">Descarga cada gráfico como PNG con el ícono de cámara para pegarlo en tus diapositivas.</div>
+```
+**Reemplazar por:**
+```html
+  <div class="card wide">
+    <h3 id="c4_title">Chart 4 — Conflictos sociales y minería</h3>
+    <div id="c4_plot" class="plot" style="height:460px;"></div>
+  </div>
+
+  <div class="card">
+    <h3 id="c5_title">Chart 5 — Proyectos de energía renovable</h3>
+    <div id="c5_plot" class="plot" style="height:400px;"></div>
+  </div>
+
+  <div class="card">
+    <h3 id="c6_title">Chart 6 — Producción eléctrica por macrozona</h3>
+    <div id="c6_plot" class="plot" style="height:420px;"></div>
+  </div>
+</div>
+<div class="hint">Descarga cada gráfico como PNG con el ícono de cámara para pegarlo en tus diapositivas.</div>
+```
+
+---
+
+## CAMBIO 9 — JS: reescribir `renderChart1`
+
+**Buscar:** `function renderChart1(){`
+Selecciona toda la función hasta su `}` de cierre (justo antes de `// ---- CHART 2`), y reemplázala por:
+
+```javascript
+function renderChart1(){
+  const c1 = PAYLOAD.chart1;
+  const cols = c1.columnas;
+  const pts = c1.puntos;
+
+  const BANDA_A = "#EAF0F8", BANDA_B = "#F5F3EC";
+  const shapes = [];
+  cols.forEach((c,i)=>{
+    shapes.push({ type:"rect", xref:"x", yref:"paper",
+      x0:i-0.5, x1:i+0.5, y0:0, y1:1,
+      fillcolor: c==="Por Definir" ? "#eef1f5" : (i%2===0 ? BANDA_A : BANDA_B),
+      line:{width:0}, layer:"below" });
+    if(i>0){
+      shapes.push({ type:"line", xref:"x", yref:"paper",
+        x0:i-0.5, x1:i-0.5, y0:0, y1:1,
+        line:{color:"#c7cfdb", width:1, dash:"dot"}, layer:"below" });
+    }
+  });
+
+  const grupos = {};
+  pts.forEach(p=>{
+    const key = p.categoria+"|"+p.etapa_grupo;
+    (grupos[key]=grupos[key]||[]).push(p);
+  });
+  const traces = Object.keys(grupos).map(key=>{
+    const arr = grupos[key];
+    const [categoria, etapa] = key.split("|");
+    return {
+      type:"scatter", mode:"markers+text",
+      x: arr.map(p=>p.x), y: arr.map(p=>p.y),
+      name: categoria==="Por Definir" ? "Por Definir" : `${categoria} · ${etapa}`,
+      text: arr.map(p=> p.agregado ? p.proyecto : `${shortNameProyecto(p.proyecto)}<br>US$ ${fmtMM(p.capex)} MM`),
+      textposition:"middle center",
+      textfont:{ size: arr.map(p=>Math.max(7, Math.min(10.5, p.size/7))), color:"#ffffff" },
+      marker:{ size: arr.map(p=>p.size), color: arr[0].color,
+               line:{color:"#ffffff", width:1.2}, opacity:0.94 },
+      hovertemplate: arr.map(p=>
+        p.agregado
+          ? `<b>${p.proyecto}</b><br>CAPEX total: US$ ${fmtMM(p.capex)} MM<extra></extra>`
+          : `<b>${p.proyecto}</b><br>${p.operador}<br>${p.departamento} · ${p.producto}<br>${p.etapa}<br>CAPEX: US$ ${fmtMM(p.capex)} MM<extra></extra>`
+      )
+    };
+  });
+
+  const layout = {
+    margin:{l:20,r:20,t:6,b:44}, plot_bgcolor:"#fff", paper_bgcolor:"#fff",
+    font:{ family:"Segoe UI, Arial", size:11, color:"#333" },
+    showlegend:true,
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.18, font:{size:9.5} },
+    shapes,
+    xaxis:{ tickvals: cols.map((c,i)=>i), ticktext: cols,
+            range:[-0.5, Math.max(cols.length-0.5, 0.5)], showgrid:false,
+            zeroline:false, linecolor:"#7f8fa6", linewidth:2,
+            tickfont:{size:12,color:"#1F3864"} },
+    yaxis:{ visible:false, range:[-3.2,3.2] }
+  };
+  Plotly.newPlot("c1_plot", traces, layout, CFG);
+}
+```
+
+---
+
+## CAMBIO 10 — JS: reescribir `renderChart2`
+
+**Buscar:** `function renderChart2(){`
+Selecciona toda la función hasta su `}` de cierre (justo antes de `// ---- CHART 3`), y reemplázala por:
+
+```javascript
+function renderChart2(){
+  const regs = PAYLOAD.chart2;
+  const grupos = {};
+  regs.forEach(r=>{
+    const key = r.categoria+"|"+r.etapa_grupo;
+    (grupos[key]=grupos[key]||[]).push(r);
+  });
+  const traces = Object.keys(grupos).map(key=>{
+    const arr = grupos[key];
+    const [categoria, etapa] = key.split("|");
+    const sizes = arr.map(r=> 8 + 26*Math.sqrt(Math.max(r.capex,10)/2900));
+    return {
+      type:"scattergeo", mode:"markers+text",
+      lat: arr.map(r=>r.lat), lon: arr.map(r=>r.lon),
+      name: `${categoria} · ${etapa}`,
+      text: arr.map(r=>r.etiqueta),
+      textposition:"middle center",
+      textfont:{ color:"#ffffff", size: sizes.map(s=>Math.max(7, Math.min(10.5, s/2.2))) },
+      marker:{ size: sizes,
+               color: arr[0].color, line:{color:"#fff", width:1}, opacity:0.9 },
+      hovertext: arr.map(r=>`<b>${r.etiqueta}. ${r.proyecto}</b><br>${r.operador}<br>${r.departamento} · ${r.producto}<br>${r.etapa}<br>CAPEX: US$ ${fmtMM(r.capex)} MM`),
+      hovertemplate:"%{hovertext}<extra></extra>"
+    };
+  });
+  const layout = {
+    margin:{l:0,r:0,t:0,b:0}, font:{family:"Segoe UI, Arial", size:11},
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.06, font:{size:9.5} },
+    geo: geoLayout()
+  };
+  Plotly.newPlot("c2_plot", traces, layout, CFG);
+}
+```
+
+---
+
+## CAMBIO 11 — JS: barra de color "+/- Conflictos" en Chart 4
+
+**Buscar:**
+```javascript
+    marker:{ size:34, color: conf.map(d=>d.indice), colorscale:"Blues",
+             cmin:0, cmax:10, showscale:true,
+             colorbar:{ title:{text:"+ Conflictos", font:{size:9}}, thickness:12, len:0.65, x:1.02 },
+             line:{color:"#7f8fa6", width:1}, opacity:0.55 },
+```
+**Reemplazar por:**
+```javascript
+    marker:{ size:34, color: conf.map(d=>d.indice), colorscale:"Blues",
+             cmin:0, cmax:10, showscale:true,
+             colorbar:{ thickness:12, len:0.65, x:1.02,
+                        tickvals:[0.5,9.5], ticktext:["- Conflictos","+ Conflictos"],
+                        tickfont:{size:9,color:"#1F3864"} },
+             line:{color:"#7f8fa6", width:1}, opacity:0.55 },
+```
+
+---
+
+## CAMBIO 12 — JS: quitar panel "Guía dptos." + tabla del Chart 4
+
+**Buscar (todo el bloque, incluida la última línea `}`):**
+```javascript
+  document.getElementById("c4_guia").textContent =
+    guia.map(g=>`${g.n}. ${g.dpto}`).join("   ·   ");
+
+  const tbody = document.getElementById("c4_tabla_body");
+  let lastEmp = null;
+  tabla.forEach(t=>{
+    const tr = document.createElement("tr");
+    const showEmp = t.empresa !== lastEmp;
+    lastEmp = t.empresa;
+    tr.innerHTML = `<td style="${showEmp?'font-weight:700;color:#1F3864;':''}">${showEmp?t.empresa:""}</td>`
+      + `<td>${t.dpto}</td><td style="text-align:right;">${fmtMM(t.ing)}</td>`
+      + `<td style="text-align:right;">${t.pct}%</td>`;
+    tbody.appendChild(tr);
+  });
+}
+```
+**Reemplazar por (una sola línea, el cierre de la función):**
+```javascript
+}
+```
+
+---
+
+## CAMBIO 13 — JS: nuevas funciones `renderChart5` / `renderChart6`
+
+**Buscar:**
+```
+// ---------------------------------------------------------------- EXPORT
+```
+**Pega esto justo ANTES** de esa línea:
+
+```javascript
+// ---------------------------------------------------------------- CHART 5
+function renderChart5(){
+  const regs = PAYLOAD.chart5;
+  const grupos = {};
+  regs.forEach(r=>{ (grupos[r.tecnologia]=grupos[r.tecnologia]||[]).push(r); });
+  const traces = Object.keys(grupos).map(tec=>{
+    const arr = grupos[tec];
+    return {
+      type:"scattergeo", mode:"markers", name: tec,
+      lat: arr.map(r=>r.lat), lon: arr.map(r=>r.lon),
+      marker:{ size: arr.map(r=> 10 + 30*Math.sqrt(Math.max(r.monto,10)/1500)),
+               color: arr[0].color, line:{color:"#fff", width:1}, opacity:0.88 },
+      hovertext: arr.map(r=>`<b>${r.proyecto}</b><br>${r.empresa}<br>${r.tecnologia} · ${r.horizonte}<br>Monto: US$ ${fmtMM(r.monto)} MM`),
+      hovertemplate:"%{hovertext}<extra></extra>"
+    };
+  });
+  const layout = {
+    margin:{l:0,r:0,t:0,b:0}, font:{family:"Segoe UI, Arial", size:11},
+    legend:{ orientation:"h", x:0.5, xanchor:"center", y:-0.06, font:{size:9.5} },
+    geo: geoLayout()
+  };
+  Plotly.newPlot("c5_plot", traces, layout, CFG);
+}
+
+// ---------------------------------------------------------------- CHART 6
+function renderChart6(){
+  const c6 = PAYLOAD.chart6;
+  const TIPOC = PAYLOAD.colors.tipo;
+  const macrozonas = ["Norte","Centro","Sur"];
+
+  const distLabels = macrozonas.filter(m=>c6.distribucion[m]!==undefined);
+  const distPie = {
+    type:"pie", hole:0.55, sort:false, showlegend:false,
+    domain:{x:[0,0.34], y:[0.66,1]},
+    labels: distLabels, values: distLabels.map(m=>c6.distribucion[m]),
+    marker:{colors:["#1F3864","#77933C","#8FAADC"]},
+    textinfo:"label+percent", textfont:{size:9,color:"#ffffff"},
+    hoverinfo:"label+percent"
+  };
+
+  const xBand = {Norte:[0,0.10], Centro:[0.12,0.22], Sur:[0.24,0.34]};
+  const zonaPies = macrozonas.filter(m=>c6.resumen[m]).map(m=>{
+    const r = c6.resumen[m];
+    return {
+      type:"pie", hole:0.45, sort:false, showlegend:false,
+      domain:{x:xBand[m], y:[0.30,0.60]},
+      labels:["Hidro","Termo","RER"], values:[r.hidro, r.termo, r.rer],
+      marker:{colors:[TIPOC.Hidro, TIPOC.Termo, TIPOC.RER]},
+      textinfo:"none", hoverinfo:"label+percent", title: m
+    };
+  });
+
+  const grupos = {};
+  c6.empresas.forEach(r=>{ (grupos[r.dominante]=grupos[r.dominante]||[]).push(r); });
+  const mapaTraces = Object.keys(grupos).map(tipo=>{
+    const arr = grupos[tipo];
+    return {
+      type:"scattergeo", mode:"markers+text", name: tipo,
+      lat: arr.map(r=>r.lat), lon: arr.map(r=>r.lon),
+      text: arr.map(r=>r.empresa), textposition:"top center",
+      textfont:{size:9, color:"#1F3864"},
+      marker:{ size:24, color: arr[0].color, line:{color:"#fff", width:1}, opacity:0.9 },
+      hovertext: arr.map(r=>`<b>${r.empresa}</b><br>${r.region} · ${r.macrozona}<br>Hidro ${r.hidro}% · Termo ${r.termo}% · RER ${r.rer}%`),
+      hovertemplate:"%{hovertext}<extra></extra>"
+    };
+  });
+
+  const layout = {
+    margin:{l:6,r:6,t:6,b:6}, font:{family:"Segoe UI, Arial", size:10},
+    showlegend:true,
+    legend:{ orientation:"h", x:0.68, xanchor:"center", y:-0.05, font:{size:9} },
+    geo:{ ...geoLayout(), domain:{x:[0.38,1], y:[0,1]} }
+  };
+  Plotly.newPlot("c6_plot", [distPie, ...zonaPies, ...mapaTraces], layout, CFG);
+}
+
+// ---------------------------------------------------------------- EXPORT
+```
+
+---
+
+## CAMBIO 14 — JS: exportar hojas Chart 5/6 en el botón "Descargar datos"
+
+**Buscar:**
+```javascript
+  XLSX.writeFile(wb, "Cartera_Proyectos_export.xlsx");
+```
+**Reemplazar por:**
+```javascript
+  const aoa5 = [["Proyecto","Tecnología","Horizonte","Empresa","Departamento","Monto (US$ mm)"]];
+  PAYLOAD.chart5.forEach(r=>aoa5.push([
+    r.proyecto, r.tecnologia, r.horizonte, r.empresa, r.departamento, r.monto]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa5), sanitizeSheetName("Chart5 Renovables"));
+
+  const aoa6 = [["Empresa","Región","Macrozona","Hidro %","Termo %","RER %","Dominante"]];
+  PAYLOAD.chart6.empresas.forEach(r=>aoa6.push([
+    r.empresa, r.region, r.macrozona, r.hidro, r.termo, r.rer, r.dominante]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa6), sanitizeSheetName("Chart6 ProdElectrica"));
+
+  XLSX.writeFile(wb, "Cartera_Proyectos_export.xlsx");
+```
+
+---
+
+## CAMBIO 15 — JS: llamadas finales de render
+
+**Buscar:**
+```javascript
+renderChart1();
+renderChart2();
+renderChart3();
+renderChart4();
+```
+**Reemplazar por:**
+```javascript
+renderChart1();
+renderChart2();
+renderChart3();
+renderChart4();
+renderChart5();
+renderChart6();
+```
+
+---
+
+## CAMBIO 16 — Python: `main()`
+
+**Buscar:**
+```python
+        chart1, chart2 = construir_dataset(xlsx_path)
+        logo_uri = b64_logo(logo_path) if os.path.isfile(logo_path) else ""
+        html = build_html(chart1, chart2, logo_uri)
+```
+**Reemplazar por:**
+```python
+        chart1, chart2, chart5, chart6 = construir_dataset(xlsx_path)
+        logo_uri = b64_logo(logo_path) if os.path.isfile(logo_path) else ""
+        html = build_html(chart1, chart2, chart5, chart6, logo_uri)
+```
