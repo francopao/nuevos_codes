@@ -1,0 +1,45 @@
+Hice la auditoría cruzando `BD` y las hojas contra los datos crudos embebidos en `Dashboard_Huella.html` (no adiviné nada, extraje los números reales del HTML y los comparé con pandas). Resultado: la mayoría de lo que revisé **sí cuadra exacto**, pero encontré 1 inconsistencia real y aclaré el caso que mencionas.
+
+**El caso "9.1 vs 9.0" — no es un error.** Busqué "BlackRock - iShares Korea" en tu hoja: para AFP=Integra, corte 202606, Intensidad = **8.9528** → redondea a **9.0**, exactamente lo que muestra el dashboard (confirmé el mismo número, 8.9528, en el JSON embebido del HTML). Lo que probablemente viste es la fila de **Profuturo** para ese mismo instrumento, que sí es 9.112333 → 9.1 — están mezcladas sin ordenar por AFP en la tabla cruda (A:L), así que es fácil leer la fila de otra AFP por error. No es un bug de cálculo.
+
+**Encontré una inconsistencia real: hoja "Mayores contribuyentes" tiene dos fuentes de verdad.** El lado izquierdo (A:F) todavía es el volcado viejo de HISTORICO — con nombres SIN limpiar. Hay 6 emisores que traen un `*` en el nombre original que **no tiene nada que ver con Perdieron Huella** (verifiqué: los 6 tienen `PERDIO_HUELLA = False`): `Volcan*`, `Buenaventura*`, `Calidda*`, `COFIDE**`, `Credicorp*`, `Unacem*`. Como pediste originalmente, tu regla es clara — solo Perdieron Huella se queda con `*` — así que `BD` los limpia correctamente (`Buenaventura`, sin asterisco). Pero como esa tabla vieja de la izquierda nunca se migró, sigue mostrando `Buenaventura*`. Incluso comparé el número (3.142275 en ambos lados) — coincide exacto, es puramente un problema de **etiqueta**, no de cálculo, pero exactamente el tipo de cosa que se ve "rara" al auditar. La tabla vieja ya no la usa ni el gráfico ni nada — es 100% redundante ahora.
+
+**Verifiqué también:** Sector (7 categorías incl. Alts) e Intensidad Soberanos — ambos calzan exacto contra el dashboard, monto a monto. De hecho `BD` mejora un detalle: el dashboard trae "Gobierno de Mexico" y "Gobierno de México" como dos entradas separadas en su data cruda (inconsistencia de tilde preexistente en el pipeline); `BD` las consolida en un solo "México" — la suma da igual (13,193.15), solo se ve distinto si comparas fila por fila el detalle crudo, no el total.
+
+**Fix — eliminar la tabla vieja redundante de Mayores contribuyentes:**
+
+Ubica (Ctrl+F):
+```python
+    hojas = {
+        NOMBRE_HOJA_ASSET_PERF: _tabla_asset_perf(hist, rol_map, corte_actual, bench_ffmm),
+        NOMBRE_HOJA_COMP_BENCH: _tabla_comp_bench_afp(hist, rol_map),
+        NOMBRE_HOJA_CONTRIB_BUTD: _tabla_contrib_butd(hist, rol_map),
+        NOMBRE_HOJA_AUDITORIA: _tabla_auditoria(corte_actual, corte_comparacion),
+    }
+```
+Reemplaza con:
+```python
+    hojas = {
+        NOMBRE_HOJA_ASSET_PERF: _tabla_asset_perf(hist, rol_map, corte_actual, bench_ffmm),
+        NOMBRE_HOJA_COMP_BENCH: _tabla_comp_bench_afp(hist, rol_map),
+        NOMBRE_HOJA_AUDITORIA: _tabla_auditoria(corte_actual, corte_comparacion),
+    }
+```
+
+Ubica (Ctrl+F):
+```python
+        for nombre in (NOMBRE_HOJA_SOBERANOS_HUELLA, NOMBRE_HOJA_SOBERANOS_INT,
+                       NOMBRE_HOJA_SECTOR_HUELLA, NOMBRE_HOJA_SECTOR_INT):
+            xw.book.create_sheet(nombre)
+```
+Reemplaza con:
+```python
+        for nombre in (NOMBRE_HOJA_SOBERANOS_HUELLA, NOMBRE_HOJA_SOBERANOS_INT,
+                       NOMBRE_HOJA_SECTOR_HUELLA, NOMBRE_HOJA_SECTOR_INT,
+                       NOMBRE_HOJA_CONTRIB_BUTD):
+            xw.book.create_sheet(nombre)
+```
+
+*(`_agregar_chart_mayores` ya escribe todo lo que necesita esa hoja — feed table + chart desde `BD` — así que no hace falta tocar esa función.)*
+
+**Nota aparte, no requiere código:** cuando abras `Datos_Graficos_Huella.xlsx` en Excel, va a recalcular y guardar los valores de las fórmulas (SUMIFS/AVERAGEIFS) por primera vez — hoy el archivo que subiste nunca se abrió en Excel, así que todas las celdas con fórmula (incluida `Huella_Verif`/`Intensidad_Verif` en BD) están en blanco al leerlas por fuera de Excel. Es esperable, no es un error.
