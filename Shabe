@@ -1,0 +1,72 @@
+Encontré la causa raíz — y es un bug real, no una percepción. Gracias por marcarlo, esto merece atención seria.
+
+**Diagnóstico:** `_to_string()` es la función que tu pipeline usa en 49 lugares distintos (SBS, ISIN, códigos de categoría, lookups de Parametria/CO2H/Sector/Proxies...) para normalizar valores antes de usarlos como texto o como llave de diccionario. El problema:
+
+```python
+def _to_string(v):
+    if v is None:
+        return None
+    s = str(v).strip()   # <-- si v es NaN (float), str(nan) = "nan" (texto literal)
+    ...
+```
+
+`v is None` NO detecta un `NaN` de pandas/numpy (son cosas distintas en Python). Entonces si `CODIGO_SBS` (o cualquier otro campo usado como llave) llega como `NaN` en alguna fila — algo que puede pasar aunque el `Nombre` de esa fila sí sea válido en el Excel original —, `_to_string(nan)` devuelve la **cadena de texto `"nan"`**, no `None`. Esa cadena luego se usa como llave de lookup, y como varias filas distintas pueden tener `NaN` en el mismo campo, **todas terminan colisionando en la misma llave `"nan"`**, arrastrando (o perdiendo) el `Nombre`/`Emisor` correcto aunque el dato original sí lo tenía. Esto explica exactamente lo que describes: nombres válidos en `BD1_S_Huella` que se corrompen en algún punto del pipeline.
+
+Como es una función central (no algo mío del Excel), el arreglo real va ahí — y además refuerzo la limpieza de nombres en el Excel como segunda barrera, por si algún `NaN` se cuela por otro lado.
+
+**BLOQUE 1 — Arreglar `_to_string` (raíz del problema, afecta todo el pipeline)**
+
+Ubica (Ctrl+F):
+```python
+def _to_string(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+```
+Reemplaza con:
+```python
+def _to_string(v):
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+```
+
+**BLOQUE 2 — Segunda barrera en `_limpiar_emisor` (Módulo 15, por si acaso)**
+
+Ubica (Ctrl+F):
+```python
+def _limpiar_emisor(nombre) -> str:
+    """Quita asteriscos sobrantes (en cualquier posición) y espacios
+    repetidos. El asterisco final se repone después solo para
+    Perdieron Huella."""
+    s = str(nombre or "").strip()
+    s = re.sub(r"\*+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+```
+Reemplaza con:
+```python
+def _limpiar_emisor(nombre) -> str:
+    """Quita asteriscos sobrantes (en cualquier posición) y espacios
+    repetidos. El asterisco final se repone después solo para
+    Perdieron Huella. NaN/None -> cadena vacía (nunca el texto "nan")."""
+    if nombre is None or (isinstance(nombre, float) and pd.isna(nombre)):
+        return ""
+    s = str(nombre).strip()
+    s = re.sub(r"\*+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+```
+
+Corre el pipeline de nuevo y fíjate si el "nan" desapareció. Si todavía queda algún caso, pásame 1-2 SBS o nombres de emisor específicos afectados (los que veas en `BD`) — con eso puedo rastrear exactamente en qué paso del Módulo 6/10 se pierde el nombre para ese caso puntual y confirmamos que quedó resuelto del todo, no solo camuflado.
