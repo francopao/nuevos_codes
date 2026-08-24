@@ -1,0 +1,34 @@
+Perfecto. G&P ya se carga en el pipeline (`GyPDetalladoLoader` toma columna D como `NOMBRE`) y ya llega a `ValorizacionBuilder` vía `gyp_lookup`. El arreglo es puntual: el momento en que se asigna el `Nombre` (línea `df[V_G] = sbs.map(...)`), agregar la cascada de fallbacks.
+
+**BLOQUE ÚNICO — Cascada de fallback para Nombre**
+
+Ubica (Ctrl+F):
+```python
+        sbs = df[self.sbs_col].map(_to_string)
+        df[V_G]  = sbs.map(lambda s: self._param(s, "NOMBRE"))
+```
+Reemplaza con:
+```python
+        sbs = df[self.sbs_col].map(_to_string)
+
+        def _nombre_con_fallback(s, emisor_cod):
+            # 1) Nombre desde BD1_S_Huella (vía parametria_lookup)
+            v = self._param(s, "NOMBRE")
+            if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v).strip() != "":
+                return v
+            # 2) Fallback: Nombre desde G&P Detallado (columna D del G&P_MLab)
+            g = (self.gyp_lookup.get(s) or {}).get("NOMBRE") if self.gyp_lookup else None
+            if g is not None and not (isinstance(g, float) and pd.isna(g)) and str(g).strip() != "":
+                return g
+            # 3) Último recurso: 'Cliente <codEmisor>' — identificador temporal
+            # que al menos distingue emisores entre sí mientras se resuelve la fuente.
+            cod = _to_string(emisor_cod)
+            if cod:
+                return f"Cliente {cod}"
+            return None
+
+        cod_emisor = df["EMISOR"] if "EMISOR" in df.columns else pd.Series([None] * len(df))
+        df[V_G] = [_nombre_con_fallback(s, e) for s, e in zip(sbs, cod_emisor)]
+```
+
+Corre y revisa: los ~1,152 casos deberían mostrar el nombre real (desde G&P, columna D) cuando exista ahí, y solo los que sigan sin nombre en ninguna de las 2 fuentes quedan como `Cliente <codigo>`. Avísame cuántos quedan como "Cliente X" — si son pocos, es cuestión de completar G&P; si son muchos, quiere decir que ni G&P los cubre y hay que buscar la fuente en otro lado.
