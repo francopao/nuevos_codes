@@ -1,0 +1,215 @@
+Confirmo el anclaje. También confirmo: **`BD` ya tiene la protección anti-duplicados** (purga por `Corte` antes de fusionar) — le doy la misma a `G&P` desde el diseño, sin tocar el código de `BD`.
+
+**BLOQUE 1 — Preservar `Weight_Original_BD1S` antes de que se sobreescriba**Ubica (Ctrl+F):
+```python
+    _w = pd.to_numeric(df["Weight"], errors="coerce").fillna(0.0)
+    _aum = pd.to_numeric(df["AUM"], errors="coerce").fillna(0.0)
+    df["VALOR_VECTOR_LOCAL"] = _w * _aum
+    # --- MEJORA A: normalizar Weight al 100% por fondo (dentro de esta AFP) ---
+```
+Reemplaza con:
+```python
+    _w = pd.to_numeric(df["Weight"], errors="coerce").fillna(0.0)
+    _aum = pd.to_numeric(df["AUM"], errors="coerce").fillna(0.0)
+    df["VALOR_VECTOR_LOCAL"] = _w * _aum
+    df["Weight_Original_BD1S"] = _w
+    # --- MEJORA A: normalizar Weight al 100% por fondo (dentro de esta AFP) ---
+```
+
+**BLOQUE 2 — Nuevo método `gyp_pesos_bu` en `PresentacionBuilder`**
+
+Ubica (Ctrl+F):
+```python
+        out["Fondo"] = "F" + out["Portafolio"].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        return out
+
+    # --------------------------------------------------------------------------
+    # Charts 49, 48 y 39 — portafolio vs benchmarks.
+```
+Reemplaza con:
+```python
+        out["Fondo"] = "F" + out["Portafolio"].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        return out
+
+    def gyp_pesos_bu(self) -> pd.DataFrame:
+        """Fila a fila (SBS x Fondo), solo Estrategia=BU: los inputs crudos
+        (Weight_Original_BD1S, Patrimonio=AUM del fondo, TC_USD) que
+        sustentan la renormalización de Weight y el cálculo de Inv MM$.
+        Extensible a otras estrategias más adelante."""
+        d = self.df[self.df[COL["estrategia"]].eq("BU")].copy()
+        if d.empty:
+            return pd.DataFrame()
+        requeridas = [COL["sbs"], "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+        if any(c not in d.columns for c in requeridas):
+            return pd.DataFrame()
+        cols = [COL["sbs"], COL["isin"], COL["nombre"], COL["portafolio"],
+                "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+        cols = [c for c in cols if c in d.columns]
+        out = d[cols].copy()
+        out = out.rename(columns={COL["sbs"]: "SBS", COL["isin"]: "ISIN",
+                                   COL["nombre"]: "Emisor", COL["portafolio"]: "Portafolio"})
+        out["Fondo"] = "F" + out["Portafolio"].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        return out
+
+    # --------------------------------------------------------------------------
+    # Charts 49, 48 y 39 — portafolio vs benchmarks.
+```
+
+**BLOQUE 3 — Recolectar en `run_pipeline_bd1s`**Ubica (Ctrl+F):
+```python
+            _bd_afp = pres.construir_bd_instrumentos()
+            if not _bd_afp.empty:
+                _bd_afp = _bd_afp.copy()
+                _bd_afp.insert(0, "AFP", afp)
+                _bd_afp.insert(0, "Corte", cfg.semestre)
+                _bd_partes.append(_bd_afp)
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+Reemplaza con:
+```python
+            _bd_afp = pres.construir_bd_instrumentos()
+            if not _bd_afp.empty:
+                _bd_afp = _bd_afp.copy()
+                _bd_afp.insert(0, "AFP", afp)
+                _bd_afp.insert(0, "Corte", cfg.semestre)
+                _bd_partes.append(_bd_afp)
+
+            _gyp_afp = pres.gyp_pesos_bu()
+            if not _gyp_afp.empty:
+                _gyp_afp = _gyp_afp.copy()
+                _gyp_afp.insert(0, "AFP", afp)
+                _gyp_afp.insert(0, "Corte", cfg.semestre)
+                _gyp_partes.append(_gyp_afp)
+
+            # --- Exportar al histórico con sufijo AFP ---
+```
+
+Ubica (Ctrl+F):
+```python
+    _bd_partes: List[pd.DataFrame] = []
+```
+Reemplaza con:
+```python
+    _bd_partes: List[pd.DataFrame] = []
+    _gyp_partes: List[pd.DataFrame] = []
+```
+
+Ubica (Ctrl+F):
+```python
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, bd_instrumentos=bd_instrumentos,
+                              universo_comparables=peer_intensidad_detalle)
+```
+Reemplaza con:
+```python
+    gyp_bu = pd.concat(_gyp_partes, ignore_index=True) if _gyp_partes else pd.DataFrame()
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, bd_instrumentos=bd_instrumentos,
+                              universo_comparables=peer_intensidad_detalle, gyp_bu=gyp_bu)
+```
+
+**BLOQUE 4 — Nueva función `_escribir_gyp` (Módulo 15) + firma actualizada**Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None,
+                              universo_comparables: pd.DataFrame = None) -> str:
+```
+Reemplaza con:
+```python
+NOMBRE_HOJA_GYP = "G&P"
+
+
+def _cargar_hoja_existente(ruta_salida, nombre_hoja: str) -> pd.DataFrame:
+    ruta = FsPath(str(ruta_salida))
+    if not ruta.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_excel(str(ruta), sheet_name=nombre_hoja, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fusionar_con_existente(nuevo: pd.DataFrame, ruta_salida, nombre_hoja: str) -> pd.DataFrame:
+    """Mismo patrón anti-duplicados que BD: fusiona con lo ya guardado en
+    el archivo de salida, purgando los cortes que se están reprocesando —
+    correr el pipeline 2 veces para el mismo corte NO duplica filas."""
+    nuevo = nuevo.copy() if nuevo is not None else pd.DataFrame()
+    if not nuevo.empty and "Corte" in nuevo.columns:
+        nuevo["Corte"] = nuevo["Corte"].astype(str)
+    previo = _cargar_hoja_existente(ruta_salida, nombre_hoja)
+    if not previo.empty and "Corte" in previo.columns and not nuevo.empty:
+        cortes_nuevos = set(nuevo["Corte"].unique())
+        previo = previo[~previo["Corte"].astype(str).isin(cortes_nuevos)]
+    return pd.concat([previo, nuevo], ignore_index=True) if not previo.empty else nuevo
+
+
+def _escribir_gyp(xw, gyp_nuevo: pd.DataFrame, ruta_salida) -> None:
+    gyp = _fusionar_con_existente(gyp_nuevo, ruta_salida, NOMBRE_HOJA_GYP)
+    if gyp.empty:
+        pd.DataFrame({"Aviso": ["Sin datos"]}).to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+        return
+    cols = ["Corte", "AFP", "Fondo", "Portafolio", "SBS", "ISIN", "Emisor",
+            "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+    for c in cols:
+        if c not in gyp.columns:
+            gyp[c] = ""
+    gyp = gyp[cols].reset_index(drop=True)
+    gyp = gyp.rename(columns={"Weight_Original_BD1S": "Weight_Original",
+                               "Patrimonio": "AUM_Fondo"})
+    n = len(gyp)
+    filas = list(range(2, n + 2))
+    gyp["Suma_Weight_Fondo"] = [
+        f"=SUMIFS($H$2:$H${n+1},$A$2:$A${n+1},$A{r},$B$2:$B${n+1},$B{r},$C$2:$C${n+1},$C{r})"
+        for r in filas]
+    gyp["Weight_Renormalizado"] = [f"=IF(K{r}=0,0,H{r}/K{r})" for r in filas]
+    gyp["VVL_PEN"] = [f"=L{r}*I{r}" for r in filas]
+    gyp["Inv_MM_USD"] = [f'=IF(J{r}=0,"",M{r}/J{r}/1000000)' for r in filas]
+    gyp["Weight_Verif"] = [f"=IF(I{r}=0,0,M{r}/I{r})" for r in filas]
+    gyp.to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+
+    ws = xw.sheets[NOMBRE_HOJA_GYP]
+    combos = gyp[["Corte", "AFP", "Fondo"]].drop_duplicates().reset_index(drop=True)
+    col_r = 19
+    ws.cell(row=1, column=col_r, value="Corte")
+    ws.cell(row=1, column=col_r + 1, value="AFP")
+    ws.cell(row=1, column=col_r + 2, value="Fondo")
+    ws.cell(row=1, column=col_r + 3, value="Suma_Weight_Original")
+    ws.cell(row=1, column=col_r + 4, value="Suma_Weight_Renormalizado")
+    for k, row in combos.iterrows():
+        fr = k + 2
+        corte_esc = str(row["Corte"]).replace('"', '""')
+        afp_esc = str(row["AFP"]).replace('"', '""')
+        fondo_esc = str(row["Fondo"]).replace('"', '""')
+        ws.cell(row=fr, column=col_r, value=row["Corte"])
+        ws.cell(row=fr, column=col_r + 1, value=row["AFP"])
+        ws.cell(row=fr, column=col_r + 2, value=row["Fondo"])
+        f1 = (f'=SUMIFS($H$2:$H${n+1},$A$2:$A${n+1},"{corte_esc}",'
+              f'$B$2:$B${n+1},"{afp_esc}",$C$2:$C${n+1},"{fondo_esc}")')
+        f2 = (f'=SUMIFS($L$2:$L${n+1},$A$2:$A${n+1},"{corte_esc}",'
+              f'$B$2:$B${n+1},"{afp_esc}",$C$2:$C${n+1},"{fondo_esc}")')
+        c1 = ws.cell(row=fr, column=col_r + 3, value=f1)
+        c2 = ws.cell(row=fr, column=col_r + 4, value=f2)
+        c1.number_format = "0.00%"
+        c2.number_format = "0.00%"
+
+
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None,
+                              universo_comparables: pd.DataFrame = None,
+                              gyp_bu: pd.DataFrame = None) -> str:
+```
+
+**BLOQUE 5 — Llamar `_escribir_gyp` dentro de `construir_excel_graficos`**
+
+Ubica (Ctrl+F) la línea donde se escribe `Comparables_Universo` (`nombre_hoja_comp, _fmu, fila_max_bench = _escribir_comparables_universo(...)`) y agrega justo debajo:
+```python
+        nombre_hoja_comp, _fmu, fila_max_bench = _escribir_comparables_universo(
+            xw, universo_comparables)
+```
+Reemplaza con:
+```python
+        nombre_hoja_comp, _fmu, fila_max_bench = _escribir_comparables_universo(
+            xw, universo_comparables)
+        _escribir_gyp(xw, gyp_bu, ruta_salida)
+```
+
+Corre el pipeline. La hoja **"G&P"** te va a mostrar, fila por instrumento×Fondo (solo BU por ahora): `Weight_Original` (crudo) → `Suma_Weight_Fondo` (cuánto sumaba antes, normalmente ≠100%) → `Weight_Renormalizado` (fórmula, ya en 100%) → `VVL_PEN` → `Inv_MM_USD` → `Weight_Verif` (debe calzar con `Weight_Renormalizado`), más una tabla resumen a la derecha con el antes/después por Fondo. Corre dos veces para el mismo corte y confirma que no se duplica.
