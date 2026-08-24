@@ -1,0 +1,106 @@
+Dado el tamaño (~17-18k filas totales, y cada `SUMIFS` ahora recorre ese universo completo), Excel puede tardar unos segundos más en recalcular al abrir — es esperable, no un bug.
+
+**BLOQUE 1 — `gyp_pesos_bu` → `gyp_pesos_universo` (sin filtro de Estrategia)**
+
+Ubica (Ctrl+F) toda la función actual `gyp_pesos_bu` (desde su `def` hasta el `return out` final) y reemplázala por:
+```python
+    def gyp_pesos_universo(self) -> pd.DataFrame:
+        """Fila a fila (SBS x Fondo), TODO el universo (BU+TD+SOB+ALT+
+        Proxies+ETF): los inputs crudos (Weight_Original_BD1S, Patrimonio=
+        AUM del fondo, TC_USD) que sustentan la renormalización de Weight
+        y el cálculo de Inv MM$. Con el universo completo, Suma_Weight_
+        Fondo se calcula con SUMIFS en Excel — ya no hace falta pegar el
+        valor desde Python."""
+        requeridas = [COL["sbs"], "Weight_Original_BD1S", "Patrimonio", "TC_USD",
+                       COL["portafolio"]]
+        if any(c not in self.df.columns for c in requeridas):
+            return pd.DataFrame()
+        d = self.df.copy()
+        cols = [COL["sbs"], COL["isin"], COL["nombre"], COL["portafolio"],
+                COL["estrategia"], "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+        cols = [c for c in cols if c in d.columns]
+        out = d[cols].copy()
+        out = out.rename(columns={COL["sbs"]: "SBS", COL["isin"]: "ISIN",
+                                   COL["nombre"]: "Emisor", COL["portafolio"]: "Portafolio",
+                                   COL["estrategia"]: "Estrategia"})
+        out["Fondo"] = "F" + out["Portafolio"].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        return out
+```
+
+**BLOQUE 2 — Actualizar la llamada en `run_pipeline_bd1s`**
+
+Ubica (Ctrl+F):
+```python
+            _gyp_afp = pres.gyp_pesos_bu()
+```
+Reemplaza con:
+```python
+            _gyp_afp = pres.gyp_pesos_universo()
+```
+
+**BLOQUE 3 — `_escribir_gyp` con SUMIFS real (ya no pegado desde Python)**
+
+Ubica (Ctrl+F) toda la función `_escribir_gyp` completa (desde su `def` hasta el final del bloque de la tabla-resumen) y reemplázala por:
+```python
+def _escribir_gyp(xw, gyp_nuevo: pd.DataFrame, ruta_salida) -> None:
+    """Hoja G&P: universo completo (BU+TD+SOB+ALT+Proxies+ETF), inputs +
+    cálculo end-to-end del Weight renormalizado y la exposición en plata.
+    Todas las columnas de cálculo (Suma_Weight_Fondo, Weight_Renormalizado,
+    VVL_PEN, Inv_MM_USD, Weight_Verif) son fórmulas vivas de Excel."""
+    gyp = _fusionar_con_existente(gyp_nuevo, ruta_salida, NOMBRE_HOJA_GYP)
+    if gyp.empty:
+        pd.DataFrame({"Aviso": ["Sin datos"]}).to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+        return
+    cols = ["Corte", "AFP", "Fondo", "Portafolio", "SBS", "ISIN", "Emisor", "Estrategia",
+            "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+    for c in cols:
+        if c not in gyp.columns:
+            gyp[c] = ""
+    gyp = gyp[cols].reset_index(drop=True)
+    gyp = gyp.rename(columns={"Weight_Original_BD1S": "Weight_Original",
+                               "Patrimonio": "AUM_Fondo"})
+    n = len(gyp)
+    filas = list(range(2, n + 2))
+    # A Corte, B AFP, C Fondo, D Portafolio, E SBS, F ISIN, G Emisor, H Estrategia,
+    # I Weight_Original, J AUM_Fondo, K TC_USD,
+    # L Suma_Weight_Fondo, M Weight_Renormalizado, N VVL_PEN, O Inv_MM_USD, P Weight_Verif
+    gyp["Suma_Weight_Fondo"] = [
+        f"=SUMIFS($I$2:$I${n+1},$A$2:$A${n+1},$A{r},$B$2:$B${n+1},$B{r},$C$2:$C${n+1},$C{r})"
+        for r in filas]
+    gyp["Weight_Renormalizado"] = [f"=IF(L{r}=0,0,I{r}/L{r})" for r in filas]
+    gyp["VVL_PEN"] = [f"=M{r}*J{r}" for r in filas]
+    gyp["Inv_MM_USD"] = [f'=IF(K{r}=0,"",N{r}/K{r}/1000000)' for r in filas]
+    gyp["Weight_Verif"] = [f"=IF(J{r}=0,0,N{r}/J{r})" for r in filas]
+    gyp.to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+
+    ws = xw.sheets[NOMBRE_HOJA_GYP]
+    for col_letra in ("I", "L", "M", "P"):
+        for r in filas:
+            ws[f"{col_letra}{r}"].number_format = "0.00%"
+
+    combos = gyp[["Corte", "AFP", "Fondo"]].drop_duplicates().reset_index(drop=True)
+    col_r = 18  # columna R (deja Q como separador)
+    ws.cell(row=1, column=col_r, value="Corte")
+    ws.cell(row=1, column=col_r + 1, value="AFP")
+    ws.cell(row=1, column=col_r + 2, value="Fondo")
+    ws.cell(row=1, column=col_r + 3, value="Suma_Weight_Original")
+    ws.cell(row=1, column=col_r + 4, value="Suma_Weight_Renormalizado")
+    for k, row in combos.iterrows():
+        fr = k + 2
+        corte_esc = str(row["Corte"]).replace('"', '""')
+        afp_esc = str(row["AFP"]).replace('"', '""')
+        fondo_esc = str(row["Fondo"]).replace('"', '""')
+        ws.cell(row=fr, column=col_r, value=row["Corte"])
+        ws.cell(row=fr, column=col_r + 1, value=row["AFP"])
+        ws.cell(row=fr, column=col_r + 2, value=row["Fondo"])
+        f1 = (f'=SUMIFS($I$2:$I${n+1},$A$2:$A${n+1},"{corte_esc}",'
+              f'$B$2:$B${n+1},"{afp_esc}",$C$2:$C${n+1},"{fondo_esc}")')
+        f2 = (f'=SUMIFS($M$2:$M${n+1},$A$2:$A${n+1},"{corte_esc}",'
+              f'$B$2:$B${n+1},"{afp_esc}",$C$2:$C${n+1},"{fondo_esc}")')
+        c1 = ws.cell(row=fr, column=col_r + 3, value=f1)
+        c2 = ws.cell(row=fr, column=col_r + 4, value=f2)
+        c1.number_format = "0.00%"
+        c2.number_format = "0.00%"
+```
+
+Corre el pipeline. Ahora `G&P` trae todo el universo (agregué la columna `Estrategia` para que puedas filtrar/Pivotear por BU/TD/SOB/ALT si quieres), `Suma_Weight_Fondo` es un `SUMIFS` real fila por fila, y la tabla-resumen de la derecha ya no necesita el truco de `INDEX+MATCH` — vuelve a ser `SUMIFS` simple. Los porcentajes ahora sí deberían rondar 94%-105% (antes de normalizar) y exactamente 100% (después).
