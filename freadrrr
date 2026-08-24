@@ -1,0 +1,290 @@
+Ahora sí, el paquete completo: universo cross-AFP con fórmulas vivas de consolidación + promedio, y el chart corregido apuntando a ese cálculo.Validado, formulas correctas (consolidación X: 1.1+0.9=2.0 vía SUMIFS por emisor; promedio DM: (2.0+2.0)/2=2.0 vía AVERAGEIFS). Entrego todo el paquete.
+
+**BLOQUE 1 — Nueva función `_peer_group_intensidad_detalle` (universo fila-a-fila)**
+
+Ubica (Ctrl+F):
+```python
+def _exportar_universo_ffmm_debug(vals_ctx: dict, output_dir: str,
+```
+Pega **justo arriba**:
+```python
+def _peer_group_intensidad_detalle(vals_ctx: dict) -> pd.DataFrame:
+    """Universo fila-a-fila (AFP, Fondo, Emisor, Bloque, SubCat, Intensidad)
+    que sustenta _peer_group_intensidad — mismos filtros (excluye Ex_Integra,
+    GyP_UNIVERSO_VALIDO, no-Proxy, Huella!=0, Intensidad!=0). Sirve para
+    recalcular 'Comparables_Subcat_SinAjustar' con fórmulas de Excel."""
+    ac_map = {"Renta Variable": "Equities", "Renta Fija": "Fixed Income"}
+    piezas = []
+    for afp, par in vals_ctx.items():
+        if afp == "Ex_Integra":
+            continue
+        val = par[0]
+        if val is None or val.empty:
+            continue
+        d = _base(val)
+        d = _sin_huella_cero(d)
+        if "GyP_UNIVERSO_VALIDO" not in d.columns:
+            continue
+        d = d[d["GyP_UNIVERSO_VALIDO"] == True]
+        if COL["plus"] in d.columns:
+            d = d[d[COL["plus"]] != "Proxies"]
+        d = d.copy()
+        d[COL["intensidad"]] = pd.to_numeric(d[COL["intensidad"]], errors="coerce").fillna(0.0)
+        d = d[d[COL["intensidad"]] != 0]
+        if d.empty:
+            continue
+        d["Bloque"] = d["GyP_ASSET_CLASS"].map(ac_map)
+        d = d[d["Bloque"].notna()]
+        if d.empty:
+            continue
+        d = d.copy()
+        d["SubCat"] = d.apply(lambda r: _subcat_activo(r, r["Bloque"]), axis=1)
+        d["AFP"] = afp
+        if COL["portafolio"] in d.columns:
+            d["Fondo"] = "F" + d[COL["portafolio"]].astype(str).str.extract(r"(\d)$")[0].fillna("")
+        else:
+            d["Fondo"] = ""
+        cols = ["AFP", "Fondo", COL["nombre"], "Bloque", "SubCat", COL["intensidad"]]
+        cols = [c for c in cols if c in d.columns]
+        piezas.append(d[cols])
+    if not piezas:
+        return pd.DataFrame()
+    out = pd.concat(piezas, ignore_index=True)
+    out = out.rename(columns={COL["nombre"]: "Emisor", COL["intensidad"]: "Intensidad"})
+    return out
+
+
+```
+
+---
+
+**BLOQUE 2 — Recolectar el detalle en `run_pipeline_bd1s`**
+
+Ubica (Ctrl+F):
+```python
+    peer_co2h = _peer_group_co2h(vals_ctx)
+    peer_intensidad = _peer_group_intensidad(vals_ctx)
+    _exportar_universo_ffmm_debug(vals_ctx, output_dir, verbose)
+```
+Reemplaza con:
+```python
+    peer_co2h = _peer_group_co2h(vals_ctx)
+    peer_intensidad = _peer_group_intensidad(vals_ctx)
+    peer_intensidad_detalle = _peer_group_intensidad_detalle(vals_ctx)
+    if not peer_intensidad_detalle.empty:
+        peer_intensidad_detalle.insert(0, "Corte", cfg.semestre)
+    _exportar_universo_ffmm_debug(vals_ctx, output_dir, verbose)
+```
+
+---
+
+**BLOQUE 3 — Pasar el detalle a `construir_excel_graficos`**
+
+Ubica (Ctrl+F):
+```python
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, bd_instrumentos=bd_instrumentos)
+```
+Reemplaza con:
+```python
+    construir_excel_graficos(ruta_historico, ruta_datos_graficos, bd_instrumentos=bd_instrumentos,
+                              universo_comparables=peer_intensidad_detalle)
+```
+
+---
+
+**BLOQUE 4 — Nueva función `_escribir_comparables_universo` (Módulo 15)**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None) -> str:
+```
+Pega **justo arriba**:
+```python
+NOMBRE_HOJA_COMPARABLES_UNIV = "Comparables_Universo"
+
+
+def _escribir_comparables_universo(xw, universo: pd.DataFrame):
+    """Escribe el universo cross-AFP + tabla de consolidación por emisor +
+    tabla de promedio por SubCat ('Comparables_Subcat_SinAjustar'), todo
+    con fórmulas SUMIFS/AVERAGEIFS vivas. Devuelve (nombre_hoja,
+    fila_max_universo, fila_max_benchmark)."""
+    if universo is None or universo.empty:
+        pd.DataFrame({"Aviso": ["Sin datos"]}).to_excel(
+            xw, sheet_name=NOMBRE_HOJA_COMPARABLES_UNIV, index=False)
+        return NOMBRE_HOJA_COMPARABLES_UNIV, 1, 1
+
+    cols = ["Corte", "AFP", "Fondo", "Emisor", "Bloque", "SubCat", "Intensidad"]
+    for c in cols:
+        if c not in universo.columns:
+            universo[c] = ""
+    universo = universo[cols].reset_index(drop=True)
+    universo.to_excel(xw, sheet_name=NOMBRE_HOJA_COMPARABLES_UNIV, index=False)
+    ws = xw.sheets[NOMBRE_HOJA_COMPARABLES_UNIV]
+    fila_max_universo = len(universo) + 1
+
+    combos = universo[["Bloque", "SubCat", "Emisor"]].drop_duplicates().reset_index(drop=True)
+    col_i = 9
+    ws.cell(row=1, column=col_i, value="Bloque")
+    ws.cell(row=1, column=col_i + 1, value="SubCat")
+    ws.cell(row=1, column=col_i + 2, value="Emisor")
+    ws.cell(row=1, column=col_i + 3, value="Intensidad_Consolidada")
+    for k, row in combos.iterrows():
+        fr = k + 2
+        bloque_esc = str(row["Bloque"]).replace('"', '""')
+        subcat_esc = str(row["SubCat"]).replace('"', '""')
+        emisor_esc = str(row["Emisor"]).replace('"', '""')
+        ws.cell(row=fr, column=col_i, value=row["Bloque"])
+        ws.cell(row=fr, column=col_i + 1, value=row["SubCat"])
+        ws.cell(row=fr, column=col_i + 2, value=row["Emisor"])
+        f = (f'=SUMIFS($G$2:$G${fila_max_universo},$E$2:$E${fila_max_universo},"{bloque_esc}",'
+             f'$F$2:$F${fila_max_universo},"{subcat_esc}",'
+             f'$D$2:$D${fila_max_universo},"{emisor_esc}")')
+        ws.cell(row=fr, column=col_i + 3, value=f)
+    fila_max_consol = len(combos) + 1
+
+    subcats = universo[["Bloque", "SubCat"]].drop_duplicates().reset_index(drop=True)
+    col_n = 14
+    ws.cell(row=1, column=col_n, value="Bloque")
+    ws.cell(row=1, column=col_n + 1, value="SubCat")
+    ws.cell(row=1, column=col_n + 2, value="Comparables_Subcat_SinAjustar")
+    for k, row in subcats.iterrows():
+        fr = k + 2
+        bloque_esc = str(row["Bloque"]).replace('"', '""')
+        subcat_esc = str(row["SubCat"]).replace('"', '""')
+        ws.cell(row=fr, column=col_n, value=row["Bloque"])
+        ws.cell(row=fr, column=col_n + 1, value=row["SubCat"])
+        f = (f'=AVERAGEIFS($L$2:$L${fila_max_consol},$I$2:$I${fila_max_consol},"{bloque_esc}",'
+             f'$J$2:$J${fila_max_consol},"{subcat_esc}")')
+        ws.cell(row=fr, column=col_n + 2, value=f)
+    fila_max_bench = len(subcats) + 1
+    return NOMBRE_HOJA_COMPARABLES_UNIV, fila_max_universo, fila_max_bench
+
+
+```
+
+---
+
+**BLOQUE 5 — Reemplazar la función `_agregar_chart_asset_perf` completa**
+
+Ubica (Ctrl+F) toda la función actual (desde `def _agregar_chart_asset_perf` hasta su `ws.add_chart(...)` final) y reemplázala por:
+```python
+def _agregar_chart_asset_perf(ws, tabla: pd.DataFrame, corte_actual: str,
+                               nombre_hoja_comp: str, fila_max_bench: int) -> None:
+    if tabla.empty:
+        return
+    ultima_fila = len(tabla) + 1
+    d = tabla[(tabla["Corte"] == corte_actual) & (tabla["Tipo_Fila"] == "Instrumento")
+              & (tabla["AFP"] == "Integra")].copy()
+    if d.empty:
+        return
+    orden_bloque = {"Equities": 0, "Fixed Income": 1}
+    d["__ord_bloque"] = d["Bloque"].map(orden_bloque).fillna(9)
+    d = d.sort_values(["__ord_bloque", "Valor"], ascending=[True, False]).reset_index(drop=True)
+
+    n = len(d)
+    col_label = ws.max_column + 2
+    fila_r = 1
+    ws.cell(row=fila_r, column=col_label, value="Instrumento")
+    ws.cell(row=fila_r, column=col_label + 1, value="Intensidad")
+    ws.cell(row=fila_r, column=col_label + 2, value="Benchmark_SinAjustar")
+
+    for i, (_, r) in enumerate(d.iterrows()):
+        fr = fila_r + 1 + i
+        ws.cell(row=fr, column=col_label, value=r["Instrumento"])
+        inst_esc = str(r["Instrumento"]).replace('"', '""')
+        f_int = (f'=SUMIFS($L$2:$L${ultima_fila},$G$2:$G${ultima_fila},"{inst_esc}",'
+                 f'$E$2:$E${ultima_fila},"{r["Bloque"]}",$D$2:$D${ultima_fila},"Instrumento",'
+                 f'$C$2:$C${ultima_fila},"Integra",$A$2:$A${ultima_fila},"{corte_actual}")')
+        ws.cell(row=fr, column=col_label + 1, value=f_int)
+        subcat_esc = str(r["SubCategoria"]).replace('"', '""')
+        f_bench = (f"=SUMIFS('{nombre_hoja_comp}'!$P$2:$P${fila_max_bench},"
+                   f"'{nombre_hoja_comp}'!$N$2:$N${fila_max_bench},\"{r['Bloque']}\","
+                   f"'{nombre_hoja_comp}'!$O$2:$O${fila_max_bench},\"{subcat_esc}\")")
+        ws.cell(row=fr, column=col_label + 2, value=f_bench)
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.title = None
+    chart.legend = None
+    chart.y_axis.delete = True
+    chart.y_axis.majorGridlines = None
+    chart.x_axis.delete = False
+    chart.x_axis.axPos = "b"
+    chart.y_axis.axPos = "l"
+    chart.height = 9
+    chart.width = 20
+
+    data_ref = Reference(ws, min_col=col_label + 1, max_col=col_label + 1,
+                          min_row=fila_r, max_row=fila_r + n)
+    chart.add_data(data_ref, titles_from_data=True)
+    cats_ref = Reference(ws, min_col=col_label, max_col=col_label,
+                          min_row=fila_r + 1, max_row=fila_r + n)
+    chart.set_categories(cats_ref)
+
+    serie = chart.series[0]
+    serie.graphicalProperties = GraphicalProperties(solidFill="00AECB")
+    for i, (_, r) in enumerate(d.iterrows()):
+        color = "00AECB" if r["Gestion"] == "Active" else "002060"
+        pt = DataPoint(idx=i)
+        pt.graphicalProperties = GraphicalProperties(solidFill=color)
+        serie.data_points.append(pt)
+    dl = DataLabelList()
+    dl.showVal = True
+    dl.showSerName = False
+    dl.showCatName = False
+    dl.showLegendKey = False
+    dl.numFmt = "0.0"
+    dl.dLblPos = "outEnd"
+    serie.dLbls = dl
+
+    bench_ref = Reference(ws, min_col=col_label + 2, max_col=col_label + 2,
+                           min_row=fila_r, max_row=fila_r + n)
+    linea = LineChart()
+    linea.add_data(bench_ref, titles_from_data=True)
+    linea.set_categories(cats_ref)
+    st = linea.series[0]
+    st.graphicalProperties = GraphicalProperties()
+    st.graphicalProperties.line = LineProperties(noFill=True)
+    st.marker = Marker(symbol="circle", size=8)
+    st.marker.graphicalProperties = GraphicalProperties(solidFill="E8543E")
+    st.smooth = False
+    linea.y_axis.delete = True
+    linea.y_axis.majorGridlines = None
+    linea.x_axis.delete = True
+    chart += linea
+
+    ws.add_chart(chart, f"{get_column_letter(col_label)}{fila_r + n + 3}")
+
+
+```
+
+---
+
+**BLOQUE 6 — Firma de `construir_excel_graficos` + llamada corregida**
+
+Ubica (Ctrl+F):
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None) -> str:
+```
+Reemplaza con:
+```python
+def construir_excel_graficos(ruta_historico, ruta_salida,
+                              bd_instrumentos: pd.DataFrame = None,
+                              universo_comparables: pd.DataFrame = None) -> str:
+```
+
+Ubica (Ctrl+F):
+```python
+        _agregar_chart_asset_perf(xw.sheets[NOMBRE_HOJA_ASSET_PERF],
+                                   hojas[NOMBRE_HOJA_ASSET_PERF], corte_actual)
+```
+Reemplaza con:
+```python
+        nombre_hoja_comp, _fmu, fila_max_bench = _escribir_comparables_universo(
+            xw, universo_comparables)
+        _agregar_chart_asset_perf(xw.sheets[NOMBRE_HOJA_ASSET_PERF],
+                                   hojas[NOMBRE_HOJA_ASSET_PERF], corte_actual,
+                                   nombre_hoja_comp, fila_max_bench)
+```
