@@ -1,0 +1,126 @@
+Ahora tengo el panorama completo. Son **3 problemas independientes** que causan los huecos:
+
+**Problema A** — "Total Bancos" (Bancos Feb-Jun): el rename de columna que ya aplicamos.
+
+**Problema B** — "Total Financieras" (Feb-Jun): exactamente el mismo caso pero con `"Total Empresas Financieras1/"` → `"Total Financieras"`.
+
+**Problema C** — **Mypes entero se omite Feb–May**: el script aborta toda la institución cuando falta la categoría `"POSICIÓN EN MONEDA EXTRANJERA"` del XLS. Eso borra los 7+ emisores de Mypes para esos 4 meses.
+
+Te doy los 3 cambios:
+
+---
+
+**Cambio 1 — Reemplazar el rename de columna de Bancos por uno general**
+
+Busca con Ctrl+F las dos líneas que agregamos en la sesión pasada (justo debajo de `DF.columns = DF.iloc[column_index]`):
+
+```python
+        DF.columns = [c.replace("Total Banca Múltiple (con sucursales en el exterior) 1/", "Total Bancos")
+                      if isinstance(c, str) else c for c in DF.columns]
+```
+
+Reemplázalas por esta **única línea** (misma indentación):
+
+```python
+        DF.columns = [SINONIMOS_NOMBRE.get(c, c) if isinstance(c, str) else c for c in DF.columns]
+```
+
+Y luego agrega el diccionario cerca de los parámetros al inicio del script. Busca con Ctrl+F:
+
+```
+MAX_RETROCESO_MESES = 12
+```
+
+Inmediatamente debajo agrega:
+
+```python
+SINONIMOS_NOMBRE = {
+    "Total Banca Múltiple (con sucursales en el exterior) 1/": "Total Bancos",
+    "Total Empresas Financieras1/": "Total Financieras",
+    "CMAC Piura1/": "CMAC Piura",
+    "CMAC Piura1/ ": "CMAC Piura",
+    "CMAC Piura 1/": "CMAC Piura",
+}
+```
+
+---
+
+**Cambio 2 — No abortar la institución cuando falta un tipo**
+
+Busca con Ctrl+F este bloque exacto:
+
+```python
+        if tipos_faltantes:
+            log_error(f"{nombre}: no se encontraron las categorias {tipos_faltantes} en '{archivo}'. Se omite.")
+            return None
+```
+
+Reemplázalo por:
+
+```python
+        if tipos_faltantes:
+            log_warn(f"{nombre}: categorias {tipos_faltantes} no encontradas, se continua sin ellas.")
+        if not index_:
+            log_error(f"{nombre}: ninguna categoria encontrada en '{archivo}'. Se omite.")
+            return None
+```
+
+---
+
+**Cambio 3 — Usar solo los tipos encontrados en el loop**
+
+El loop que arma `DF_grupo` usa `tipos[i]` pero ahora `index_` puede tener menos elementos que `tipos`. Necesitas trackear cuáles se encontraron.
+
+Busca con Ctrl+F:
+
+```python
+        index_ = []
+        tipos_faltantes = []
+        for t in tipos:
+```
+
+Agrega una línea justo después de `tipos_faltantes = []`:
+
+```python
+        tipos_encontrados = []
+```
+
+Luego, busca con Ctrl+F (dentro del mismo for-loop):
+
+```python
+            index_.append(coincidencias[0])
+```
+
+Agrega **justo debajo**:
+
+```python
+            tipos_encontrados.append(t)
+```
+
+Ahora reemplaza las 3 referencias a `tipos[i]` / `tipos[-1]` en el armado de `DF_grupo`. Busca:
+
+```python
+            df_tmp.insert(0, 'Tipo', tipos[i])
+```
+
+Reemplaza por:
+
+```python
+            df_tmp.insert(0, 'Tipo', tipos_encontrados[i])
+```
+
+Y busca:
+
+```python
+        last_df.insert(0, 'Tipo', tipos[-1])
+```
+
+Reemplaza por:
+
+```python
+        last_df.insert(0, 'Tipo', tipos_encontrados[-1])
+```
+
+---
+
+Antes de re-ejecutar, restaura tu archivo base desde el backup para partir de cero limpio (sin las filas huérfanas de corridas anteriores con nombres nuevos).
