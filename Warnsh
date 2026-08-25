@@ -1,0 +1,35 @@
+El log confirma que el error es un `KeyError: 'Total Bancos'` que **crashea toda la función `procesar_institucion` para Bancos** antes de llegar siquiera a la línea donde sugerí el cambio. Necesito rastrear exactamente dónde ocurre el KeyError. Déjame simularlo con tu XLS de input.
+
+El `KeyError: 'Total Bancos'` sigue igual — eso significa que el error ocurre **antes** de la línea donde sugerí el cambio anterior. Tu diccionario `Diccionario_SBS.xlsx` ya está renombrando "Total Banca Múltiple..." → "Total Bancos" internamente, pero ese rename crea un desajuste durante las transposiciones del DataFrame.
+
+La solución correcta es renombrar la columna **mucho más arriba**, justo al leer el XLS, antes de que el diccionario intervenga. Necesito revertir el cambio anterior y aplicar uno nuevo.
+
+---
+
+**Paso 1 — Revierte el cambio anterior (si lo aplicaste)**
+
+Busca con Ctrl+F `SINONIMOS_NOMBRE` y borra las dos líneas que agregamos (el diccionario y el `.get`). Si no llegaste a aplicarlas, ignora este paso.
+
+---
+
+**Paso 2 — Agregar el rename al nivel correcto**
+
+Busca con Ctrl+F esta línea exacta dentro de la función `procesar_institucion`:
+
+```
+        DF.columns = DF.iloc[column_index]
+```
+
+Reemplaza esa **única línea** por estas **tres líneas** (mismo nivel de indentación):
+
+```python
+        DF.columns = DF.iloc[column_index]
+        DF.columns = [c.replace("Total Banca Múltiple (con sucursales en el exterior) 1/", "Total Bancos")
+                      if isinstance(c, str) else c for c in DF.columns]
+```
+
+Esto renombra la columna del XLS antes de cualquier transposición o diccionario, así que "Total Bancos" ya existe como columna desde el inicio y todo el flujo posterior funciona sin conflicto.
+
+---
+
+Después de correr el script corregido, también vas a necesitar limpiar las 24 filas huérfanas de "Total Banca Múltiple (con sucursales en el exterior) 1/" que quedaron en tu output de corridas anteriores.
