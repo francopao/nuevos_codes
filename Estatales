@@ -1,0 +1,46 @@
+**Causa raíz:** el renombrado a "Categoría" se hace por posición numérica mágica (`{5:...}`, `{4:...}`, `{0:...}`) que depende de la forma exacta del archivo SBS. Junio 2026 trae una fila nueva ("B. Efectiva*"), la posición cambia, el rename no encuentra esa clave, no renombra nada, y `.get(['Categoría'])` devuelve `None` en silencio → de ahí el `NoneType.insert`.
+
+**CAMBIO 1 — Bancos (obligatorio)**
+Ctrl+F: `rename(columns={5: "Categoría"})`
+Reemplazar toda la línea por:
+```
+    DF = renombrar_columnas_por_posicion(DF, {0: "Categoría"})
+```
+
+**CAMBIO 2 — Financieras (obligatorio)**
+Ctrl+F: `rename(columns={4: "Categoría"})`
+Reemplazar toda la línea por:
+```
+    DF = renombrar_columnas_por_posicion(DF, {0: "Categoría"})
+```
+
+**CAMBIO 3 — Mypes (obligatorio)**
+Ctrl+F: `[Mypes] procesando` (te ubica en el bloque). Desde ahí, Ctrl+F siguiente: `rename(columns={0: "Categoría"})`
+Reemplazar toda la línea por:
+```
+    DF = renombrar_columnas_por_posicion(DF, {0: "Categoría"})
+```
+
+**CAMBIO 4 — Cajas (obligatorio)**
+Ctrl+F: `[Cajas] procesando` (ojo: no "Cajas Rurales"). Desde ahí, Ctrl+F siguiente: `rename(columns={0: "Categoría"})`
+Mismo reemplazo que arriba.
+
+**CAMBIO 5 — Cajas Rurales (obligatorio)**
+Ctrl+F: `[Cajas Rurales] procesando`. Desde ahí, Ctrl+F siguiente: `rename(columns={0: "Categoría"})`
+Mismo reemplazo que arriba.
+
+(Estatales ya usa `renombrar_columnas_por_posicion` — no tocar.)
+
+---
+
+**CAMBIO 6 — Blindaje adicional (recomendado, 6 ocurrencias idénticas, una por bloque: Bancos, Financieras, Mypes, Cajas, Cajas Rurales, Estatales)**
+Ctrl+F: `DF_.get(['Categoría'])`
+En cada una de las 6, reemplazar por:
+```
+        DF_1 = DF_[['Categoría']]
+```
+(si "Categoría" llegara a faltar por otra causa futura, esto lanza un error claro en vez de romper en `.insert` con `None`).
+
+---
+
+**Acción fuera del script (no-código, recomendada):** en `Diccionario_SBS.xlsx`, hoja "Estruc Crédito según Deudor", agregar la fila `Nombre_Antiguo = "B. Efectiva*"` → `Nombre_Nuevo = "B. Efectiva"`. Si no se mapea, el asterisco queda pegado al nombre de la entidad y contamina la columna "Entidad"/"key" de la base histórica.
