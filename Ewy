@@ -1,0 +1,42 @@
+Confirmado el diagnóstico. La SBS cambió el nombre de la columna de "Total Bancos" a "Total Banca Múltiple (con sucursales en el exterior) 1/" a partir de febrero 2026. Tu diccionario de renombre no tiene esa entrada, así que el script crea filas nuevas con un key distinto en vez de alimentar las existentes de "Total Bancos".
+
+Son **dos cambios** en tu script:
+
+---
+
+**Cambio 1 — Agregar un diccionario de sinónimos**
+
+Busca con Ctrl+F esta línea exacta:
+
+```
+MAX_RETROCESO_MESES = 12
+```
+
+**Inmediatamente debajo**, agrega este bloque:
+
+```python
+# Mapeo manual de nombres que la SBS cambia entre periodos
+SINONIMOS_NOMBRE = {
+    "Total Banca Múltiple (con sucursales en el exterior) 1/": "Total Bancos",
+}
+```
+
+---
+
+**Cambio 2 — Aplicar el sinónimo al nombre de la entidad**
+
+Busca con Ctrl+F esta línea exacta (aparece una sola vez):
+
+```
+            a = DF_grupo.columns[2::][i]
+```
+
+**Inmediatamente debajo**, agrega esta línea (mismo nivel de indentación):
+
+```python
+            a = SINONIMOS_NOMBRE.get(a, a)
+```
+
+Eso reemplaza el nombre SBS nuevo por "Total Bancos" antes de que se inserte como `Nombre` y se construya el `key`, así la data de feb–jun 2026 cae sobre las filas históricas correctas.
+
+Después de correr el script corregido, las 24 filas huérfanas de "Total Banca Múltiple..." que ya existen en tu output las puedes borrar manualmente del Excel o, si prefieres, limpio yo el output también.
