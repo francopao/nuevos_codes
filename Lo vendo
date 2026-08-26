@@ -1,0 +1,208 @@
+Asumiendo que ya tienes aplicado mi patch anterior ("diluir Proxies"), va sobre esa base. Aviso: la columna **`Tipo_Dato`** ya existe en `BD` — solo estaba vacía para Soberanos y Mayores. La completo ahí (mismo criterio: `Plus == "Proxies"` → "Proxies", cualquier otra cosa → "MSCI"), y agrego una tabla de cobertura a la derecha de `BD` con fórmulas SUMIFS.
+
+**Nota:** en `Mayores contribuyentes`, el universo se define excluyendo Proxies (`Plus != "Proxies"`) — ahí `Tipo_Dato` va a salir 100% "MSCI" siempre, por diseño de ese universo, no es un error.
+
+---
+
+**BLOQUE 1 — Simplificar `_tomar`: deriva `Tipo_Dato` solo, ya no hay que pasarlo a mano**
+
+Ubica (Ctrl+F):
+```python
+        def _tomar(sub, universo, categoria, tipo_dato, pais_serie=None):
+            if sub.empty:
+                return
+            cols = ident + met + (["PERDIO_HUELLA"] if tiene_perdio else [])
+            t = sub[cols].copy()
+            t["Universo"] = universo
+            t["Categoria"] = categoria
+            t["Tipo_Dato"] = tipo_dato
+            t["Pais"] = pais_serie if pais_serie is not None else ""
+            piezas.append(t)
+```
+Reemplaza con:
+```python
+        def _tomar(sub, universo, categoria, pais_serie=None):
+            if sub.empty:
+                return
+            cols = ident + met + (["PERDIO_HUELLA"] if tiene_perdio else [])
+            t = sub[cols].copy()
+            t["Universo"] = universo
+            t["Categoria"] = categoria
+            if COL["plus"] in sub.columns:
+                t["Tipo_Dato"] = sub[COL["plus"]].map(
+                    lambda p: "Proxies" if p == "Proxies" else "MSCI").values
+            else:
+                t["Tipo_Dato"] = "MSCI"
+            t["Pais"] = pais_serie if pais_serie is not None else ""
+            piezas.append(t)
+```
+
+**BLOQUE 2 — Soberanos: ya no pasa `""` a mano**
+
+Ubica (Ctrl+F):
+```python
+            _tomar(d, "Soberanos", "GOB", "", pais_serie=pais)
+```
+Reemplaza con:
+```python
+            _tomar(d, "Soberanos", "GOB", pais_serie=pais)
+```
+
+**BLOQUE 3 — Sector: simplificar (ya no hace falta el split manual por tipo)**
+
+Ubica (Ctrl+F) todo el bloque Sector (desde el comentario hasta la línea final `_tomar(alt, ...)`):
+```python
+        # --- Universo Sector: BU y TD se clasifican igual sean MSCI-directo
+        # o Proxy (mismo criterio que sector_msci_vs_proxies). Tipo_Dato se
+        # conserva por fila para auditoría, pero ya no define un bloque
+        # visual separado — eso lo decide el chart, no esta función.
+        d = _sin_huella_cero(self.df)
+        bu = d[d[COL["estrategia"]].eq("BU")].copy()
+        if not bu.empty:
+            bu["__sector"] = self._mapear_sector(bu)
+            bu["__tipo_dato"] = bu[COL["plus"]].map(
+                lambda p: "Proxies" if p == "Proxies" else "MSCI")
+        else:
+            bu["__sector"] = pd.Series(dtype=object)
+            bu["__tipo_dato"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])].copy()
+        if not td.empty:
+            td["__tipo_dato"] = td[COL["plus"]].map(
+                lambda p: "Proxies" if p == "Proxies" else "MSCI")
+
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        def _por_tipo(sub, categoria):
+            if sub.empty:
+                return
+            for tipo, sub_t in sub.groupby("__tipo_dato"):
+                _tomar(sub_t, "Sector", categoria, tipo)
+
+        for cat in ("Materials", "Utilities"):
+            _por_tipo(bu[bu["__sector"].eq(cat)], cat)
+        usados = bu["__sector"].isin(["Materials", "Utilities"])
+        _por_tipo(bu[~usados], "Otros BU")
+
+        _por_tipo(td[td[COL["tipo_renta"]].eq("RENTA FIJA")], "RF")
+        _por_tipo(td[td[COL["tipo_renta"]].eq("RENTA VARIABLE")], "RV")
+        _por_tipo(td[~td[COL["tipo_renta"]].isin(["RENTA FIJA", "RENTA VARIABLE"])], "Otros TD")
+
+        _tomar(alt, "Sector", "Alts", "Proxies")
+```
+Reemplaza con:
+```python
+        # --- Universo Sector: BU y TD se clasifican igual sean MSCI-directo
+        # o Proxy (mismo criterio que sector_msci_vs_proxies). Tipo_Dato lo
+        # deriva _tomar() solo, a partir de Plus de cada fila.
+        d = _sin_huella_cero(self.df)
+        bu = d[d[COL["estrategia"]].eq("BU")].copy()
+        if not bu.empty:
+            bu["__sector"] = self._mapear_sector(bu)
+        else:
+            bu["__sector"] = pd.Series(dtype=object)
+
+        td = d[d[COL["estrategia"]].eq("TD")
+               & ~d[COL["plus_1"]].isin(["BU", "Alts"])]
+
+        alt = d[d[COL["estrategia"]].eq("ALT")
+                & d[COL["plus"]].eq("Proxies")
+                & d[COL["plus_1"]].eq("Alts")]
+
+        for cat in ("Materials", "Utilities"):
+            _tomar(bu[bu["__sector"].eq(cat)], "Sector", cat)
+        usados = bu["__sector"].isin(["Materials", "Utilities"])
+        _tomar(bu[~usados], "Sector", "Otros BU")
+
+        _tomar(td[td[COL["tipo_renta"]].eq("RENTA FIJA")], "Sector", "RF")
+        _tomar(td[td[COL["tipo_renta"]].eq("RENTA VARIABLE")], "Sector", "RV")
+        _tomar(td[~td[COL["tipo_renta"]].isin(["RENTA FIJA", "RENTA VARIABLE"])], "Sector", "Otros TD")
+
+        _tomar(alt, "Sector", "Alts")
+```
+
+**BLOQUE 4 — Mayores: ya no pasa `""` a mano**
+
+Ubica (Ctrl+F):
+```python
+        _tomar(d2, "Mayores", "", "")
+```
+Reemplaza con:
+```python
+        _tomar(d2, "Mayores", "")
+```
+
+**BLOQUE 5 — Nueva función: tabla de cobertura Proxy vs directa**
+
+Ubica (Ctrl+F):
+```python
+NOMBRE_HOJA_BD = "BD"
+```
+Pega debajo:
+```python
+NOMBRE_HOJA_BD = "BD"
+
+
+def _agregar_cobertura_proxy(ws, bd: pd.DataFrame, fila_max_bd: int) -> None:
+    """Tabla-resumen de cobertura Proxy vs directa (MSCI/SOV/ETF/etc.), por
+    Corte x AFP x Universo, con fórmulas SUMIFS a la derecha de BD."""
+    if bd.empty or fila_max_bd < 2:
+        return
+    combos = bd[["Corte", "AFP", "Universo"]].drop_duplicates().reset_index(drop=True)
+    if combos.empty:
+        return
+    col_r = 24  # columna X, deja espacio después de Intensidad_Verif (U)
+    headers = ["Corte", "AFP", "Universo", "Huella_Total", "Huella_Proxy",
+               "% Huella Proxy", "Intensidad_Total", "Intensidad_Proxy",
+               "% Intensidad Proxy"]
+    for j, h in enumerate(headers):
+        ws.cell(row=1, column=col_r + j, value=h)
+    for k, row in combos.iterrows():
+        fr = k + 2
+        corte_esc = str(row["Corte"]).replace('"', '""')
+        afp_esc = str(row["AFP"]).replace('"', '""')
+        univ_esc = str(row["Universo"]).replace('"', '""')
+        ws.cell(row=fr, column=col_r, value=row["Corte"])
+        ws.cell(row=fr, column=col_r + 1, value=row["AFP"])
+        ws.cell(row=fr, column=col_r + 2, value=row["Universo"])
+        base = (f'$A$2:$A${fila_max_bd},"{corte_esc}",'
+                f'$B$2:$B${fila_max_bd},"{afp_esc}",'
+                f'$H$2:$H${fila_max_bd},"{univ_esc}"')
+        f_ht = f'=SUMIFS($R$2:$R${fila_max_bd},{base})'
+        f_hp = f'=SUMIFS($R$2:$R${fila_max_bd},{base},$J$2:$J${fila_max_bd},"Proxies")'
+        f_it = f'=SUMIFS($S$2:$S${fila_max_bd},{base})'
+        f_ip = f'=SUMIFS($S$2:$S${fila_max_bd},{base},$J$2:$J${fila_max_bd},"Proxies")'
+        ws.cell(row=fr, column=col_r + 3, value=f_ht)
+        ws.cell(row=fr, column=col_r + 4, value=f_hp)
+        c1 = ws.cell(row=fr, column=col_r + 5,
+                      value=f'=IF({get_column_letter(col_r+3)}{fr}=0,0,'
+                            f'{get_column_letter(col_r+4)}{fr}/{get_column_letter(col_r+3)}{fr})')
+        ws.cell(row=fr, column=col_r + 6, value=f_it)
+        ws.cell(row=fr, column=col_r + 7, value=f_ip)
+        c2 = ws.cell(row=fr, column=col_r + 8,
+                      value=f'=IF({get_column_letter(col_r+6)}{fr}=0,0,'
+                            f'{get_column_letter(col_r+7)}{fr}/{get_column_letter(col_r+6)}{fr})')
+        c1.number_format = "0.0%"
+        c2.number_format = "0.0%"
+
+
+```
+
+**BLOQUE 6 — Llamar la función nueva**
+
+Ubica (Ctrl+F) la línea donde se escribe la hoja `BD` (justo después del `to_excel` de BD, antes de crear las hojas en blanco), y agrega la llamada justo debajo. Busca:
+```python
+        (bd if not bd.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+            .to_excel(xw, sheet_name=NOMBRE_HOJA_BD, index=False)
+```
+Reemplaza con:
+```python
+        (bd if not bd.empty else pd.DataFrame({"Aviso": ["Sin datos"]})) \
+            .to_excel(xw, sheet_name=NOMBRE_HOJA_BD, index=False)
+        _agregar_cobertura_proxy(xw.sheets[NOMBRE_HOJA_BD], bd, len(bd) + 1)
+```
+
+Corre el pipeline. En `BD` la columna `Tipo_Dato` ahora debería venir poblada también para Soberanos, y a la derecha (columna X en adelante) vas a ver la tabla de cobertura por Corte/AFP/Universo — total, cuánto es Proxy, y el %.
