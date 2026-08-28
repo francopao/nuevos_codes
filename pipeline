@@ -1,0 +1,170 @@
+Tienes toda la razón, y encontré la causa exacta: **`Estrategia` en G&P viene del campo `Strategy` crudo de `BD1_S_Huella`** (que solo trae BU/TD/SOB — ALT no existe ahí como valor original), mientras que **`Estrategia` en `BD` viene DESPUÉS de la reclasificación que hace el Módulo 10** (`"Estrategia -> 'ALT' por GyP_ASSET_CLASS: 175 fila(s)"` en tu log — ahí es donde nacen los ALT). Mismo nombre de columna, dos etapas distintas del proceso — exactamente la inconsistencia que describes.
+
+Reviso si hay más casos del mismo patrón: sí, **`Emisor`** tiene el mismo problema. En G&P viene del `Nombre` crudo de BD1S (que recordarás, venía vacío para ~1,152 filas); en `BD` viene ya con la cascada de fallback (G&P → "Cliente X") que armamos hace unos mensajes. SBS, ISIN y Fondo no tienen este problema — son identificadores estables, no se tocan en ningún paso.
+
+La solución no es elegir una versión — es mostrar **ambas**, etiquetadas sin ambigüedad, como ya hacemos con Weight (`Weight_Original` vs `Weight_Renormalizado`). Así la hoja sigue contando la historia completa en vez de tapar el cambio.
+
+---
+
+**BLOQUE 1 — `gyp_pesos_universo`: capturar Original y Final para Estrategia y Emisor**
+
+Ubica (Ctrl+F):
+```python
+        raw["Estado_Instrumento"] = [
+            _estado(r.get("SBS"), r.get("Fondo")) for _, r in raw.iterrows()]
+
+        # Mapear cols de raw al esquema esperado por _escribir_gyp
+        col_map = {
+            "SBS": "SBS", "ISIN": "ISIN", "Nombre": "Emisor", "Fondo": "Fondo",
+            "Strategy": "Estrategia", "Weight": "Weight_Original_BD1S",
+            "AUM": "Patrimonio", "TC_USD": "TC_USD",
+            "TIPO_RENTA": "TIPO_RENTA", "Estado_Instrumento": "Estado_Instrumento",
+        }
+        keep = [c for c in col_map if c in raw.columns]
+        out = raw[keep].rename(columns={c: col_map[c] for c in keep}).reset_index(drop=True)
+        out["Portafolio"] = out["Fondo"].map(_fondo_a_port).fillna(out["Fondo"])
+        return out
+```
+Reemplaza con:
+```python
+        raw["Estado_Instrumento"] = [
+            _estado(r.get("SBS"), r.get("Fondo")) for _, r in raw.iterrows()]
+
+        # Estrategia_Final y Emisor_Final: valor DESPUÉS del pipeline (post
+        # reclasificación ALT vía GyP_ASSET_CLASS, post fallback de Nombre)
+        # para los instrumentos que sí llegaron a pres.df. Vacío si el
+        # instrumento no sobrevivió — mismo criterio que Estado_Instrumento.
+        estrategia_map = (dict(zip(pres["__k"], pres[COL["estrategia"]]))
+                           if COL["estrategia"] in pres.columns else {})
+        emisor_map = (dict(zip(pres["__k"], pres[COL["nombre"]]))
+                      if COL["nombre"] in pres.columns else {})
+
+        def _valor_final(mapa, sbs, fondo):
+            fondo_s = _to_string(fondo) or ""
+            if fondo_s not in _fondos_validos:
+                return None
+            sbs_s = _to_string(sbs) or ""
+            return mapa.get(f"{sbs_s}|{_fondo_a_port[fondo_s]}")
+
+        raw["Estrategia_Final"] = [
+            _valor_final(estrategia_map, r.get("SBS"), r.get("Fondo")) for _, r in raw.iterrows()]
+        raw["Emisor_Final"] = [
+            _valor_final(emisor_map, r.get("SBS"), r.get("Fondo")) for _, r in raw.iterrows()]
+
+        # Mapear cols de raw al esquema esperado por _escribir_gyp.
+        # Strategy/Nombre = valor ORIGINAL de BD1_S_Huella (antes del
+        # pipeline) — se etiquetan explícitamente para no confundirse con
+        # Estrategia_Final/Emisor_Final (post-pipeline, igual que en BD).
+        col_map = {
+            "SBS": "SBS", "ISIN": "ISIN", "Nombre": "Emisor_Original", "Fondo": "Fondo",
+            "Strategy": "Estrategia_Original", "Weight": "Weight_Original_BD1S",
+            "AUM": "Patrimonio", "TC_USD": "TC_USD",
+            "TIPO_RENTA": "TIPO_RENTA", "Estado_Instrumento": "Estado_Instrumento",
+            "Estrategia_Final": "Estrategia_Final", "Emisor_Final": "Emisor_Final",
+        }
+        keep = [c for c in col_map if c in raw.columns]
+        out = raw[keep].rename(columns={c: col_map[c] for c in keep}).reset_index(drop=True)
+        out["Portafolio"] = out["Fondo"].map(_fondo_a_port).fillna(out["Fondo"])
+        return out
+```
+
+---
+
+**BLOQUE 2 — `_escribir_gyp`: exportar Original/Final sin tocar ninguna fórmula existente**
+
+Ubica (Ctrl+F):
+```python
+    gyp = gyp.reset_index(drop=True)
+    # Capturar Estado_Instrumento ANTES del reordenamiento (se re-adjunta
+    # al final para no correr las columnas L-P). Cortes previos guardados
+    # con versiones anteriores de esta función no lo tendrán → NaN → "".
+    estado_serie = (gyp["Estado_Instrumento"].fillna("").astype(str)
+                    if "Estado_Instrumento" in gyp.columns else None)
+
+    cols = ["Corte", "AFP", "Fondo", "Portafolio", "SBS", "ISIN", "Emisor", "Estrategia",
+            "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+```
+Reemplaza con:
+```python
+    gyp = gyp.reset_index(drop=True)
+    # Capturar columnas "informativas" (no-fórmula) ANTES del reordenamiento
+    # — se re-adjuntan al final para no correr las columnas L-P. Cortes
+    # previos guardados con versiones anteriores de esta función no las
+    # tendrán → NaN → "".
+    extra_cols = ["Estado_Instrumento", "Estrategia_Final", "Emisor_Final"]
+    extra_series = {}
+    for c in extra_cols:
+        extra_series[c] = (gyp[c].fillna("").astype(str) if c in gyp.columns
+                            else pd.Series([""] * len(gyp)))
+
+    cols = ["Corte", "AFP", "Fondo", "Portafolio", "SBS", "ISIN",
+            "Emisor_Original", "Estrategia_Original",
+            "Weight_Original_BD1S", "Patrimonio", "TC_USD"]
+```
+
+Ubica (Ctrl+F):
+```python
+    gyp = gyp[cols].reset_index(drop=True)
+    gyp = gyp.rename(columns={"Weight_Original_BD1S": "Weight_Original",
+                               "Patrimonio": "AUM_Fondo"})
+    n = len(gyp)
+    filas = list(range(2, n + 2))
+    # A Corte, B AFP, C Fondo, D Portafolio, E SBS, F ISIN, G Emisor, H Estrategia,
+    # I Weight_Original, J AUM_Fondo, K TC_USD,
+    # L Suma_Weight_Fondo, M Weight_Renormalizado, N VVL_PEN, O Inv_MM_USD, P Weight_Verif,
+    # Q Estado_Instrumento (nuevo, agregado al final)
+    gyp["Suma_Weight_Fondo"] = [
+        f"=SUMIFS($I$2:$I${n+1},$A$2:$A${n+1},$A{r},$B$2:$B${n+1},$B{r},$C$2:$C${n+1},$C{r})"
+        for r in filas]
+    gyp["Weight_Renormalizado"] = [f"=IF(L{r}=0,0,I{r}/L{r})" for r in filas]
+    gyp["VVL_PEN"] = [f"=M{r}*J{r}" for r in filas]
+    gyp["Inv_MM_USD"] = [f'=IF(K{r}=0,"",N{r}/K{r}/1000000)' for r in filas]
+    gyp["Weight_Verif"] = [f"=IF(J{r}=0,0,N{r}/J{r})" for r in filas]
+    if estado_serie is not None:
+        gyp["Estado_Instrumento"] = estado_serie.values
+    gyp.to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+```
+Reemplaza con:
+```python
+    for c in cols:
+        if c not in gyp.columns:
+            gyp[c] = ""
+    gyp = gyp[cols].reset_index(drop=True)
+    gyp = gyp.rename(columns={"Weight_Original_BD1S": "Weight_Original",
+                               "Patrimonio": "AUM_Fondo"})
+    n = len(gyp)
+    filas = list(range(2, n + 2))
+    # A Corte, B AFP, C Fondo, D Portafolio, E SBS, F ISIN,
+    # G Emisor_Original, H Estrategia_Original,
+    # I Weight_Original, J AUM_Fondo, K TC_USD,
+    # L Suma_Weight_Fondo, M Weight_Renormalizado, N VVL_PEN, O Inv_MM_USD, P Weight_Verif,
+    # Q Estado_Instrumento, R Estrategia_Final, S Emisor_Final
+    gyp["Suma_Weight_Fondo"] = [
+        f"=SUMIFS($I$2:$I${n+1},$A$2:$A${n+1},$A{r},$B$2:$B${n+1},$B{r},$C$2:$C${n+1},$C{r})"
+        for r in filas]
+    gyp["Weight_Renormalizado"] = [f"=IF(L{r}=0,0,I{r}/L{r})" for r in filas]
+    gyp["VVL_PEN"] = [f"=M{r}*J{r}" for r in filas]
+    gyp["Inv_MM_USD"] = [f'=IF(K{r}=0,"",N{r}/K{r}/1000000)' for r in filas]
+    gyp["Weight_Verif"] = [f"=IF(J{r}=0,0,N{r}/J{r})" for r in filas]
+    gyp["Estado_Instrumento"] = extra_series["Estado_Instrumento"].values
+    gyp["Estrategia_Final"] = extra_series["Estrategia_Final"].values
+    gyp["Emisor_Final"] = extra_series["Emisor_Final"].values
+    gyp.to_excel(xw, sheet_name=NOMBRE_HOJA_GYP, index=False)
+```
+
+Ubica (Ctrl+F):
+```python
+    combos = gyp[["Corte", "AFP", "Fondo"]].drop_duplicates().reset_index(drop=True)
+    col_r = 19  # columna S (deja R como separador tras Estado_Instrumento en Q)
+```
+Reemplaza con:
+```python
+    combos = gyp[["Corte", "AFP", "Fondo"]].drop_duplicates().reset_index(drop=True)
+    col_r = 21  # columna U (deja T como separador tras Emisor_Final en S)
+```
+
+---
+
+Corre el pipeline. En `G&P` vas a ver: `Emisor_Original`/`Estrategia_Original` (columnas G, H — tal cual venían en `BD1_S_Huella`) y, al final, `Estrategia_Final`/`Emisor_Final` (columnas R, S — el valor después del pipeline, igual al que muestra `BD`, vacío si el instrumento no llegó a sobrevivir). Ahora las dos hojas deberían "hablar el mismo idioma": si comparas `Estrategia_Final` de G&P contra `Estrategia` de BD para el mismo SBS/Fondo, deberían calzar exacto — y si no calzan, eso sí sería una inconsistencia real que valdría la pena investigar.
+
+Sobre si hay más casos parecidos — estos dos (Estrategia, Emisor) eran los únicos nombres de columna que se repetían entre ambas hojas con significado potencialmente distinto; el resto (SBS, ISIN, Fondo, AFP, Corte) son identificadores que no deberían cambiar entre etapas. Si notas otro número o etiqueta que no calce entre hojas, dímelo con el SBS/Emisor puntual y lo rastreo igual que estos.
