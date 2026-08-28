@@ -1,0 +1,92 @@
+Buena pregunta. Voy a buscar literatura relevante que pueda cerrar esos gaps específicos y también reforzar la base conceptual donde tiene flancos.
+
+Tengo suficiente material. Te lo organizo en dos partes: primero lo que le falta a la base conceptual, y luego las referencias específicas para cerrar los tres gaps prioritarios.
+
+---
+
+## I. Gaps en la base conceptual (bibliografía ausente)
+
+El framework cita bien a los sospechosos habituales (Ben-David, Naffa & Fain, Morningstar/Lamont, Candès, de Carvalho, Friede). Pero le faltan tres líneas de literatura que reforzarían la solidez teórica:
+
+**1. Sizing de la asignación temática dentro de un portafolio multi-activo (la pregunta del "cuánto")**
+
+El documento dice "asignación satélite acotada" pero no tiene ningún modelo para dimensionarla. El paper que resuelve esto directamente es:
+
+**Somefun, K., Perchet, R., Yin, C. & Leote de Carvalho, R. (2023).** "Allocating to Thematic Investments." *Financial Analysts Journal*, 79(1), 18–36. Este paper introduce los temas como una dimensión adicional más allá de clases de activo, regiones, sectores y estilos, y propone un framework basado en optimización robusta de portafolios que permite definir la asignación óptima a temáticos dentro de un SAA, descontando la exposición a factores de riesgo tradicionales que el temático trae consigo. Es la pieza que falta para convertir "satélite acotado" en un número fundamentado.
+
+**2. Optimización conjunta core-satélite (no por separado)**
+
+**Methling, F. & von Nitzsch, R. (2019).** "Thematic Portfolio Optimization: Challenging the Core Satellite Approach." *Financial Markets and Portfolio Management*, 33(2), 133–154. El paper demuestra que optimizar el core y el satélite por separado —que es exactamente lo que la metodología de SURA AM propone implícitamente— ignora los efectos de correlación entre ambos, y los portafolios resultantes solo son eficientes por casualidad. Propone un modelo tri-criterio que optimiza conjuntamente.
+
+Complementariamente: **Methling, F. & von Nitzsch, R. (2020).** "Tailor-Made Thematic Portfolios: A Core Satellite Optimization." *Journal of Global Optimization*, 76(2), 317–331.
+
+Y: **Methling, F. & von Nitzsch, R. (2019).** "Naïve Diversification in Thematic Investing: Heuristics for the Core Satellite Investor." *Journal of Asset Management*, 20, 568–580. Este último es especialmente útil porque ofrece heurísticas prácticas de diversificación para el inversionista core-satellite cuando la optimización formal no es viable.
+
+**3. Framework de factibilidad para portafolios pequeños/medianos y gobernanza del satélite**
+
+**Garrone, R. (2026).** "Feasibility-First Satellite Integration in Robust Portfolio Architectures." *arXiv:2601.08721*. Este working paper formaliza cuatro capas de factibilidad para determinar si un satélite temático es admisible: factibilidad física (implementabilidad bajo impacto de mercado), económica (umbrales de costos), estructural (presupuesto de opcionalidad definido por la pérdida tolerable si la tesis falla), y epistémica (complejidad del satélite). Incluye un tiering del universo temático (Tier A: infraestructura, Tier B: plataformas, Tier C: adoptantes) y reglas de rebalanceo gobernadas por eventos, no por precio, que son directamente aplicables al modelo SURA.
+
+---
+
+## II. Referencias específicas para cerrar los tres gaps prioritarios
+
+### Gap 1 — Disciplina de entrada/salida con triggers cuantificados
+
+| Referencia | Qué aporta al gap |
+|---|---|
+| **BlackRock Systematic / THRO framework (2025–2026)** | El framework de BlackRock para su ETF THRO usa modelos de IA para analizar aproximadamente un millón de noticias financieras al año y más de 5,000 transcripciones de earnings calls, generando señales de entrada y salida basadas en sentimiento, momentum y valuación relativa. Las señales sistemáticas favorecen temas con sentimiento positivo y desempeño de precios fuerte, descontando factores tradicionales. No es un paper académico sino un framework operativo, pero es el mejor ejemplo disponible de disciplina de entrada/salida cuantificada y replicable para temáticos. Útil como referencia de industria. |
+| **Candès y otros (2025)** — ya citado | Su hallazgo de que los temas estadísticamente significativos exhiben *trending* implica que la persistencia de la señal temática es medible y puede usarse como condición de entrada (tema con correlación residual creciente) y de salida (tema cuya correlación residual se disipa → la tesis se ha graduado o ha fracasado). |
+| **Garrone (2026)** — citado arriba | Define que el rebalanceo del satélite no se dispara por momentum o señales de valuación, sino por eventos gobernados: deterioro de la tesis, cambio regulatorio, o violación de los umbrales de factibilidad. Esto da el marco formal para triggers de salida. |
+| **Gartner Hype Cycle** adaptado a inversión temática | El Hype Cycle de Gartner proporciona un framework para entender las fases de adopción tecnológica y puede dar señales sobre en qué fase invertir o evitar. El framework no incluye ningún modelo de ciclo de adopción; el Hype Cycle (Innovation Trigger → Peak of Inflated Expectations → Trough of Disillusionment → Slope of Enlightenment → Plateau of Productivity) es adaptable como marco para decidir cuándo entrar (Trough/Slope) y cuándo no (Peak). No es académico per se, pero Fenn (1995) lo formalizó y hay literatura que lo cruza con el Technology Adoption Lifecycle de Moore (1991, *Crossing the Chasm*). |
+| **Ben-David y otros (2023)** — ya citado | Provee la evidencia cuantitativa del *cuándo no entrar*: los ETFs especializados lanzados en pico de flujos pierden ~30% ajustado por riesgo en 5 años. El gap está en que el framework cita la evidencia pero no la traduce en un filtro operativo (ej. "no invertir en vehículos con <3 años de antigüedad cuyo AUM creció >100% en sus primeros 12 meses"). |
+
+**Sugerencia concreta:** Combinar la evidencia de Ben-David (filtro anti-euforia), el Hype Cycle adaptado (clasificación de fase), y la lógica de Garrone (triggers de salida por eventos) en un protocolo de 3 pasos: (i) clasificar la fase del tema, (ii) evaluar valuación de entrada vs. z-score histórico, (iii) definir triggers de salida ex ante al momento de invertir (con responsable y plazo).
+
+**Graduación del tema** (completamente ausente): no encontré un paper académico que defina formalmente cuándo un tema "se gradúa" a sector. La sugerencia operativa sigue siendo la que planteé en la auditoría: cuando el tema tiene sector GICS propio, peso >5% en MSCI ACWI, y R² >0.85 con el mercado amplio, se evalúa para migración al core. Se puede sustentar con Candès (la correlación residual del tema se vuelve indistinguible del mercado → el tema ya no aporta diversificación).
+
+---
+
+### Gap 2 — Sizing y gobernanza
+
+| Referencia | Qué aporta al gap |
+|---|---|
+| **Somefun, Perchet, Yin & de Carvalho (2023)** | El paper clave. Provee el modelo cuantitativo para definir cuánto asignar al sleeve temático dentro del SAA, usando optimización robusta que descuenta la exposición a factores tradicionales. Directamente aplicable al mandato AFP. |
+| **Methling & von Nitzsch (2019, 2020)** | Demuestran por qué optimizar core y satélite por separado es subóptimo y proveen el modelo tri-criterio. El paper de 2019 sobre heurísticas de diversificación naïve es especialmente útil para implementación práctica cuando la optimización formal no es factible (ej. si no se cuenta con la infraestructura cuantitativa). |
+| **Garrone (2026)** | Formaliza un "presupuesto de opcionalidad" que limita el tamaño del satélite según la pérdida tolerable si la tesis falla. Esto es directamente traducible a: "el tamaño del sleeve temático no puede exceder X% del portafolio tal que, si la tesis falla completamente (drawdown máximo histórico del tema), la pérdida total del portafolio no exceda Y bps." |
+| **Brinson, Hood & Beebower (1986) / Brinson & Fachler (1985)** | El modelo de atribución Brinson es el framework más utilizado en gestión institucional para descomponer el retorno activo en efecto de asignación, efecto de selección e interacción. No está citado en el documento SURA y es la base para la atribución de performance del sleeve temático. |
+| **Jiang, Reistad & Sáenz (2013)** | Extienden el modelo Brinson para soportar estructuras jerárquicas de portafolios institucionales con múltiples benchmarks, atribuyendo performance a cuatro componentes: alfa del manager, construcción del portafolio, táctico y estratégico. Directamente aplicable a la estructura AFP con Fondos 0/1/2/3 y sleeve temático. |
+
+**Sugerencia concreta:** Usar el framework de Somefun y otros (2023) para calibrar bandas de asignación temática total (ej. 3–8% del equity del portafolio, sujeto a optimización robusta), complementado con el presupuesto de opcionalidad de Garrone para fijar el tope por subtemática individual. Documentar el sizing con ambas metodologías para el Comité.
+
+---
+
+### Gap 3 — Atribución de performance
+
+| Referencia | Qué aporta al gap |
+|---|---|
+| **Brinson, Hood & Beebower (1986)** | Framework base para descomponer el retorno del sleeve temático vs. benchmark en efecto de asignación (¿fue bueno tener temáticos?) y efecto de selección (¿elegimos los vehículos correctos dentro de cada tema?). |
+| **Brinson & Fachler (1985)** | Variante que permite benchmarks por segmento, aplicable si cada subtemática tiene su propio índice de referencia. |
+| **Jiang, Reistad & Sáenz (2013)** — SSRN 2431010 | La extensión institucional para portafolios jerárquicos: core + sleeve temático, con múltiples benchmarks, eliminando el término de interacción. |
+| **de Carvalho (2024)** — ya citado | Descompone el tracking error de fondos temáticos en contribuciones marginales de factores de riesgo sistemáticos como beta, estilos, industrias y países. Esto permite separar qué parte del retorno (o underperformance) del sleeve temático viene del tema vs. de sesgos de factor no intencionados. |
+| **Candès y otros (2025)** | Si el test de correlación residual se monitorea en el tiempo, sirve como indicador adelantado: cuando la correlación residual del tema se debilita, el sleeve está perdiendo su razón de ser como fuente de diversificación → trigger de revisión estratégica. |
+
+**Sugerencia concreta:** Implementar un reporte trimestral de atribución con tres capas: (i) Brinson clásico del sleeve vs. benchmark del fondo de pensiones (efecto asignación + selección); (ii) descomposición factorial al estilo de Carvalho (separar beta, estilo, sector, país del residuo temático puro); (iii) monitoreo de coherencia temática vía Candès (¿el tema sigue vivo como fuente de diversificación?). Si el sleeve underperforma al benchmark por >300 bps acumulados en 3 años *y* la coherencia temática se debilita, trigger de revisión profunda.
+
+---
+
+## III. Resumen de bibliografía a incorporar
+
+| Referencia | Gap que cierra | Prioridad |
+|---|---|---|
+| Somefun, Perchet, Yin & de Carvalho (2023), *FAJ* | Sizing del sleeve temático dentro del SAA | Alta |
+| Methling & von Nitzsch (2019), *FMPM* | Optimización conjunta core-satélite | Alta |
+| Methling & von Nitzsch (2019), *J Asset Mgmt* | Heurísticas de diversificación naïve para satélite | Media |
+| Methling & von Nitzsch (2020), *J Global Optim* | Portafolios temáticos a medida | Media |
+| Garrone (2026), arXiv:2601.08721 | Factibilidad del satélite, presupuesto de opcionalidad, triggers de salida | Alta |
+| Brinson, Hood & Beebower (1986), *FAJ* | Atribución de performance | Alta |
+| Brinson & Fachler (1985) | Atribución con benchmarks múltiples | Media |
+| Jiang, Reistad & Sáenz (2013), SSRN 2431010 | Atribución para portafolios institucionales jerárquicos | Media |
+| Moore, G.A. (1991/2014), *Crossing the Chasm* | Ciclo de adopción tecnológica → filtro de fase del tema | Media |
+| BlackRock Systematic / THRO framework (2025) | Referencia de industria para entrada/salida con señales cuantitativas | Baja (no académica) |
+
+Las 4 de prioridad alta son las que más impacto tendrían en transformar el documento de tesis de inversión a manual operativo.
