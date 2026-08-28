@@ -1,0 +1,57 @@
+Mi error — te di un solo update para la línea del `_cargar_bd1s_huella` pero en el script hay **DOS lugares distintos** donde se llama a esa función y se hace unpacking del retorno; solo se actualizó una, y el bucle por AFP usa la OTRA (la que sigue esperando 7 valores). Por eso `df_raw_afp` nunca se define en ese scope y truena en cada AFP.Ubico exactamente el problema. `_cargar_bd1s_huella` se llama dentro de `construir_valorizacion_bd1s`, que devuelve `(val, ctx)`. El loop de AFP **presentación** solo recibe `val, ctx` — no tiene visibilidad de `df_raw_afp`. Hay que meterlo dentro de `ctx` para que viaje.Ahora sí ubicado. Dos parches puntuales para completar el plumbing:
+
+---
+
+**BLOQUE A (rectificación) — `construir_valorizacion_bd1s`: unpack + guardar en ctx**
+
+Ubica (Ctrl+F):
+```python
+    df_val, caja_map, tc, aum_mm, caja_neta_mm, param_lk, sector_lk = \
+        _cargar_bd1s_huella(ruta_bd1s, afp, verbose)
+```
+Reemplaza con:
+```python
+    df_val, caja_map, tc, aum_mm, caja_neta_mm, param_lk, sector_lk, df_raw_afp = \
+        _cargar_bd1s_huella(ruta_bd1s, afp, verbose)
+```
+
+Ubica (Ctrl+F):
+```python
+    ctx = {
+        "config": cfg, "tc": tc, "sector_lookup": sector_lk,
+        "aum_multifondos_mm": aum_mm, "caja_neta_mm": caja_neta_mm,
+        "valorizacion_builder": vb,
+        "market_cap_loader": shared.get("mkt"),
+        "herencias": vb.get_inherited_history(),
+    }
+```
+Reemplaza con:
+```python
+    ctx = {
+        "config": cfg, "tc": tc, "sector_lookup": sector_lk,
+        "aum_multifondos_mm": aum_mm, "caja_neta_mm": caja_neta_mm,
+        "valorizacion_builder": vb,
+        "market_cap_loader": shared.get("mkt"),
+        "herencias": vb.get_inherited_history(),
+        "df_raw_afp": df_raw_afp,
+    }
+```
+
+---
+
+**BLOQUE B (rectificación) — loop de Presentación: leer `df_raw_afp` desde `ctx`**
+
+Ubica (Ctrl+F):
+```python
+            _gyp_afp = pres.gyp_pesos_universo(df_raw=df_raw_afp)
+```
+Reemplaza con:
+```python
+            _gyp_afp = pres.gyp_pesos_universo(df_raw=ctx.get("df_raw_afp"))
+```
+
+---
+
+**Nota sobre el otro warning (no urgente):** el `SyntaxWarning: "\s" is an invalid escape sequence` en línea 4989 es cosmético — es un string de JavaScript embebido para el dashboard que Python interpreta como escape. No rompe nada, solo lo marca. Cuando quieras limpiarlo, es prefijar la string con `r` (raw string). Si quieres el fix ahora, dime y te lo mando; si no, sigue funcionando igual.
+
+Corre de nuevo — los 5 AFPs deberían llegar hasta el final, y la hoja G&P debería salir con la columna `Estado_Instrumento` poblada.
