@@ -1,0 +1,27 @@
+Rastreé la fórmula real detrás de `P10`/`Y10` en Rep4, y encontré algo que cambia el diagnóstico por completo — **no estás comparando lo mismo en ambos lados.**
+
+## Lo que encontré
+
+`Rep4!P10 = P12 + P21`, que se descompone en ~15 sub-filas, y todas terminan en fórmulas como:
+```
+Detallado!AI:AI  →  SUMIF(Detallado!$B:$B, categoría, Detallado!AI:AI)
+```
+
+Columna **AI** de "Detallado" no es un peso/weight plano — es **`IN_F2_GAP`** (fila 6/7/9 del header lo confirman: bloque `IN` = Integra, `F2` = Fondo2, columna `GAP`). Revisé el header completo de "Detallado" (fila 10, hasta la columna 439) y **no existe ninguna columna de "Weight" o "Peso" plano en toda la hoja** — absolutamente todo el dato numérico de posicionamiento está expresado como pares `GAP`/`PBS`, por cada combinación AFP×Fondo×categoría. Además el libro trae fila `Escenario = 'T'`, `Fecha Ini`/`Fecha Fin`, y celdas `Modelo`/`LCC` — es decir, `Detallado` es la salida de una **herramienta de modelamiento/rebalanceo** (con macros VBA incluidas, no solo fórmulas), no un snapshot plano de posición actual.
+
+## Por qué esto explica el gap sin ser un bug nuestro
+
+`Rep4!P10` (GAP vs. Modelo) y tu `Weight_Original` de `BD1_S_Huella` (peso real/crudo de cartera) son dos **metodologías distintas que conviven en el mismo ecosistema G&P**, no dos formas de calcular lo mismo:
+
+- **`Weight_Original`** (lo que usamos): posición real/absoluta de cada instrumento en el Fondo, tal cual viene en `BD1_S_Huella.xlsx`.
+- **`Rep4 P10/Y10`**: salida de un modelo de GAP-vs-target, que probablemente usa una base/denominador o un universo de instrumentos ligeramente distinto al de `BD1_S_Huella` (por eso el ~0.2%-0.3% de diferencia — no es aleatorio ni gigante, es consistente con una diferencia de metodología, no con pérdida de datos).
+
+Esto también explica por qué usar el weight normalizado o el original no cambió nada — el problema no está en cuál de los dos weights tuyos uses, está en que el punto de comparación (`Rep4`) no es la misma variable.
+
+## Lo que sí puedo confirmarte, y lo que no
+
+Dentro de nuestro propio proceso (desde que `BD1_S_Huella.xlsx` entra al pipeline), ya rastreamos exhaustivamente cada etapa — filtros, normalización, reclasificación ALT — y `Estado_Instrumento` en `G&P` te muestra cualquier instrumento descartado, con su motivo. No encuentro ahí ninguna fuga adicional para ALT específicamente.
+
+Lo que **no puedo verificar** desde aquí es la etapa ANTERIOR: cómo `BD1_S_Huella.xlsx` se genera a partir de este mismo `Detallado`/G&P_MLab — ese proceso corre fuera de nuestro script (soy ciego a esa conversión). Si el "Weight" que trae `BD1_S_Huella` para los ALT también debería reconciliar exactamente contra el GAP de `Rep4` (Escenario T), esa es una pregunta para quien arma `BD1_S_Huella` — no algo que yo pueda corregir en el pipeline Python, porque el pipeline nunca ve el "Detallado" original, solo ve lo que `BD1_S_Huella` ya trae calculado.
+
+¿Tiene sentido esto con lo que sabes del proceso de generación de `BD1_S_Huella`, o quieres que busquemos otra pista (por ejemplo, revisar si "Posición" columna O de Detallado — que vimos vale "1", parece un rango/orden, no un peso — significa algo distinto de lo que asumí)?
