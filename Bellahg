@@ -1,0 +1,87 @@
+CONTROL+F → buscar exactamente:
+```
+    Dim Ignorados As Long
+```
+INSERTAR INMEDIATAMENTE DESPUÉS DE:
+```
+    Dim frm As String
+```
+
+---
+
+CONTROL+F → buscar exactamente:
+```
+    For Each cht In wsPER.ChartObjects
+        For i = 1 To cht.Chart.SeriesCollection.Count
+        Set ser = cht.Chart.SeriesCollection(i)
+        Debug.Print cht.Name & " -> " & ser.Formula
+            If re.Test(ser.Formula) Then
+                On Error Resume Next
+
+                ser.Formula = re.Replace(ser.Formula, "$1" & lastColLetter & "$2")
+                
+                If Err.Number <> 0 Then
+                    Debug.Print "IGNORADO -> " & cht.Name & _
+                                " | Serie " & i & _
+                                " | " & Err.Description
+                
+                    Err.Clear
+                End If
+                
+                On Error GoTo ErrHandler
+            End If
+        Next i
+    Next cht
+```
+REEMPLAZAR POR:
+```
+    For Each cht In wsPER.ChartObjects
+        For i = 1 To cht.Chart.SeriesCollection.Count
+
+            On Error Resume Next
+            Err.Clear
+            Set ser = cht.Chart.SeriesCollection(i)
+            frm = ser.Formula
+            If Err.Number <> 0 Then
+                Debug.Print "IGNORADO -> " & cht.Name & " | Serie " & i & " | " & Err.Description
+                Ignorados = Ignorados + 1
+                Err.Clear
+                On Error GoTo ErrHandler
+                GoTo SiguienteSerie
+            End If
+            On Error GoTo ErrHandler
+
+            Debug.Print cht.Name & " -> " & frm
+
+            If re.Test(frm) Then
+                On Error Resume Next
+                Err.Clear
+
+                ser.Formula = re.Replace(frm, "$1" & lastColLetter & "$2")
+
+                If Err.Number <> 0 Then
+                    Debug.Print "IGNORADO -> " & cht.Name & _
+                                " | Serie " & i & _
+                                " | " & Err.Description
+                    Ignorados = Ignorados + 1
+                    Err.Clear
+                End If
+
+                On Error GoTo ErrHandler
+            End If
+
+SiguienteSerie:
+        Next i
+    Next cht
+```
+
+---
+
+CONTROL+F → buscar exactamente:
+```
+    MsgBox "Rangos actualizados hasta columna " & lastColLetter & " en " & wsPER.ChartObjects.Count & " charts.", vbInformation
+```
+REEMPLAZAR POR:
+```
+    MsgBox "Rangos actualizados hasta columna " & lastColLetter & " en " & wsPER.ChartObjects.Count & " charts." & vbCrLf & "Series ignoradas: " & Ignorados, vbInformation
+```
