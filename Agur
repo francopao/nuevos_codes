@@ -1,0 +1,51 @@
+Sub ActualizarRangosChartsPER()
+
+    Dim wsData As Worksheet
+    Dim wsPER As Worksheet
+    Dim cht As ChartObject
+    Dim ser As Series
+    Dim lastCol As Long
+    Dim lastColLetter As String
+    Dim re As Object
+    Dim patron As String
+    Dim i As Long
+
+    On Error GoTo ErrHandler
+
+    Set wsData = ThisWorkbook.Sheets("Data Graf")
+    Set wsPER = ThisWorkbook.Sheets("PER")
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    ' Determinar última columna con datos reales (fila 2 = fechas)
+    lastCol = wsData.Cells(2, wsData.Columns.Count).End(xlToLeft).Column
+    lastColLetter = Split(wsData.Cells(1, lastCol).Address, "$")(1)
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    patron = "('" & wsData.Name & "'!\$[A-Za-z]{1,3}\$\d+:\$)[A-Za-z]{1,3}(\$\d+)"
+    re.Pattern = patron
+
+    For Each cht In wsPER.ChartObjects
+        For i = 1 To cht.Chart.SeriesCollection.Count
+            Set ser = cht.Chart.SeriesCollection(i)
+            If re.Test(ser.Formula) Then
+                ser.Formula = re.Replace(ser.Formula, "$1" & lastColLetter & "$2")
+            End If
+        Next i
+    Next cht
+
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+
+    MsgBox "Rangos actualizados hasta columna " & lastColLetter & " en " & wsPER.ChartObjects.Count & " charts.", vbInformation
+    Exit Sub
+
+ErrHandler:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    MsgBox "Error: " & Err.Description, vbCritical
+
+End Sub
