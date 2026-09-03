@@ -1,0 +1,207 @@
+Sub Actualizar_Charts_Franco()
+
+    Dim wsData As Worksheet
+    Dim wsPER As Worksheet
+    Dim wsBackup As Worksheet
+    Dim cht As ChartObject
+    Dim ser As Series
+    Dim lastCol As Long
+    Dim lastColLetter As String
+    Dim re As Object
+    Dim patron As String
+    Dim i As Long
+    Dim Ignorados As Long
+    Dim frm As String
+    Dim nuevaFormula As String
+    Dim huboCambio As Boolean
+    Dim huboOmision As Boolean
+    Dim backupRow As Long
+    Dim nombreBackup As String
+
+    On Error GoTo ErrHandler
+
+    Set wsData = ThisWorkbook.Sheets("Data Graf")
+    Set wsPER = ThisWorkbook.Sheets("PER")
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    lastCol = wsData.Cells(2, wsData.Columns.Count).End(xlToLeft).Column
+    lastColLetter = Split(wsData.Cells(1, lastCol).Address, "$")(1)
+
+    nombreBackup = Left("Bkp_" & Format(Now, "yyyymmdd_hhmmss"), 31)
+    Set wsBackup = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+    wsBackup.Name = nombreBackup
+    wsBackup.Range("A1:C1").Value = Array("Chart", "Serie", "Formula")
+    backupRow = 2
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    patron = "('" & wsData.Name & "'!\$[A-Za-z]{1,3}\$\d+:\$)[A-Za-z]{1,3}(\$\d+)"
+    re.Pattern = patron
+
+    For Each cht In wsPER.ChartObjects
+        For i = 1 To cht.Chart.SeriesCollection.Count
+
+            frm = ""
+            On Error Resume Next
+            Set ser = cht.Chart.SeriesCollection(i)
+            frm = ser.Formula
+            If Err.Number <> 0 Or frm = "" Then
+                Debug.Print "IGNORADO -> " & cht.Name & " | Serie " & i & " | " & Err.Description
+                Ignorados = Ignorados + 1
+                Err.Clear
+                On Error GoTo ErrHandler
+                GoTo SiguienteSerie
+            End If
+            On Error GoTo ErrHandler
+
+            Debug.Print cht.Name & " -> " & frm
+
+            wsBackup.Cells(backupRow, 1).Value = cht.Name
+            wsBackup.Cells(backupRow, 2).Value = i
+            wsBackup.Cells(backupRow, 3).Value = "'" & frm
+            backupRow = backupRow + 1
+
+            If re.Test(frm) Then
+                nuevaFormula = ExpandirFormula(frm, re, wsData, lastCol, lastColLetter, huboCambio, huboOmision)
+
+                If huboOmision Then
+                    Debug.Print "OMITIDO PARCIAL -> " & cht.Name & " | Serie " & i & " | fila destino sin datos en col " & lastColLetter
+                    Ignorados = Ignorados + 1
+                End If
+
+                If huboCambio Then
+                    On Error Resume Next
+                    Err.Clear
+                    ser.Formula = nuevaFormula
+                    If Err.Number <> 0 Then
+                        Debug.Print "IGNORADO -> " & cht.Name & " | Serie " & i & " | " & Err.Description
+                        Ignorados = Ignorados + 1
+                        Err.Clear
+                    End If
+                    On Error GoTo ErrHandler
+                End If
+            End If
+
+SiguienteSerie:
+        Next i
+    Next cht
+
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+
+    MsgBox "Rangos actualizados hasta columna " & lastColLetter & " en " & wsPER.ChartObjects.Count & " charts." & vbCrLf & _
+           "Series ignoradas: " & Ignorados & vbCrLf & _
+           "Backup guardado en hoja: " & wsBackup.Name, vbInformation
+    Exit Sub
+
+ErrHandler:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    MsgBox "Error: " & Err.Description, vbCritical
+
+End Sub
+
+
+Private Function ExpandirFormula(ByVal frm As String, ByVal re As Object, _
+    ByVal wsData As Worksheet, ByVal lastCol As Long, ByVal lastColLetter As String, _
+    ByRef huboCambio As Boolean, ByRef huboOmision As Boolean) As String
+
+    Dim mc As Object
+    Dim m As Object
+    Dim resultado As String
+    Dim fila As Long
+    Dim k As Long
+    Dim nuevoTrozo As String
+
+    resultado = frm
+    huboCambio = False
+    huboOmision = False
+
+    Set mc = re.Execute(frm)
+    If mc.Count = 0 Then
+        ExpandirFormula = frm
+        Exit Function
+    End If
+
+    For k = mc.Count - 1 To 0 Step -1
+        Set m = mc(k)
+
+        fila = 0
+        If m.SubMatches.Count >= 2 Then
+            If Len(m.SubMatches(1)) > 1 Then
+                fila = Val(Mid(m.SubMatches(1), 2))
+            End If
+        End If
+
+        If fila > 0 And fila <= wsData.Rows.Count Then
+            If Not IsEmpty(wsData.Cells(fila, lastCol).Value) Then
+                nuevoTrozo = m.SubMatches(0) & lastColLetter & m.SubMatches(1)
+                resultado = Left(resultado, m.FirstIndex) & nuevoTrozo & Mid(resultado, m.FirstIndex + m.Length + 1)
+                huboCambio = True
+            Else
+                huboOmision = True
+            End If
+        Else
+            huboOmision = True
+        End If
+    Next k
+
+    ExpandirFormula = resultado
+
+End Function
+
+
+Sub Restaurar_Ultimo_Backup()
+
+    Dim wsPER As Worksheet
+    Dim wsBackup As Worksheet
+    Dim ws As Worksheet
+    Dim ultimoBackup As Worksheet
+    Dim r As Long
+    Dim nombreChart As String
+    Dim idxSerie As Long
+    Dim formulaOriginal As String
+
+    On Error GoTo ErrHandler
+
+    For Each ws In ThisWorkbook.Sheets
+        If Left(ws.Name, 4) = "Bkp_" Then
+            If ultimoBackup Is Nothing Then
+                Set ultimoBackup = ws
+            ElseIf ws.Name > ultimoBackup.Name Then
+                Set ultimoBackup = ws
+            End If
+        End If
+    Next ws
+
+    If ultimoBackup Is Nothing Then
+        MsgBox "No se encontró ninguna hoja de backup.", vbExclamation
+        Exit Sub
+    End If
+
+    Set wsPER = ThisWorkbook.Sheets("PER")
+    Set wsBackup = ultimoBackup
+
+    r = 2
+    Do While wsBackup.Cells(r, 1).Value <> ""
+        nombreChart = wsBackup.Cells(r, 1).Value
+        idxSerie = wsBackup.Cells(r, 2).Value
+        formulaOriginal = wsBackup.Cells(r, 3).Value
+
+        On Error Resume Next
+        wsPER.ChartObjects(nombreChart).Chart.SeriesCollection(idxSerie).Formula = formulaOriginal
+        On Error GoTo ErrHandler
+
+        r = r + 1
+    Loop
+
+    MsgBox "Restauración completada desde: " & wsBackup.Name, vbInformation
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Error al restaurar: " & Err.Description, vbCritical
+
+End Sub
