@@ -1,0 +1,492 @@
+# De Scores CENEPRED a Valoración Corporativa
+
+**Framework metodológico para traducir riesgo físico climático en impacto financiero sobre emisores peruanos.**
+Diseñado para uso institucional en equity valuation, credit analysis y portfolio construction.
+
+---
+
+## Contenido
+
+1. [Arquitectura general del framework](#1-arquitectura-general-del-framework)
+2. [Punto de partida: los scores CENEPRED](#2-punto-de-partida-los-scores-cenepred)
+3. [Módulo I — Impact Pathways sectoriales](#3-módulo-i--impact-pathways-sectoriales)
+   - 3.1 Matriz Hazard × Sector × Pathway
+   - 3.2 Detalle por sector peruano
+4. [Módulo II — Sensibilidad empresarial (Vulnerability)](#4-módulo-ii--sensibilidad-empresarial-vulnerability)
+   - 4.1 Variables de sensibilidad
+   - 4.2 Cálculo de Vulnerability Score
+5. [Módulo III — Elasticidades y estimación de impacto financiero](#5-módulo-iii--elasticidades-y-estimación-de-impacto-financiero)
+   - 5.1 Enfoque de elasticidades calibradas
+   - 5.2 Funciones de impacto por pathway
+   - 5.3 Agregación a nivel empresa
+6. [Módulo IV — Ajuste de estados financieros](#6-módulo-iv--ajuste-de-estados-financieros)
+7. [Módulo V — Incorporación en modelos de valoración](#7-módulo-v--incorporación-en-modelos-de-valoración)
+   - 7.1 DCF y DDM ajustados
+   - 7.2 Múltiplos ajustados
+   - 7.3 Credit analysis ajustado
+   - 7.4 Costo de capital ajustado
+8. [Tratamiento de escenarios y horizonte temporal](#8-tratamiento-de-escenarios-y-horizonte-temporal)
+9. [Limitaciones, supuestos y plan de validación](#9-limitaciones-supuestos-y-plan-de-validación)
+10. [Resumen ejecutivo del framework](#10-resumen-ejecutivo-del-framework)
+
+---
+
+## 1. Arquitectura general del framework
+
+El framework opera como una cadena causal de seis eslabones. Cada eslabón es un módulo autónomo con inputs definidos, lógica explícita y outputs verificables. El principio rector es que cada paso sea auditable: un analista debe poder recorrer la cadena completa para cualquier emisor y explicar cada número.
+
+> **Score CENEPRED** (1–5, por hazard, por activo, ponderado a nivel empresa)
+> → **Impact Pathways** (canales económicos sectoriales)
+> → **Sensibilidad empresarial** (vulnerability de la firma)
+> → **Impacto financiero estimado** (Δ% sobre líneas del P&L / balance)
+> → **Estados financieros ajustados** (EBITDA, FCF, deuda neta)
+> → **Valoración ajustada** (DCF, múltiplos, credit, WACC)
+
+La arquitectura se inspira en, pero se diferencia de, tres enfoques de referencia que el repositorio documenta extensamente: la metodología de S&P Global Sustainable1, que construye impact functions por tipo de activo y hazard para más de 270 categorías, pero las expresa como porcentaje del valor del activo sin conectar directamente al P&L sectorial; el Climate Dividend Discount Model de Bressan et al. (2024) en Nature Communications, que integra riesgos agudos (a nivel de activo vía CLIMADA) y crónicos (a nivel de línea de negocio vía modelos macro) dentro de un DDM de tres etapas; y el enfoque de Rebonato et al., que conecta daños climáticos con equity valuation vía funciones de daño estocásticas sobre consumo y productividad.
+
+Nuestro framework toma lo mejor de cada uno, pero resuelve tres problemas que ninguno aborda por separado para un mercado como el peruano: opera sobre scores ordinales (1–5) en lugar de variables continuas de hazard, incorpora sensibilidad empresa-específica medible con datos disponibles en la BVL, y conecta directamente con las líneas del estado de resultados que un analista fundamental utiliza.
+
+> **Principio de diseño:** Cada módulo puede funcionar con diferentes niveles de información. Si existe data granular, se usa. Si no existe, se usan proxy sectoriales calibrados. La precisión es proporcional a la información disponible, nunca falsa.
+
+---
+
+## 2. Punto de partida: los scores CENEPRED
+
+El framework asume como dato los scores de exposición física ya calculados y validados internamente. No se cuestiona ni se redefine el proceso de georreferenciación, el mapeo de activos corporativos, ni la metodología CENEPRED. Estos scores son el input inmutable de todo lo que sigue.
+
+### Especificaciones del input
+
+| Dimensión | Especificación |
+|---|---|
+| Hazards cubiertos | Inundaciones, Movimientos de Masa (huaicos, deslizamientos, derrumbes), Sequías |
+| Escala | 1 (muy bajo) a 5 (muy alto), ordinal, consistente entre hazards |
+| Nivel de granularidad | Activo físico individual georreferenciado |
+| Agregación a empresa | Promedio ponderado por peso económico del activo (capex, capacidad, revenue contribution) |
+| Notación | S(h,j) = score del hazard h para la empresa j, donde h ∈ {inundación, masa, sequía} |
+
+### Conversión de escala ordinal a intensidad económica
+
+Un problema central que ninguna de las metodologías del repositorio resuelve explícitamente para scores ordinales es la conversión de una escala discreta (1–5) a una variable de intensidad que pueda alimentar funciones de impacto financiero. La escala ordinal no es lineal en términos económicos: la diferencia de impacto entre un score 4 y un score 5 es probablemente mucho mayor que entre un 1 y un 2.
+
+Proponemos una **función de mapeo convexa** que transforma el score ordinal en un factor de intensidad económica normalizado entre 0 y 1:
+
+```
+φ(S) = (S − 1)^α / (5 − 1)^α
+
+donde α > 1 captura la convexidad del impacto (el daño crece más que proporcionalmente)
+
+Calibración propuesta: α = 1.5 (conservador) a α = 2.0 (agresivo)
+
+Resultados con α = 1.5:
+S=1 → φ=0.000 | S=2 → φ=0.125 | S=3 → φ=0.354 | S=4 → φ=0.650 | S=5 → φ=1.000
+```
+
+La elección de α = 1.5 como caso base se justifica por la evidencia empírica de que las funciones de daño por desastres naturales son convexas: la revisión de Merz et al. (2010) sobre evaluación de daño por inundaciones documenta extensamente que la relación entre intensidad del hazard y pérdida económica es no lineal y creciente. La función φ(S) transforma el score de "cuánta exposición existe" a "cuánta intensidad de impacto esperamos", preservando la interpretabilidad: φ=0 significa sin impacto esperado, φ=1 significa máxima intensidad esperada.
+
+> **Decisión de calibración:** El parámetro α puede afinarse cuando existan datos históricos de siniestralidad. En ausencia de datos, α=1.5 es un punto de partida conservador y económicamente razonable. La sensibilidad del output final a α debe reportarse siempre.
+
+---
+
+## 3. Módulo I — Impact Pathways sectoriales
+
+Un impact pathway es el mecanismo económico causal a través del cual un hazard físico afecta una variable financiera de la empresa. No es una correlación estadística: es una cadena de causalidad identificable que un analista puede trazar desde el evento climático hasta una línea del P&L.
+
+La identificación de pathways se construye sobre múltiples fuentes del repositorio. La metodología de S&P Sustainable1 identifica impact pathways específicos para más de 270 tipos de activos, como costos de enfriamiento, degradación de equipos y productividad laboral para edificios de oficinas expuestos a calor extremo. El paper de Dell et al. (2014), "What Do We Learn from the Weather", documenta que la producción no agrícola cae un 2.4% por cada 1°C adicional en países de ingreso medio, afectando minería y utilities entre otros sectores. El estudio de la cadena de suministro de De Spiegeleer et al. demuestra que una duplicación de la frecuencia de inundaciones aumenta los defaults simulados en 13.4%, y los de sequías en 7.9%. Y el paper de Wang y Pan (2025) sobre sequías y retornos bursátiles en China encuentra que cada mes adicional de sequía reduce los retornos de firmas en industrias dependientes del agua en 0.288 puntos porcentuales.
+
+### 3.1 Matriz Hazard × Sector × Pathway
+
+#### INUNDACIONES
+
+| Sector | Pathway principal | Variable afectada | Dirección |
+|---|---|---|---|
+| Minería | Daño a infraestructura de procesamiento, interrupción de acceso vial, paralización de operaciones, contaminación de relaves | Revenue ↓, Opex ↑, Capex de reposición ↑ | Negativa |
+| Utilities (generación) | Daño a subestaciones, inundación de centrales térmicas en zonas bajas, sedimentación de embalses | Opex ↑, Asset value ↓, Revenue ↓ (interrupciones) | Mixta (hidro puede beneficiarse de mayor caudal en el corto plazo) |
+| Distribución eléctrica | Daño a torres y líneas de transmisión, interrupción del servicio, costos de reconexión | Opex ↑, Revenue ↓ (cortes), Capex ↑ | Negativa |
+| Cemento / Construcción | Daño a canteras y plantas, interrupción logística, pero aumento de demanda de reconstrucción post-evento | Revenue ↑ (post), Opex ↑ (durante) | Mixta |
+| Puertos | Sedimentación, daño a muelles y grúas, interrupción de operaciones portuarias | Revenue ↓, Capex ↑ | Negativa |
+| Agroindustria | Destrucción de cultivos, pérdida de inventario, daño a plantas de procesamiento | Revenue ↓, COGS ↑, Asset value ↓ | Negativa |
+| Consumo / Retail | Daño a centros de distribución y tiendas, interrupción logística, destrucción de inventario | Revenue ↓ (temporal), Opex ↑ | Negativa (temporal) |
+| Banca | Deterioro de colateral inmobiliario, aumento de mora en zonas afectadas, daño a sucursales | Provisiones ↑, NIM comprimido, Asset quality ↓ | Negativa |
+
+#### MOVIMIENTOS DE MASA
+
+| Sector | Pathway principal | Variable afectada | Dirección |
+|---|---|---|---|
+| Minería | Destrucción de vías de acceso, bloqueo de operaciones, pérdida de campamentos, daño a ductos de transporte de mineral | Revenue ↓ (paralización prolongada), Capex ↑ | Altamente negativa |
+| Utilities | Destrucción de canales de aducción, daño a centrales en zonas de ladera, corte de líneas de transmisión en zonas andinas | Revenue ↓, Capex ↑, Opex ↑ | Negativa |
+| Cemento | Daño a canteras de montaña, interrupción de acceso a plantas | Revenue ↓ (temporal), Opex ↑ | Mixta |
+| Infraestructura / Puertos | Destrucción de carreteras, puentes, túneles — impacto en concesiones | Revenue ↓, Capex de emergencia ↑ | Negativa |
+| Agroindustria | Pérdida de terrenos agrícolas, destrucción de canales de irrigación, daño permanente a suelo productivo | Revenue ↓ (potencialmente permanente), Asset value ↓ | Altamente negativa |
+| Banca | Deterioro de colateral, pérdida total de activos inmobiliarios en zonas de riesgo | Provisiones ↑, LGD ↑ | Negativa |
+
+#### SEQUÍAS
+
+| Sector | Pathway principal | Variable afectada | Dirección |
+|---|---|---|---|
+| Minería | Restricción de agua para procesamiento de mineral, conflicto social por competencia hídrica, paralización regulatoria | Revenue ↓ (producción reducida), Opex ↑ (compra/transporte de agua) | Negativa |
+| Utilities (hidro) | Reducción de caudal → menor generación hidroeléctrica, mayor compra de energía en spot | Revenue ↓, COGS ↑ (compra en spot), margen ↓ | Altamente negativa |
+| Utilities (térmica) | Menor disponibilidad de agua de enfriamiento, pero mayor demanda de energía térmica cuando cae hidro | Revenue ↑ (oportunidad), Opex ↑ (agua) | Mixta (potencialmente positiva) |
+| Cemento | Restricción moderada de agua para producción | Opex ↑ (marginal) | Débilmente negativa |
+| Agroindustria | Reducción de rendimiento de cultivos, pérdida parcial o total de cosechas, aumento de costo de riego | Revenue ↓↓, COGS ↑, márgenes colapsados | Altamente negativa |
+| Consumo / Retail | Presión inflacionaria en alimentos (segundo orden), reducción de poder adquisitivo en zonas rurales | Revenue ↓ (volumen), COGS ↑ | Negativa (moderada) |
+| Banca | Deterioro de cartera agropecuaria, aumento de mora en zonas rurales, menor actividad económica regional | Provisiones ↑, crecimiento de cartera ↓ | Negativa |
+
+### 3.2 Detalle: pathway prioritario por sector peruano
+
+**Minería** `[Inundación] [Masa] [Sequía]`
+
+La minería peruana enfrenta los tres hazards con materialidad distinta. Los movimientos de masa son el riesgo más severo porque pueden generar paralizaciones prolongadas (las operaciones están mayoritariamente en zonas andinas con riesgo geotécnico). Las inundaciones afectan infraestructura de procesamiento y transporte. La sequía actúa a través de un canal único: la competencia por agua con comunidades agrícolas, que puede derivar en conflictos sociales y paralizaciones regulatorias aun cuando la empresa tenga derechos de uso.
+
+**Variables financieras clave:** días de producción perdidos (revenue), costos de reparación y contingencia (capex/opex), costos de obtención de licencia social (SG&A), provisiones por conflictos ambientales.
+
+**Evidencia empírica:** El paper de Wang y Pan (2025) documenta que las industrias mineras están entre las más vulnerables a sequías. Dell et al. (2014) muestran que el sector minero-utilities pierde producción tanto por ciclones como por temperaturas extremas. El modelo de De Spiegeleer et al. muestra que la minería es altamente sensible al canal de supply chain de inundaciones y sequías.
+
+---
+
+**Utilities y Generación Eléctrica** `[Inundación] [Sequía]`
+
+La generación hidroeléctrica tiene una relación directa y cuantificable con la sequía: menos agua, menos generación. En Perú, donde la hidroelectricidad representa una fracción significativa de la matriz, este es quizás el pathway más cuantificable del framework. Las inundaciones tienen un efecto opuesto para generadoras hidro (más caudal puede ser positivo hasta cierto umbral, luego destructivo), pero claramente negativo para infraestructura de transmisión.
+
+**Variables financieras clave:** factor de planta vs. caudal histórico, precio spot de electricidad (cuando la hidro cae, el spot sube, beneficiando térmicas), costo de compra de energía en mercado libre.
+
+**Evidencia empírica:** La literatura documenta que la generación eléctrica es el segundo mayor consumidor de agua dulce después de la agricultura. Las firmas puramente hidroeléctricas en la muestra de Bressan et al. (2024) muestran shocks crónicos de -3.02% en su equity valuation bajo SSP3-RCP4.5.
+
+---
+
+**Agroindustria** `[Sequía] [Inundación] [Masa]`
+
+La agroindustria es el sector con mayor superficie de impacto potencial. Los tres hazards son materiales. La sequía reduce rendimientos de cultivos directamente (este es el canal más estudiado en la literatura). Las inundaciones destruyen cosechas y activos. Los movimientos de masa pueden inutilizar permanentemente terrenos agrícolas productivos, representando un impacto sobre asset value que no tiene paralelo en otros sectores.
+
+**Variables financieras clave:** rendimiento por hectárea, costo de insumos agrícolas (agua, fertilizantes), hectáreas productivas disponibles, inventario de producto terminado.
+
+**Evidencia empírica:** El FMI (Kahn et al., 2019) documenta que la productividad agrícola es significativamente afectada por desvíos de temperatura y precipitación de normas históricas. El CGE model de Carrera et al. (2015) muestra que las inundaciones en zonas agrícolas generan pérdidas de productividad de tierra y trabajo que se propagan a otros sectores.
+
+---
+
+**Banca** `[Inundación] [Masa] [Sequía]`
+
+La banca enfrenta riesgo climático de segundo orden: no a través de sus propios activos físicos (salvo sucursales), sino a través del deterioro de la calidad crediticia de sus prestatarios expuestos y del deterioro de sus colaterales. Este es un canal de transmisión crediticio que opera vía PD (probability of default) y LGD (loss given default).
+
+**Variables financieras clave:** gasto en provisiones, ratio de morosidad por zona geográfica, valor de colateral inmobiliario en zonas de riesgo, concentración de cartera en sectores expuestos.
+
+**Evidencia empírica:** Kling et al. (2021) demuestran que la vulnerabilidad climática aumenta significativamente el costo de deuda (coeficiente 1.102 en modelo estructural), y que el efecto opera a través de mayor riesgo de default y restricción de acceso a financiamiento. El ECB climate stress test framework requiere que los bancos modelen el impacto en PD y LGD por sector NACE, lo que es directamente aplicable al marco peruano.
+
+---
+
+## 4. Módulo II — Sensibilidad empresarial (Vulnerability)
+
+Dos empresas del mismo sector con el mismo score de exposición pueden sufrir impactos financieros muy diferentes. La diferencia radica en su sensibilidad o vulnerabilidad. Una empresa con alta liquidez, seguros adecuados, diversificación geográfica y capacidad de adaptación absorbe shocks mejor que una empresa endeudada, concentrada geográficamente y sin planes de contingencia.
+
+Este módulo convierte la exposición homogénea del score CENEPRED en un impacto heterogéneo empresa-específico.
+
+### 4.1 Variables de sensibilidad
+
+Cada variable fue seleccionada porque (a) tiene un canal causal identificable hacia la capacidad de la empresa para absorber un shock climático, (b) es medible con información disponible para emisores listados en la BVL, y (c) tiene soporte empírico en la literatura del repositorio.
+
+| Variable | Canal causal | Medición | Soporte empírico |
+|---|---|---|---|
+| **Concentración geográfica** | Mayor concentración = mayor exposición al mismo evento | % de revenue o activos en un solo departamento/cuenca | S&P Sustainable1 pondera por dispersión de activos; Bressan et al. ajustan por asset-level data |
+| **Leverage financiero** | Mayor deuda = menor capacidad de absorber pérdidas inesperadas = mayor riesgo de default | Deuda Neta / EBITDA, Debt/Equity | Kling et al. (2021): leverage interactúa significativamente con vulnerabilidad climática. Wang y Pan (2025): ratio de cash flow operativo a deuda modera impacto de sequía |
+| **Cobertura de seguros** | Seguros transfieren parte del riesgo directo | Cualitativo/binario (tiene/no tiene) o % de activos asegurados | ECB stress test incluye seguros como mitigante. Merz et al. (2010) documenta diferencias dramáticas en daño económico neto con/sin seguro |
+| **Liquidez** | Mayor liquidez = mayor capacidad de respuesta inmediata post-evento | Current ratio, Cash / Revenue, Working Capital / Revenue | Wang y Pan (2025): el cash flow operativo como proporción de deuda modera significativamente el impacto de sequía (coeficiente interacción 0.003, p<0.05) |
+| **Intensidad de activos fijos** | Mayor proporción de activos fijos tangibles = mayor exposición a daño directo | PP&E / Total Assets | Kling et al. (2021): tangibilidad (TANG) es significativa en todos los modelos de costo de deuda. La lógica es directa: activos fijos no se pueden mover |
+| **Margen operativo** | Mayor margen = mayor "colchón" para absorber costos inesperados | EBITDA margin, Operating margin | La estructura de costos (Sautner et al., 2022) muestra que firmas con mayor rigidez de costos son más vulnerables |
+| **Dependencia hídrica** (sectorial) | Sectores dependientes del agua son más sensibles a sequía | Consumo de agua / ton producida, clasificación sectorial | Wang y Pan (2025): coeficiente de sequía es -0.288 para industrias water-dependent vs. -0.115 (no significativo) para non-water-dependent |
+| **Capacidad de adaptación demostrada** | Historial de respuesta a eventos previos | Cualitativo: planes de contingencia, inversiones en resiliencia, historial | De Spiegeleer et al.: adaptación reduce defaults significativamente (-16.9% para tormentas). ECB incluye "mitigating actions" en su framework |
+
+### 4.2 Cálculo del Vulnerability Score
+
+Proponemos un scoring de vulnerabilidad empresa-específico que combina las variables anteriores en un multiplicador de sensibilidad. Cada variable se normaliza a una escala de 0 a 1 (donde 1 = máxima vulnerabilidad) y se pondera por su importancia relativa para el sector.
+
+```
+V(j) = Σ_k  w(k,sector) × v(k,j)
+
+donde:
+V(j)          = vulnerability score de la empresa j (rango 0 a 1)
+w(k,sector)   = peso de la variable k para el sector (Σw = 1)
+v(k,j)        = valor normalizado [0,1] de la variable k para la empresa j
+```
+
+Las ponderaciones por sector reflejan la materialidad diferencial. Para minería, la concentración geográfica y la dependencia hídrica pesan más. Para banca, el leverage y la concentración de cartera sectorial son dominantes. Para agroindustria, la dependencia hídrica y la intensidad de activos fijos son las variables más materiales.
+
+| Variable | Minería | Utilities | Agroindustria | Cemento | Banca | Consumo |
+|---|---|---|---|---|---|---|
+| Concentración geográfica | 25% | 20% | 20% | 15% | 10% | 10% |
+| Leverage | 15% | 15% | 15% | 20% | 25% | 20% |
+| Seguros | 10% | 10% | 10% | 10% | 5% | 10% |
+| Liquidez | 10% | 10% | 10% | 15% | 10% | 20% |
+| Intensidad activos fijos | 10% | 15% | 15% | 15% | 5% | 15% |
+| Margen operativo | 10% | 10% | 10% | 15% | 15% | 15% |
+| Dependencia hídrica | 15% | 15% | 15% | 5% | 5% | 5% |
+| Capacidad adaptación | 5% | 5% | 5% | 5% | 25% | 5% |
+
+> **Nota metodológica:** Las ponderaciones son una propuesta inicial basada en juicio experto informado por la literatura. Deben ser validadas iterativamente. Una alternativa más sofisticada sería estimar las ponderaciones econométricamente cuando existan suficientes observaciones de eventos históricos en Perú. Pero para la versión inicial del framework, ponderaciones basadas en juicio experto son preferibles a estimaciones econométricas con pocas observaciones.
+
+---
+
+## 5. Módulo III — Elasticidades y estimación de impacto financiero
+
+Este es el módulo central del framework: donde los scores de exposición y la sensibilidad empresarial se convierten en estimaciones cuantitativas de impacto sobre variables financieras.
+
+### 5.1 Enfoque de elasticidades calibradas
+
+El concepto clave es la **elasticidad de impacto**: ¿cuánto cambia una variable financiera por unidad de intensidad de hazard? El enfoque no intenta predecir un número exacto, sino establecer un rango económicamente razonable que pueda usarse como input para análisis de sensibilidad en modelos de valoración.
+
+La fórmula general de impacto para una línea financiera F del emisor j expuesto al hazard h a través del pathway p es:
+
+```
+ΔF(j,h,p) = φ(S(h,j)) × V(j) × ε(h,p,sector) × F(j,base)
+
+donde:
+φ(S(h,j))       = intensidad económica derivada del score (Módulo 0)
+V(j)             = vulnerability score de la empresa j (Módulo II)
+ε(h,p,sector)    = elasticidad calibrada del pathway p para el hazard h en ese sector
+F(j,base)        = valor base de la variable financiera (normalización)
+```
+
+El resultado ΔF se expresa como porcentaje de la variable base. Un ΔRevenue de -3% significa que, dado ese nivel de exposición y vulnerabilidad, estimamos un impacto esperado anualizado de reducción del 3% sobre los ingresos.
+
+### 5.2 Funciones de impacto por pathway
+
+Las elasticidades ε se calibran a partir de tres fuentes, en orden de preferencia: (1) evidencia empírica directa del mercado peruano o mercados comparables, (2) estimaciones de la literatura académica revisada en el repositorio, (3) metodologías de proveedores comerciales ajustadas al contexto.
+
+#### Elasticidades propuestas: Inundaciones
+
+| Sector | Pathway | Variable | ε (rango) | Fuente / justificación |
+|---|---|---|---|---|
+| Minería | Paralización operativa | Revenue | -2% a -8% | Bressan et al.: acute shock de -51.5% para mining firms en RP250; EAI mucho menor. Dell et al.: -2.4% output por shock. Ajustado por duración media de evento en Perú |
+| Minería | Daño a activos | Capex | +1% a +5% | S&P S1: impacto como % del valor del activo. Merz et al.: funciones de daño para sector industrial |
+| Utilities | Interrupción de servicio | Revenue | -1% a -4% | De Spiegeleer et al.: utilities entre los sectores con mayor aumento de defaults por inundaciones |
+| Agroindustria | Pérdida de cosecha | Revenue | -5% a -20% | Modelo CGE de Carrera et al. (2015): pérdida de productividad agrícola por inundación. IMF: impacto amplio en sector agrícola |
+| Banca | Deterioro de cartera | Provisiones | +5% a +25% | ECB stress test: bancos deben estimar impacto en PD y LGD. Kling et al.: VUL coeficiente 1.102 en SEM para COD |
+
+#### Elasticidades propuestas: Sequías
+
+| Sector | Pathway | Variable | ε (rango) | Fuente / justificación |
+|---|---|---|---|---|
+| Minería | Restricción hídrica | Revenue | -1% a -5% | Wang y Pan (2025): coeficiente -0.288% por mes de sequía en water-dependent industries. Ajustado por intensidad hídrica de minería metálica peruana |
+| Utilities (hidro) | Reducción de generación | Revenue | -3% a -15% | Relación cuantificable: caudal → factor de planta → MWh → revenue. Bressan et al.: chronic shock de -3.02% para firmas 100% renewables |
+| Agroindustria | Caída de rendimiento | Revenue | -5% a -30% | IMF (Kahn et al., 2019): impacto sobre productividad agrícola es el más documentado. Altamente convexo |
+| Consumo | Presión inflacionaria insumos | COGS | +1% a +5% | Efecto de segundo orden vía precios agrícolas. Menor que impacto directo en agroindustria |
+
+#### Elasticidades propuestas: Movimientos de Masa
+
+| Sector | Pathway | Variable | ε (rango) | Fuente / justificación |
+|---|---|---|---|---|
+| Minería | Paralización prolongada + daño | Revenue | -5% a -25% | Los movimientos de masa son los eventos con mayor potencial de paralización prolongada en minería andina. Daño puede ser permanente. Rango amplio refleja severidad binaria del evento |
+| Infraestructura | Destrucción de vía concesionada | Revenue | -3% a -15% | Pérdida de peaje por corte de vía. Capex de reconstrucción potencialmente cubierto por estado pero con retrasos |
+| Agroindustria | Pérdida de terreno productivo | Asset value | -5% a -50% | Potencialmente permanente. La tierra destruida por huaico puede no recuperarse. Este es un impacto sobre la base de activos productivos, no sobre costos operativos |
+
+> **Sobre los rangos:** Las elasticidades se expresan como rangos, no como puntos estimados, porque reflejan incertidumbre genuina. En la práctica, se recomienda usar tres escenarios: base (mediana del rango), conservador (extremo bajo en valor absoluto), y severo (extremo alto). Esto es consistente con la práctica de scenario analysis recomendada por TCFD y NGFS.
+
+### 5.3 Agregación a nivel empresa
+
+Una empresa puede estar expuesta a múltiples hazards a través de múltiples pathways. La agregación requiere decisiones sobre independencia y correlación entre hazards.
+
+```
+ΔF(j,total) = Σ_h  Σ_p  ΔF(j,h,p) × (1 − ρ_overlap)
+
+En la práctica simplificada:
+
+ΔF(j,total) = Σ_h  [ φ(S(h,j)) × V(j) × Σ_p  ε(h,p,sector) ]
+```
+
+Donde ρ\_overlap es un factor de ajuste por doble conteo cuando dos pathways del mismo hazard afectan la misma línea financiera. En la versión inicial del framework, recomendamos tratar los hazards como independientes (la inundación en una zona y la sequía en otra son eventos distintos) pero los pathways del mismo hazard como parcialmente redundantes (aplicar un haircut del 10-20% al total para evitar sobreestimación).
+
+> **Principio de conservadurismo:** Cuando exista duda sobre la magnitud, preferir el extremo conservador del rango. Es preferible subestimar el impacto y tener que ajustar al alza que sobreestimarlo y perder credibilidad metodológica. Un framework que produce números sistemáticamente razonables, aunque conservadores, es más útil que uno que produce números llamativos pero no defendibles.
+
+---
+
+## 6. Módulo IV — Ajuste de estados financieros
+
+Los outputs del Módulo III son deltas porcentuales sobre líneas financieras específicas. Este módulo los convierte en estados financieros ajustados que pueden alimentar directamente modelos de valoración.
+
+### Procedimiento
+
+Partiendo de los estados financieros base (los más recientes o el promedio normalizado del emisor), se aplican los deltas estimados para producir estados financieros "climate-adjusted". El procedimiento es:
+
+**Paso 1 — Revenue ajustado:** Se aplica el delta de ingresos más material. Si el emisor es una minera con score 4 de inundación y pathway de paralización operativa con elasticidad base de -5%, y su vulnerability score es 0.6, entonces:
+
+```
+ΔRevenue = φ(4) × 0.6 × (-5%) = 0.650 × 0.6 × (-5%) = -1.95%
+
+Revenue ajustado = Revenue base × (1 - 0.0195)
+```
+
+**Paso 2 — COGS / Opex ajustado:** Se aplica el delta de costos correspondiente. Nótese que algunos costos suben (reparaciones, contingencia, compra de energía en spot) mientras revenue baja, lo cual comprime márgenes doblemente.
+
+**Paso 3 — EBITDA ajustado:** Se calcula como la diferencia entre revenue ajustado y costos ajustados. Este es el número central para valuation.
+
+**Paso 4 — Capex ajustado:** Se suma el capex adicional de reposición/adaptación.
+
+**Paso 5 — Free Cash Flow ajustado:** EBITDA ajustado menos impuestos ajustados, menos capex ajustado, más/menos cambios en capital de trabajo.
+
+**Paso 6 — Métricas de crédito ajustadas:** Deuda Neta / EBITDA ajustado, Interest Coverage con EBITDA ajustado, etc.
+
+### Ejemplo ilustrativo: Minera peruana con score 4 de inundación
+
+| Línea | Base (USD MM) | Delta % | Ajustado (USD MM) |
+|---|---|---|---|
+| Revenue | 2,000 | -1.95% | 1,961 |
+| COGS + Opex | -1,400 | +1.2% | -1,417 |
+| EBITDA | 600 | — | 544 |
+| Capex mantenimiento | -200 | +2.0% | -204 |
+| Free Cash Flow proxy | 400 | — | 340 |
+| Deuda Neta | 900 | sin cambio | 900 |
+| DN/EBITDA | 1.5x | — | 1.65x |
+
+El EBITDA cae un 9.3% y el DN/EBITDA pasa de 1.5x a 1.65x. Para una empresa con convenants en 2.5x esto no es problemático, pero para una empresa cercana a 2.5x podría ser material. Nótese que este es solo el impacto del hazard de inundación con un score 4; si la misma empresa tiene score 3 de sequía, el impacto total sería mayor.
+
+---
+
+## 7. Módulo V — Incorporación en modelos de valoración
+
+### 7.1 DCF y DDM ajustados
+
+El enfoque más directo y transparente para incorporar riesgo físico climático en equity valuation es a través de un DCF con flujos de caja ajustados. No recomendamos ajustar la tasa de descuento por riesgo climático como primera opción (aunque es un complemento válido), porque el ajuste de flujos es más auditable, más específico por empresa, y más alineado con la práctica de investment analysis.
+
+El Climate Dividend Discount Model de Bressan et al. (2024) ofrece un marco formal elegante para este enfoque. Su modelo de tres etapas modifica la tasa de crecimiento de largo plazo para incorporar shocks crónicos (vía trayectorias sectoriales macroeconómicas) y shocks agudos (vía daño a activos), para calcular una equity valuation ajustada. El shock combinado sobre equity se calcula como la diferencia entre la valuación ajustada y la valuación base, relativa a la valuación base.
+
+Nuestro framework adapta esta lógica pero la simplifica para uso institucional:
+
+```
+DCF ajustado (versión simplificada)
+
+V_equity,adj = Σ(t=1..T) [ FCF_adj,t / (1+WACC)^t ] + TV_adj / (1+WACC)^T
+
+donde:
+FCF_adj,t = FCF base × (1 + Δ_climate,t)
+TV_adj    = FCF_adj,T × (1 + g_adj) / (WACC − g_adj)
+g_adj     = g_base + Δg_climate
+```
+
+El impacto climático puede incorporarse de dos formas, no mutuamente excluyentes:
+
+**Ajuste de flujos (preferido):** Los FCF del período explícito se ajustan por los deltas estimados en el Módulo IV. Esto es directo y trazable.
+
+**Ajuste de la tasa de crecimiento terminal:** Si el riesgo climático tiene un componente crónico persistente (como sequías recurrentes que reducen permanentemente la capacidad productiva agrícola), esto justifica un ajuste a la tasa de crecimiento de largo plazo. La evidencia del FMI (Kahn et al., 2019) documenta que un incremento de temperatura de 0.04°C por año reduce el GDP per cápita en más de 7% para 2100, lo cual justifica ajustes a tasas de crecimiento de largo plazo para economías expuestas.
+
+> **Recomendación práctica:** Para el período de proyección explícito (5-10 años), ajustar los flujos directamente. Para el valor terminal, aplicar un descuento al crecimiento de largo plazo que refleje el impacto crónico esperado. Presentar ambas versiones (con y sin ajuste climático) para que el comité de inversiones pueda evaluar la materialidad.
+
+### 7.2 Múltiplos ajustados
+
+En un enfoque por múltiplos, el riesgo climático puede incorporarse de dos formas: ajustar el numerador (EBITDA o earnings climate-adjusted) manteniendo el múltiplo, o ajustar el múltiplo mismo para reflejar mayor riesgo. Recomendamos la primera opción como paso inicial porque es más transparente.
+
+```
+EV_adj = EBITDA_adj × EV/EBITDA_comparable
+
+P_adj  = EPS_adj × P/E_comparable
+```
+
+El EBITDA o EPS ajustado ya incorpora el impacto estimado. El múltiplo de comparables se mantiene inicialmente, pero puede ajustarse a la baja (descuento) si la empresa tiene significativamente mayor exposición climática que sus comparables.
+
+Un enfoque más avanzado es construir un "climate discount" sobre el múltiplo: si una empresa tiene un vulnerability-weighted climate impact estimado que implica una reducción anual del EBITDA de X%, esto es económicamente equivalente a un menor crecimiento, lo cual justifica un múltiplo más bajo. La relación entre crecimiento esperado y P/E implícito en modelos de Gordon o DDM simplificados proporciona la base teórica para cuantificar este descuento.
+
+### 7.3 Credit analysis ajustado
+
+Para bonos corporativos, el riesgo climático afecta dos dimensiones del análisis crediticio: la capacidad de pago (servicio de deuda) y la probabilidad de default.
+
+**Capacidad de pago:** Los ratios de crédito ajustados (DN/EBITDA, Interest Coverage, DSCR) calculados en el Módulo IV proporcionan directamente la métrica. Un emisor con DN/EBITDA base de 2.0x que sube a 2.3x después del ajuste climático tiene un perfil crediticio distinto.
+
+**Probabilidad de default:** La literatura proporciona evidencia empírica sobre la relación entre vulnerabilidad climática y riesgo de default. El modelo de De Spiegeleer et al. conecta shocks físicos con distancia al default (DTD) usando modelos estructurales tipo Merton. Si el EBITDA ajustado es menor, el valor de la firma se reduce, la DTD se comprime, y la PD implícita sube. La relación es mecánica y trazable.
+
+```
+Ajuste simplificado de credit spread:
+
+Δspread ≈ −(1/DTD) × ΔDTD
+
+donde ΔDTD se estima a partir de la reducción en enterprise value ajustado vs. deuda fija
+```
+
+Kling et al. (2021) proporcionan una base empírica directa para este ajuste: en su modelo estructural, la vulnerabilidad climática tiene un coeficiente de 1.102 sobre el costo de deuda, y este efecto opera tanto a través del riesgo de default como a través de la restricción de acceso a financiamiento (menor leverage observado en países más vulnerables).
+
+### 7.4 Costo de capital ajustado (complemento)
+
+Como complemento (no sustituto) del ajuste de flujos, el WACC puede ajustarse para reflejar riesgo climático. La literatura soporta tres canales a través de los cuales el riesgo climático puede afectar el costo de capital:
+
+**Canal 1 — Costo de deuda:** Kling et al. (2021) demuestran empíricamente que la vulnerabilidad climática aumenta el costo de deuda. El paper sobre riesgo hídrico de Wang et al. (2025) confirma que el riesgo físico de agua eleva significativamente el costo de equity para firmas en sectores water-intensive.
+
+**Canal 2 — Beta climático:** Si los cash flows de la empresa son más sensibles a eventos climáticos que correlacionan con factores macroeconómicos, esto puede justificar un beta ajustado. Sin embargo, la evidencia empírica en mercados emergentes es mixta y el CAPM tiene limitaciones conocidas en estos contextos.
+
+**Canal 3 — Prima de riesgo climático:** Una prima adicional al WACC que refleje riesgos no capturados por el beta tradicional. Rebonato muestra formalmente cómo los daños climáticos crean un "tug of war" entre reducción de cash flows y reducción de tasa de descuento. Para efectos prácticos, proponemos:
+
+```
+WACC_adj = WACC_base + Δr_climate
+
+donde Δr_climate = función del impacto estimado sobre EBITDA
+
+Propuesta: Δr_climate ≈ |ΔF_total| × κ
+
+κ = factor de conversión (0.3 a 0.5 sugerido)
+Ejemplo: si el impacto total estimado es -3% sobre EBITDA, Δr ≈ 0.9% a 1.5%
+```
+
+> **Advertencia:** El doble ajuste (flujos + tasa) puede llevar a sobreestimación. Si se ajustan los flujos como se describe en el Módulo IV, el ajuste de tasa debe ser modesto y enfocarse solo en la incertidumbre adicional que los flujos ajustados no capturan (la cola de la distribución, el riesgo de evento extremo no modelado). La recomendación es usar el ajuste de flujos como mecanismo principal y el ajuste de tasa como complemento marginal.
+
+---
+
+## 8. Tratamiento de escenarios y horizonte temporal
+
+El framework produce estimaciones para un punto en el tiempo dado un nivel de exposición. Pero el riesgo climático tiene una dimensión temporal: la exposición puede mantenerse constante, crecer o reducirse dependiendo de la adaptación de la empresa y de la evolución del clima.
+
+### Escenarios propuestos
+
+Para mantener la simplicidad operativa, proponemos tres escenarios que pueden aplicarse a cualquier emisor:
+
+| Escenario | Supuesto sobre exposición | Supuesto sobre adaptación | Horizonte relevante |
+|---|---|---|---|
+| **Base** | Exposición actual se mantiene | Adaptación incremental | 5 años |
+| **Deterioro gradual** | Scores suben 0.5 puntos por década | Adaptación parcial | 10-15 años |
+| **Evento severo** | Materialización de un evento extremo (score 5 transitorio) | Sin adaptación previa | 1-2 años (shock) |
+
+El escenario "Evento severo" es análogo al concepto de Return Period utilizado por Bressan et al. (2024) y CLIMADA: no es una predicción de que el evento ocurrirá, sino una estimación de cuánto valdría la empresa si se materializa un evento extremo. Esto es útil para stress testing y para bonos (donde la cola importa).
+
+El paper de Rebonato et al. sobre probabilidades de escenarios NGFS proporciona un marco para ponderar escenarios. Su enfoque de "density-weighted expectations" — asignando pesos basados en velocidades de descarbonización estimadas — puede adaptarse para ponderar los escenarios de riesgo físico según la probabilidad asignada a diferentes trayectorias climáticas. Sin embargo, para la versión inicial del framework, recomendamos presentar los tres escenarios por separado y dejar la ponderación al criterio del gestor de portafolio.
+
+---
+
+## 9. Limitaciones, supuestos y plan de validación
+
+### Limitaciones conocidas
+
+**Linealidad implícita:** La función de impacto asume una relación multiplicativa entre exposición, vulnerabilidad y elasticidad. En la realidad, los impactos pueden tener discontinuidades (umbrales de daño, efectos de saturación) que la forma funcional no captura completamente.
+
+**Independencia de hazards:** El framework trata los tres hazards como eventos independientes en la versión actual. En la realidad, inundaciones y movimientos de masa están correlacionados (las lluvias intensas causan ambos). Los eventos compuestos (un El Niño que genera inundaciones en la costa y sequía en la sierra simultáneamente) no están modelados explícitamente.
+
+**Calibración de elasticidades:** Las elasticidades propuestas provienen de literatura internacional, no de datos peruanos directos. La transferencia de estos parámetros es razonable como punto de partida, pero introduce incertidumbre que no puede cuantificarse formalmente sin datos locales.
+
+**Adaptación endógena:** El framework captura la adaptación actual de la empresa (vía el vulnerability score) pero no modela cómo las empresas podrían adaptarse en respuesta al riesgo futuro. Bressan et al. reconocen la misma limitación: no consideran los esfuerzos de adaptación de las firmas porque esa información no está disponible.
+
+**Efectos de segundo orden:** Los impactos indirectos vía cadenas de suministro (si el proveedor de una minera está inundado) no están modelados explícitamente. El paper de De Spiegeleer et al. demuestra que estos efectos son significativos, pero modelarlos requiere datos de cadena de suministro que generalmente no están disponibles para emisores peruanos.
+
+### Plan de validación
+
+**Backtesting con eventos históricos:** Utilizar eventos climáticos pasados en Perú (El Niño Costero 2017, sequías en la sierra 2016, huaicos recurrentes) para verificar si los impactos financieros observados en emisores listados son consistentes con las magnitudes que el framework habría predicho. Este es el test más importante del framework.
+
+**Cross-validation con proveedores:** Comparar los outputs del framework con los scores de riesgo físico de proveedores comerciales (S&P Sustainable1, MSCI) para los mismos emisores, cuando estén disponibles. No para igualar los números, sino para verificar que el ranking relativo es similar.
+
+**Sensibilidad a parámetros:** Reportar siempre la sensibilidad del output final a los parámetros clave: α (convexidad del mapeo), ponderaciones del vulnerability score, y elasticidades. Si el resultado cambia dramáticamente con pequeños cambios en un parámetro, eso indica que el framework es frágil en ese punto y requiere mejor calibración.
+
+---
+
+## 10. Resumen ejecutivo del framework
+
+> **¿Qué resuelve este framework?**
+>
+> Dado un nivel de exposición física climática ya cuantificado para una empresa peruana (scores CENEPRED 1–5 para inundaciones, movimientos de masa y sequías), el framework estima de forma razonada, interpretable y defendible su impacto esperado sobre EBITDA, flujo de caja, valor empresa, riesgo crediticio y retorno esperado para inversionistas.
+
+**Arquitectura:** Seis módulos conectados causalmente, cada uno auditable.
+
+**Diferenciación vs. proveedores comerciales:** Opera sobre scores ordinales peruanos (no sobre modelos climáticos globales), incorpora sensibilidad empresa-específica medible con datos de la BVL, y conecta directamente con el análisis fundamental que un investment strategist realiza sobre emisores peruanos.
+
+**Innovaciones metodológicas:** La función de mapeo convexa φ(S) resuelve la conversión de escala ordinal a intensidad económica. El vulnerability score ponderado sectorialmente convierte exposición homogénea en impacto heterogéneo. Las elasticidades calibradas por pathway sectorial conectan hazard con P&L. El procedimiento de ajuste de estados financieros produce inputs directos para DCF, múltiplos y credit analysis.
+
+**Defensa institucional:** Cada componente tiene soporte en literatura revisada (IMF, ECB, S&P, Nature Communications, World Development). La cadena causal completa es explicable en un comité de inversiones. Los supuestos son explícitos y los rangos de incertidumbre se reportan.
+
+**Próximos pasos:** Backtesting con El Niño Costero 2017 como caso de validación. Calibración de elasticidades con datos peruanos observados. Piloto con 5-10 emisores de la BVL para validar la operacionalidad del framework completo.
+
+---
+
+*Documento de trabajo. Versión 1.0 — Septiembre 2026.*
+*Diseñado para uso institucional en equity valuation, credit analysis y portfolio construction sobre emisores peruanos.*
+*Este framework no constituye asesoría de inversión. Los parámetros propuestos requieren validación con datos locales antes de su uso en decisiones de inversión.*
