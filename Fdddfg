@@ -1,0 +1,368 @@
+"""
+Localizador de Recursos - Framework de Riesgo Físico Climático
+================================================================
+Ubica automáticamente, dentro de las carpetas de red compartidas, los tres
+insumos necesarios para correr el framework de riesgo físico -> impacto
+financiero para una empresa dada:
+
+    1. Modelo de valorización de la empresa      (ej. "Engie 261Q.xlsx")
+    2. Archivo de Scores CENEPRED                ("Riesgos Climáticos - XSYY.xlsx")
+    3. Base de datos sectorial                   ("BD {Sector}.xlsm")
+"""
+
+import os
+import re
+from datetime import datetime
+
+
+# ============================================================
+# CONFIGURACIÓN DE RUTAS RAÍZ
+# ============================================================
+
+RUTA_VALORIZACIONES = r"Z:\Mesa de Inversiones\Bottom-Up\4 Cobertura de Sectores - Empresas"
+
+RUTA_RIESGOS_CLIMATICOS = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD"
+    r"\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos"
+    r"\Python\Output"
+)
+
+RUTA_INPUTS_MACRO = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro"
+
+# Mapeo Sector (tal como aparece en "Riesgos Climáticos") -> alias de búsqueda
+# dentro del nombre de archivo "BD *.xlsm/.xlsx". Si el sector no está aquí,
+# se intenta con el nombre del sector tal cual.
+SECTOR_BD_ALIAS = {
+    "Utilities": ["utilities"],
+    "Minería": ["minería", "mineria"],
+    "Financiero": ["financieras", "financiero", "financiera"],
+    "Consumo": ["consumo"],
+    "Infraestructura": ["construcción", "construccion", "infraestructura"],
+    "Energía": ["energía", "energia", "utilities"],
+    "Salud": ["salud"],
+    "Educación": ["educación", "educacion"],
+}
+
+
+# ============================================================
+# UTILIDADES GENERALES
+# ============================================================
+
+def _archivo_valido(nombre_archivo: str) -> bool:
+    """Descarta archivos temporales/bloqueados de Office (~$archivo.xlsx)."""
+    return not nombre_archivo.startswith("~$")
+
+
+def buscar_archivos_recursivo(carpeta_raiz: str, patron_regex: str,
+                               extensiones=(".xlsx", ".xlsm")) -> list:
+    """
+    Recorre carpeta_raiz de forma recursiva y sin límite de profundidad,
+    devolviendo todos los archivos cuyo nombre (sin extensión) coincida con
+    patron_regex y cuya extensión esté en `extensiones`.
+
+    Devuelve lista de dicts: {"ruta", "nombre", "modificado"}.
+    """
+    if not os.path.isdir(carpeta_raiz):
+        raise FileNotFoundError(
+            f"La carpeta raíz no existe o no es accesible: {carpeta_raiz}\n"
+            f"Verifica que la unidad de red (Z:) esté conectada."
+        )
+
+    regex = re.compile(patron_regex, re.IGNORECASE)
+    encontrados = []
+
+    for dirpath, _subdirs, filenames in os.walk(carpeta_raiz):
+        for filename in filenames:
+            if not _archivo_valido(filename):
+                continue
+            nombre_sin_ext, ext = os.path.splitext(filename)
+            if ext.lower() not in extensiones:
+                continue
+            if regex.search(nombre_sin_ext):
+                ruta_completa = os.path.join(dirpath, filename)
+                try:
+                    modificado = datetime.fromtimestamp(os.path.getmtime(ruta_completa))
+                except OSError:
+                    modificado = None
+                encontrados.append({
+                    "ruta": ruta_completa,
+                    "nombre": filename,
+                    "modificado": modificado,
+                })
+
+    return encontrados
+
+
+def _reportar_resultado(descripcion: str, resultados: list) -> None:
+    if not resultados:
+        print(f"[NO ENCONTRADO] {descripcion}: no se halló ningún archivo que coincida.")
+        return
+    if len(resultados) == 1:
+        print(f"[OK] {descripcion}: 1 archivo encontrado.")
+        print(f"     -> {resultados[0]['ruta']}")
+        return
+    print(f"[MÚLTIPLES COINCIDENCIAS] {descripcion}: se hallaron {len(resultados)} archivos.")
+    for i, r in enumerate(resultados, start=1):
+        fecha = r["modificado"].strftime("%Y-%m-%d %H:%M") if r["modificado"] else "s/f"
+        print(f"     [{i}] {r['ruta']}  (modificado: {fecha})")
+
+
+# ============================================================
+# 1) LOCALIZADOR: MODELO DE VALORIZACIÓN POR EMPRESA
+# ============================================================
+
+def encontrar_modelo_valorizacion(nombre_archivo_exacto: str,
+                                   carpeta_raiz: str = RUTA_VALORIZACIONES,
+                                   preferir_mas_reciente_si_multiple: bool = True) -> dict:
+    """
+    Busca de forma recursiva, sin límite de profundidad, un archivo cuyo
+    NOMBRE (sin extensión) sea EXACTAMENTE `nombre_archivo_exacto`, aceptando
+    extensión .xlsx o .xlsm.
+
+    Ejemplo:
+        encontrar_modelo_valorizacion("Engie 261Q.xlsx")
+
+    Devuelve:
+        {
+          "encontrado": bool,
+          "ruta": str | None,
+          "candidatos": list[dict],   # todas las coincidencias, si hay más de una
+        }
+    """
+    nombre_base = os.path.splitext(nombre_archivo_exacto)[0]
+    patron = rf"^{re.escape(nombre_base)}$"
+
+    candidatos = buscar_archivos_recursivo(carpeta_raiz, patron_regex=patron,
+                                            extensiones=(".xlsx", ".xlsm"))
+    descripcion = f"Modelo de valorización '{nombre_base}'"
+    _reportar_resultado(descripcion, candidatos)
+
+    if not candidatos:
+        return {"encontrado": False, "ruta": None, "candidatos": []}
+
+    if len(candidatos) == 1:
+        return {"encontrado": True, "ruta": candidatos[0]["ruta"], "candidatos": candidatos}
+
+    # Múltiples coincidencias: se listan todas y, por defecto, se selecciona
+    # la más reciente (modificación en disco), dejando también disponibles
+    # todos los candidatos para que el usuario elija manualmente si prefiere.
+    candidatos_ordenados = sorted(
+        candidatos, key=lambda r: r["modificado"] or datetime.min, reverse=True
+    )
+    seleccionado = candidatos_ordenados[0] if preferir_mas_reciente_si_multiple else None
+    if seleccionado:
+        print(f"     -> Por defecto se selecciona la más reciente: {seleccionado['ruta']}")
+    return {
+        "encontrado": True,
+        "ruta": seleccionado["ruta"] if seleccionado else None,
+        "candidatos": candidatos_ordenados,
+    }
+
+
+# ============================================================
+# 2) LOCALIZADOR: ARCHIVO "RIESGOS CLIMÁTICOS - XSYY"
+# ============================================================
+
+_PATRON_PERIODO = re.compile(r"riesgos\s*clim[aá]ticos\s*-\s*([12])S(\d{2})", re.IGNORECASE)
+
+
+def _extraer_periodo(nombre_archivo: str):
+    """Extrae (año:int, semestre:int) del nombre del archivo, o None si no matchea."""
+    m = _PATRON_PERIODO.search(nombre_archivo.replace("_", " "))
+    if not m:
+        return None
+    semestre = int(m.group(1))
+    anio = 2000 + int(m.group(2))
+    return (anio, semestre)
+
+
+def listar_archivos_riesgos_climaticos(carpeta_raiz: str = RUTA_RIESGOS_CLIMATICOS) -> list:
+    """
+    Lista todos los archivos "Riesgos Climáticos - XSYY.xlsx" dentro de la
+    carpeta, con su período (año, semestre) parseado, ordenados del más
+    reciente al más antiguo.
+    """
+    candidatos = buscar_archivos_recursivo(
+        carpeta_raiz, patron_regex=r"riesgos\s*clim[aá]ticos", extensiones=(".xlsx", ".xlsm")
+    )
+    con_periodo = []
+    for c in candidatos:
+        periodo = _extraer_periodo(c["nombre"])
+        if periodo is None:
+            continue
+        c = dict(c)
+        c["anio"], c["semestre"] = periodo
+        con_periodo.append(c)
+
+    con_periodo.sort(key=lambda r: (r["anio"], r["semestre"]), reverse=True)
+    return con_periodo
+
+
+def encontrar_archivo_riesgos_climaticos(periodo: str = None,
+                                          carpeta_raiz: str = RUTA_RIESGOS_CLIMATICOS) -> dict:
+    """
+    Ubica el archivo de Scores CENEPRED "Riesgos Climáticos - XSYY.xlsx".
+
+    Parámetros:
+        periodo: string opcional en formato "1S26" / "2S25" para forzar un
+                 período específico. Si es None (default), se selecciona
+                 automáticamente el período más reciente disponible.
+
+    Devuelve:
+        {
+          "encontrado": bool,
+          "ruta": str | None,
+          "periodo": str | None,             # ej. "2S26"
+          "todos_los_periodos": list[str],   # todos los disponibles, más reciente primero
+        }
+    """
+    disponibles = listar_archivos_riesgos_climaticos(carpeta_raiz)
+
+    if not disponibles:
+        print(f"[NO ENCONTRADO] Ningún archivo 'Riesgos Climáticos - XSYY' en:\n     {carpeta_raiz}")
+        return {"encontrado": False, "ruta": None, "periodo": None, "todos_los_periodos": []}
+
+    etiquetas = [f"{d['semestre']}S{str(d['anio'])[-2:]}" for d in disponibles]
+
+    if periodo is None:
+        seleccionado = disponibles[0]
+        etiqueta = etiquetas[0]
+        print(f"[OK] Riesgos Climáticos: se usa el período más reciente disponible -> {etiqueta}")
+        print(f"     -> {seleccionado['ruta']}")
+        if len(disponibles) > 1:
+            print(f"     Períodos disponibles: {', '.join(etiquetas)}")
+        return {
+            "encontrado": True,
+            "ruta": seleccionado["ruta"],
+            "periodo": etiqueta,
+            "todos_los_periodos": etiquetas,
+        }
+
+    periodo_norm = periodo.strip().upper()
+    m = re.match(r"^([12])S(\d{2})$", periodo_norm)
+    if not m:
+        raise ValueError(
+            f"Formato de período inválido: '{periodo}'. Usa el formato 'XSYY', ej. '1S26' o '2S25'."
+        )
+    sem_buscado, anio_buscado = int(m.group(1)), 2000 + int(m.group(2))
+
+    for d, etiqueta in zip(disponibles, etiquetas):
+        if d["anio"] == anio_buscado and d["semestre"] == sem_buscado:
+            print(f"[OK] Riesgos Climáticos: período solicitado '{periodo_norm}' encontrado.")
+            print(f"     -> {d['ruta']}")
+            return {
+                "encontrado": True,
+                "ruta": d["ruta"],
+                "periodo": etiqueta,
+                "todos_los_periodos": etiquetas,
+            }
+
+    print(f"[NO ENCONTRADO] El período solicitado '{periodo_norm}' no existe entre los disponibles.")
+    print(f"     Períodos disponibles: {', '.join(etiquetas)}")
+    return {"encontrado": False, "ruta": None, "periodo": None, "todos_los_periodos": etiquetas}
+
+
+# ============================================================
+# 3) LOCALIZADOR: BASE DE DATOS SECTORIAL "BD {Sector}"
+# ============================================================
+
+def encontrar_bd_sectorial(sector: str, carpeta_raiz: str = RUTA_INPUTS_MACRO) -> dict:
+    """
+    Ubica el archivo "BD {Sector}.xlsm/.xlsx" correspondiente a un sector,
+    dentro de la carpeta de Inputs Macro. Usa SECTOR_BD_ALIAS para resolver
+    diferencias de nombre entre el sector (tal como aparece en "Riesgos
+    Climáticos") y el nombre real del archivo BD.
+
+    Si no hay alias definido o no calza ningún archivo, se degrada con
+    claridad indicando que no se encontró nada (no se inventa un archivo).
+    """
+    alias = SECTOR_BD_ALIAS.get(sector, [sector.lower()])
+
+    candidatos_bd = buscar_archivos_recursivo(
+        carpeta_raiz, patron_regex=r"^BD\s", extensiones=(".xlsx", ".xlsm")
+    )
+
+    coincidencias = []
+    for c in candidatos_bd:
+        nombre_normalizado = c["nombre"].lower()
+        if any(a in nombre_normalizado for a in alias):
+            coincidencias.append(c)
+
+    descripcion = f"Base sectorial para sector '{sector}'"
+    _reportar_resultado(descripcion, coincidencias)
+
+    if not coincidencias:
+        disponibles = [c["nombre"] for c in candidatos_bd] if candidatos_bd else "ninguno"
+        print(f"     Archivos 'BD *' disponibles en la carpeta: {disponibles}")
+        return {"encontrado": False, "ruta": None, "candidatos": []}
+
+    return {
+        "encontrado": True,
+        "ruta": coincidencias[0]["ruta"],
+        "candidatos": coincidencias,
+    }
+
+
+# ============================================================
+# ORQUESTADOR: RESOLVER LOS 3 RECURSOS PARA UNA EMPRESA
+# ============================================================
+
+def resolver_recursos_empresa(nombre_archivo_valorizacion: str, sector: str,
+                               periodo_riesgos: str = None) -> dict:
+    """
+    Resuelve, en un solo llamado, los tres insumos necesarios para correr
+    el framework para una empresa dada:
+
+        1. Modelo de valorización
+        2. Archivo de Scores CENEPRED (Riesgos Climáticos)
+        3. Base de datos sectorial (BD {Sector})
+
+    Ejemplo:
+        resolver_recursos_empresa("Engie 261Q.xlsx", sector="Utilities")
+    """
+    print("=" * 70)
+    print("RESOLVIENDO RECURSOS DE DATOS")
+    print("=" * 70)
+
+    print("\n[1/3] Modelo de valorización")
+    r1 = encontrar_modelo_valorizacion(nombre_archivo_valorizacion)
+
+    print("\n[2/3] Archivo de Scores CENEPRED (Riesgos Climáticos)")
+    r2 = encontrar_archivo_riesgos_climaticos(periodo=periodo_riesgos)
+
+    print("\n[3/3] Base de datos sectorial")
+    r3 = encontrar_bd_sectorial(sector=sector)
+
+    print("\n" + "=" * 70)
+    resumen_ok = all([r1["encontrado"], r2["encontrado"], r3["encontrado"]])
+    if resumen_ok:
+        print("RESUMEN: los 3 recursos fueron localizados correctamente.")
+    else:
+        faltantes = []
+        if not r1["encontrado"]:
+            faltantes.append("modelo de valorización")
+        if not r2["encontrado"]:
+            faltantes.append("Riesgos Climáticos")
+        if not r3["encontrado"]:
+            faltantes.append("BD sectorial")
+        print(f"RESUMEN: faltan por resolver -> {', '.join(faltantes)}")
+    print("=" * 70)
+
+    return {
+        "modelo_valorizacion": r1,
+        "riesgos_climaticos": r2,
+        "bd_sectorial": r3,
+    }
+
+
+# ============================================================
+# EJEMPLO DE USO - CASO DE PRUEBA: ENGIE
+# ============================================================
+
+if __name__ == "__main__":
+    resultado = resolver_recursos_empresa(
+        nombre_archivo_valorizacion="Engie 261Q.xlsx",
+        sector="Utilities",
+        periodo_riesgos=None,  # None = usar el más reciente disponible; o especificar ej. "1S26"
+    )
