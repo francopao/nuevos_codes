@@ -1,0 +1,489 @@
+Espera — antes de armar los bloques, necesito verificar algo que podría ser un bug silencioso en el cálculo del DCF, ya que Minsur tiene una estructura de años distinta a Engie.
+
+Esto es delicado — necesito ver las columnas exactas, no una lista plana que se presta a confusión. Reviso con letras de columna explícitas.
+
+Encontré un bug metodológico importante en el DCF (no en la parte de Minsur, sino en la lógica que ya te entregué para Engie). Te lo explico en una línea y después te doy todos los bloques.
+
+**El bug:** mi función `ajustar_dcf` estaba descontando años históricos (2017-2025) como si fueran flujos futuros, en vez de arrancar el descuento desde 2027 (que es como realmente funciona el modelo de Engie — lo verifiqué comparando celda por celda). Además, la fórmula del valor terminal que reconstruí no coincidía con la que usa el propio archivo. La solución más simple y más robusta: en vez de tratar de reconstruir todo el DCF línea por línea, escalamos directamente el "Valor de la Firma" que ya viene calculado en la celda, por el mismo % de impacto en EBITDA. Es más simple, más defendible, y de paso hace mucho más fácil sumar a Minsur.
+
+Reviso las celdas exactas del archivo actual antes de darte los bloques.
+
+Un detalle más importante: la hoja de "Supuestos y Limitaciones" tiene texto específico de Engie (menciona Yuncán, Quitaracsa) que saldría mal si corres Minsur. Reviso esa parte también.
+
+Perfecto, ya tengo todo mapeado. Acá van los 10 cambios, en el orden en que aparecen en el script (de arriba hacia abajo).
+
+---
+
+**Cambio 1 — Lista de empresas a correr**
+
+🔎 Ctrl+F: `EMPRESA = "Engie"`
+Selecciona desde esa línea hasta `RUTA_SALIDA_EXCEL = f"Resultado_{EMPRESA}.xlsx"` (8 líneas en total) y reemplaza todo el bloque por:
+
+```python
+# Acá va cada emisor que corremos. Para sumar uno nuevo, copiamos un
+# bloque, lo editamos, y nos acordamos de darle su fila en CONFIG_EMPRESAS
+# más abajo (y sus pesos/elasticidades si es un sector nuevo).
+EMPRESAS_A_PROCESAR = [
+    {
+        "empresa": "Engie",
+        "sector": "Utilities",
+        "archivo_valorizacion": "Engie 261Q.xlsx",
+        "rio_proxy_hidro": "Santa",
+    },
+    {
+        "empresa": "Minsur",
+        "sector": "Minería",
+        "archivo_valorizacion": "Minsur 261Q.xlsx",
+        "rio_proxy_hidro": None,   # no aplica para minería
+    },
+]
+
+PERIODO_RIESGOS = None   # None = usar el período más reciente disponible; o ej. "1S26"
+```
+
+---
+
+**Cambio 2 — Pesos de Minería**
+
+🔎 Ctrl+F: `"capacidad_adaptacion": 0.05,`
+(la primera vez que aparece, dentro de `PESOS_VULNERABILITY`). Reemplaza esas 3 líneas siguientes:
+```python
+        "capacidad_adaptacion": 0.05,
+    }
+}
+```
+por:
+```python
+        "capacidad_adaptacion": 0.05,
+    },
+    "Minería": {
+        "concentracion_geografica": 0.28,
+        "leverage": 0.17,
+        "liquidez": 0.11,
+        "intensidad_activos_fijos": 0.11,
+        "margen_operativo": 0.11,
+        "dependencia_hidrica": 0.17,
+        "capacidad_adaptacion": 0.05,
+    },
+}
+```
+
+---
+
+**Cambio 3 — Elasticidades de Minería**
+
+🔎 Ctrl+F: `"cogs": {"min": 0.02, "moda": 0.06, "max": 0.10},`
+Justo debajo hay 2 líneas de cierre:
+```python
+        },
+    }
+}
+```
+Reemplázalas por:
+```python
+        },
+    },
+    "Minería": {
+        "Inundación": {
+            "revenue": {"min": -0.08, "moda": -0.05, "max": -0.02},
+            "cogs": None,
+        },
+        "Movimiento de Masa": {
+            "revenue": {"min": -0.25, "moda": -0.15, "max": -0.05},
+            "cogs": None,
+        },
+        "Sequía": {
+            "revenue": {"min": -0.05, "moda": -0.03, "max": -0.01},
+            "cogs": None,
+        },
+    },
+}
+```
+
+---
+
+**Cambio 4 — Cómo leemos los financieros (agregamos Minsur)**
+
+🔎 Ctrl+F: `def cargar_financieros(ruta_valorizacion: str, anio_base: int = 2025) -> dict:`
+Selecciona desde ahí hasta el `return financieros` que viene justo antes de `def cargar_produccion` (bloque completo) y reemplázalo por:
+
+```python
+# Acá guardamos, por empresa, en qué hoja y en qué fila del DCF está cada
+# dato. Cuando sumemos un emisor nuevo, agregamos una entrada más aquí.
+CONFIG_EMPRESAS = {
+    "Engie": {
+        "hoja_ratios": "Ratios_Engie",
+        "hoja_dcf": "DCF",
+        "fila_valor_firma": 19,
+        "fila_deuda_neta": 20,
+        "fila_patrimonio": 21,
+        "fila_n_acciones": 24,
+        "fila_valor_fundamental": 25,
+        "fila_ultimo_precio": 26,
+        "columna_valor": 5,   # columna E, donde vive el resultado en ambos modelos
+    },
+    "Minsur": {
+        "hoja_ratios": "Ratios_Minsur",
+        "hoja_dcf": "DCF",
+        "fila_valor_firma": 30,
+        "fila_deuda_neta": 31,
+        "fila_patrimonio": 32,
+        "fila_n_acciones": 37,
+        "fila_valor_fundamental": 38,
+        "fila_ultimo_precio": 39,
+        "columna_valor": 5,
+    },
+}
+
+
+def cargar_financieros(ruta_valorizacion: str, empresa: str, anio_base: int = 2025) -> dict:
+    config = CONFIG_EMPRESAS[empresa]
+    wb = openpyxl.load_workbook(ruta_valorizacion, data_only=True)
+    ws = wb[config["hoja_ratios"]]
+
+    headers = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+    col_anio = None
+    for c, h in enumerate(headers, start=1):
+        if h == anio_base:
+            col_anio = c
+            break
+    if col_anio is None:
+        raise ValueError(f"No encontramos la columna del año {anio_base} en '{config['hoja_ratios']}'.")
+
+    def valor(etiqueta):
+        fila = _buscar_fila(ws, 1, etiqueta)
+        if fila is None:
+            return None
+        return ws.cell(fila, col_anio).value
+
+    financieros = {
+        "anio_base": anio_base,
+        "revenue_usd": valor("Revenue"),
+        "ebitda_usd": valor("EBITDA"),
+        "ebitda_margin": valor("EBITDA Margin (%)"),
+        "net_debt_ebitda_x": valor("Net debt / EBITDA (x)"),
+        "current_ratio_x": valor("Current ratio (x)"),
+        "net_ppe_usd": valor("Net PPE"),
+        "total_assets_usd": valor("Total assets"),
+    }
+
+    # Ya no reconstruimos el DCF año por año: nos quedamos con los totales
+    # que el propio modelo ya calculó (Valor de la Firma, etc.) y el ajuste
+    # climático se aplica directo sobre esos totales. Así evitamos tener
+    # que adivinar cómo cada modelo arma su valor terminal por dentro.
+    ws_dcf = wb[config["hoja_dcf"]]
+    col = config["columna_valor"]
+    financieros["valor_firma"] = ws_dcf.cell(config["fila_valor_firma"], col).value
+    financieros["deuda_neta_dcf"] = ws_dcf.cell(config["fila_deuda_neta"], col).value
+    financieros["patrimonio_dcf"] = ws_dcf.cell(config["fila_patrimonio"], col).value
+    financieros["n_acciones_mn"] = ws_dcf.cell(config["fila_n_acciones"], col).value
+    financieros["valor_fundamental_x_accion"] = ws_dcf.cell(config["fila_valor_fundamental"], col).value
+    financieros["ultimo_precio"] = ws_dcf.cell(config["fila_ultimo_precio"], col).value
+
+    return financieros
+```
+
+---
+
+**Cambio 5 — Dependencia hídrica genérica para Minería**
+
+🔎 Ctrl+F: `def normalizar_variables_vulnerability(financieros: dict, produccion: dict, mitigante) -> dict:`
+Reemplaza toda esa función (hasta su `return {...}` final) por:
+
+```python
+def normalizar_variables_vulnerability(financieros: dict, produccion: dict, mitigante, sector: str) -> dict:
+    net_debt_ebitda = financieros["net_debt_ebitda_x"] or 0
+    current_ratio = financieros["current_ratio_x"] or 0
+    ebitda_margin = financieros["ebitda_margin"] or 0
+    net_ppe = financieros["net_ppe_usd"] or 0
+    total_assets = financieros["total_assets_usd"] or 1
+
+    if sector == "Utilities":
+        anio = financieros["anio_base"]
+        hidro = produccion.get("Hidro", {}).get(anio, 0) or 0
+        total_gen = produccion.get("Total generación", {}).get(anio, 0) or 1
+        dependencia_hidrica = hidro / total_gen if total_gen else 0
+    else:
+        # Para Minería (y cualquier sector sin data de generación propia)
+        # todavía no tenemos cómo medir esto, así que usamos un valor
+        # neutro. Queda marcado como limitación, no como cálculo real.
+        dependencia_hidrica = 0.5
+
+    leverage_v = _clip(net_debt_ebitda / NORMALIZACION["leverage_cap_x"])
+    liquidez_v = _clip(
+        (NORMALIZACION["liquidez_buena_x"] - current_ratio)
+        / (NORMALIZACION["liquidez_buena_x"] - NORMALIZACION["liquidez_mala_x"])
+    )
+    margen_v = _clip(
+        (NORMALIZACION["margen_bueno_pct"] - ebitda_margin)
+        / (NORMALIZACION["margen_bueno_pct"] - NORMALIZACION["margen_malo_pct"])
+    )
+    activos_fijos_v = _clip(net_ppe / total_assets)
+    adaptacion_v = MAPA_MITIGANTE_A_VULNERABILIDAD.get(mitigante, 1.0)
+
+    return {
+        "leverage": leverage_v,
+        "liquidez": liquidez_v,
+        "margen_operativo": margen_v,
+        "intensidad_activos_fijos": activos_fijos_v,
+        "dependencia_hidrica": _clip(dependencia_hidrica),
+        "capacidad_adaptacion": adaptacion_v,
+    }
+```
+
+---
+
+**Cambio 6 — Arreglo del DCF ajustado (el bug que mencioné arriba)**
+
+🔎 Ctrl+F: `def ajustar_dcf(financieros: dict, delta_ebitda_pct: float) -> dict:`
+Reemplaza toda la función por:
+
+```python
+def ajustar_dcf(financieros: dict, delta_ebitda_pct: float) -> dict:
+    """
+    Escalamos directo el Valor de la Firma que ya trae el modelo, por el
+    mismo % de impacto que calculamos sobre el EBITDA. La Deuda Neta la
+    dejamos fija (un golpe operativo no cambia la deuda de un día para
+    otro), y de ahí sacamos el Patrimonio y el Valor Fundamental ajustados.
+    """
+    valor_firma_base = financieros["valor_firma"]
+    valor_firma_ajustado = valor_firma_base * (1 + delta_ebitda_pct) if valor_firma_base else None
+
+    deuda_neta = financieros["deuda_neta_dcf"]
+    patrimonio_ajustado = (
+        valor_firma_ajustado - deuda_neta if valor_firma_ajustado is not None and deuda_neta is not None else None
+    )
+    valor_x_accion_ajustado = (
+        patrimonio_ajustado / financieros["n_acciones_mn"]
+        if patrimonio_ajustado is not None and financieros["n_acciones_mn"]
+        else None
+    )
+
+    return {
+        "valor_firma_base": valor_firma_base,
+        "valor_firma_ajustado": valor_firma_ajustado,
+        "valor_fundamental_base": financieros["valor_fundamental_x_accion"],
+        "valor_fundamental_ajustado": valor_x_accion_ajustado,
+    }
+```
+
+---
+
+**Cambio 7 — El orquestador (para que sepa cuándo saltarse lo de Utilities)**
+
+🔎 Ctrl+F: `def correr_framework_empresa(ruta_valorizacion, ruta_riesgos, ruta_bd_sectorial,`
+Reemplaza toda la función (hasta el `return {` ... `}` final) por:
+
+```python
+def correr_framework_empresa(ruta_valorizacion, ruta_riesgos, ruta_bd_sectorial,
+                              empresa, sector, rio_proxy_hidro):
+    print(f"Cargando datos para {empresa}...")
+    scores = cargar_score_riesgo(ruta_riesgos, empresa)
+    activos = cargar_activos_empresa(ruta_riesgos, empresa)
+    financieros = cargar_financieros(ruta_valorizacion, empresa, anio_base=2025)
+
+    # El cruce con caudal de río solo lo armamos para Utilities (generación
+    # hidro). Para Minería todavía no tenemos ese dato, así que lo dejamos
+    # vacío y seguimos de largo.
+    if sector == "Utilities":
+        produccion = cargar_produccion(ruta_valorizacion)
+        caudal_anual = cargar_caudal_rio_anual(ruta_bd_sectorial, rio_proxy_hidro)
+    else:
+        produccion = {}
+        caudal_anual = {}
+
+    geo_concentracion = concentracion_geografica(activos)
+    vars_norm = normalizar_variables_vulnerability(financieros, produccion, scores["mitigante"], sector)
+    vars_norm["concentracion_geografica"] = geo_concentracion or 0.0
+
+    vulnerability = calcular_vulnerability_score(vars_norm, sector)
+
+    impacto_hazard_base, impacto_total_base, ajuste_fin_base, ajuste_dcf_base = correr_pipeline_completo(
+        scores, vulnerability["vulnerability_score"], financieros, sector, alpha=ALPHA_CONVEXIDAD, escenario="moda"
+    )
+
+    print("Corriendo escenarios conservador/severo...")
+    resultados_escenarios = {}
+    for nombre_escenario, clave in [("conservador", "max"), ("base", "moda"), ("severo", "min")]:
+        ih, it, af, ad = correr_pipeline_completo(
+            scores, vulnerability["vulnerability_score"], financieros, sector,
+            alpha=ALPHA_CONVEXIDAD, escenario=clave
+        )
+        resultados_escenarios[nombre_escenario] = {
+            "impacto_hazard": ih, "impacto_total": it, "ajuste_fin": af, "ajuste_dcf": ad,
+        }
+
+    print("Corriendo sensibilidad a alpha...")
+    sens_alpha = sensibilidad_alpha(scores, vulnerability["vulnerability_score"], financieros, sector)
+
+    print(f"Corriendo Monte Carlo ({N_SIMULACIONES_MONTE_CARLO:,} simulaciones)...")
+    mc = monte_carlo(scores, vulnerability["detalle"], vulnerability["pesos"], financieros, sector)
+
+    print("Corriendo cross-check hidro vs. caudal...")
+    if sector == "Utilities":
+        cross_check = cross_check_hidro_vs_caudal(produccion, caudal_anual)
+    else:
+        cross_check = []
+
+    return {
+        "empresa": empresa,
+        "sector": sector,
+        "scores": scores,
+        "activos": activos,
+        "geo_concentracion": geo_concentracion,
+        "financieros": financieros,
+        "produccion": produccion,
+        "caudal_anual": caudal_anual,
+        "vulnerability": vulnerability,
+        "resultados_escenarios": resultados_escenarios,
+        "sensibilidad_alpha": sens_alpha,
+        "monte_carlo": mc,
+        "cross_check": cross_check,
+    }
+```
+
+---
+
+**Cambio 8 — Hoja de cross-check en el Excel (que no truene si está vacía)**
+
+🔎 Ctrl+F: `# ---------------- Hoja 8: Cross-check Hidro vs Caudal ----------------`
+Reemplaza desde esa línea hasta el `_autoancho(ws)` que le sigue (todo el bloque de esa hoja) por:
+
+```python
+    # ---------------- Hoja 8: Cross-check Hidro vs Caudal ----------------
+    # Esta hoja solo aplica a Utilities. Para Minería la dejamos con una nota.
+    ws = wb.create_sheet("Cross-check Hidro-Caudal")
+    if resultado["cross_check"]:
+        _titulo_hoja(ws, "Cross-check Empírico: Generación Hidro vs. Caudal Río Santa (proxy)", col_span=4)
+        _encabezados(ws, 3, ["Año", "Generación Hidro (GWh)", "Caudal promedio Río Santa (m3/s)", "Nota"])
+        r = 4
+        for fila in resultado["cross_check"]:
+            ws.cell(r, 1, fila["anio"])
+            ws.cell(r, 2, fila["hidro_gwh"]).number_format = "#,##0"
+            ws.cell(r, 3, fila["caudal_promedio_m3s"]).number_format = "#,##0.0"
+            ws.cell(r, 4, fila["nota"])
+            r += 1
+        ws.cell(r + 1, 1, "No es una regresión formal (n insuficiente para inferencia estadística "
+                           "robusta). Es evidencia de ingeniería/observación directa: se espera que "
+                           "años de mayor caudal muestren mayor generación hidro. 2020 está marcado "
+                           "como atípico por el shock de demanda del COVID-19.").font = _NOTA_FONT
+    else:
+        _titulo_hoja(ws, "Cross-check Empírico", col_span=4)
+        ws.cell(3, 1, "No aplica para este sector: todavía no armamos un cruce empírico "
+                       "para Minería.").font = _NOTA_FONT
+    _autoancho(ws)
+```
+
+---
+
+**Cambio 9 — Hoja de Supuestos (para que no diga cosas de Engie cuando corramos Minsur)**
+
+🔎 Ctrl+F: `# ---------------- Hoja 9: Supuestos y Limitaciones ----------------`
+Reemplaza desde ahí hasta `ws.column_dimensions["B"].width = 90` (justo antes de `wb.save`) por:
+
+```python
+    # ---------------- Hoja 9: Supuestos y Limitaciones ----------------
+    ws = wb.create_sheet("Supuestos y Limitaciones")
+    _titulo_hoja(ws, "Supuestos, Calibraciones y Limitaciones de esta Corrida", col_span=2)
+
+    supuestos = [
+        ("Convexidad φ(S)", "α = 1.5. Si score ≤ 1, φ = 0 (piso de la escala)."),
+        ("Cobertura de seguros", "Excluida del Vulnerability Score por falta de dato público. "
+                            "Pesos redistribuidos proporcionalmente entre las 7 variables restantes."),
+        ("Activos N/D (sin score)", "Tratados como dato faltante: se excluyen del cálculo "
+                            "correspondiente, nunca se imputa un valor."),
+        ("Concentración geográfica", "Calculada solo sobre el AUM mapeado en el archivo de "
+                            "Riesgos Climáticos, que es una fracción del balance total de la "
+                            "empresa, no su exposición total."),
+        ("Año financiero base", f"{resultado['financieros']['anio_base']} (último año fiscal "
+                            "completo disponible en el modelo de valorización)."),
+        ("Ajuste de DCF", "Escalamos directo el Valor de la Firma que ya trae el modelo por el "
+                            "mismo % de impacto en EBITDA, y dejamos la Deuda Neta fija. No "
+                            "reconstruimos el DCF año por año porque cada modelo arma su valor "
+                            "terminal distinto y no queríamos adivinarlo."),
+        ("Agregación entre hazards", "Se suman sin haircut (se tratan como independientes entre "
+                            "sí). El haircut de 10-20% documentado en el framework aplica solo "
+                            "cuando existen varios pathways DENTRO de un mismo hazard, no aquí."),
+    ]
+
+    if resultado["sector"] == "Utilities":
+        supuestos.append((
+            f"Sequía - {resultado['empresa']}",
+            "Si el score sale muy bajo (por debajo de 1, φ=0), revisar el detalle de activos: "
+            "puede ser exposición real baja, o simplemente la mayoría de activos están N/D."
+        ))
+        supuestos.append((
+            "Movimiento de Masa - Utilities",
+            "Elasticidad de revenue [-10%,-6%,-2%] es una calibración nueva que propusimos por "
+            "analogía con Infraestructura-MM. No existía en la versión original del framework."
+        ))
+        supuestos.append((
+            "Cross-check hidro vs. caudal",
+            "No es una regresión formal (n insuficiente). Es observación directa entre "
+            "generación hidro y caudal del río proxy. Ver hoja de cross-check."
+        ))
+    elif resultado["sector"] == "Minería":
+        supuestos.append((
+            "Dependencia hídrica - Minería",
+            "Todavía no tenemos una fuente de dato limpia para medir esto en minería (BD "
+            "Minería no trae esa métrica). Usamos un valor fijo de 0.5 mientras no consigamos "
+            "algo mejor. Es una limitación real, no un cálculo."
+        ))
+
+    r = 3
+    for titulo, texto in supuestos:
+        ws.cell(r, 1, titulo).font = Font(name=_FUENTE, bold=True, size=10)
+        ws.cell(r, 1).alignment = Alignment(vertical="top", wrap_text=True)
+        celda_texto = ws.cell(r, 2, texto)
+        celda_texto.font = _BASE_FONT
+        celda_texto.alignment = Alignment(vertical="top", wrap_text=True)
+        ws.row_dimensions[r].height = 60
+        r += 1
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 90
+```
+
+---
+
+**Cambio 10 — El `main()` (para que corra ambas empresas y guarde en tu carpeta)**
+
+🔎 Ctrl+F: `def main():`
+Reemplaza toda la función `main()` (hasta el `escribir_excel_resultados(...)` final, sin tocar el `if __name__ == "__main__":` de más abajo) por:
+
+```python
+def main():
+    for config in EMPRESAS_A_PROCESAR:
+        empresa = config["empresa"]
+        sector = config["sector"]
+        archivo_valorizacion = config["archivo_valorizacion"]
+        rio_proxy_hidro = config["rio_proxy_hidro"]
+
+        recursos = resolver_recursos_empresa(archivo_valorizacion, sector, PERIODO_RIESGOS)
+
+        if not all(recursos[k]["encontrado"] for k in ("modelo_valorizacion", "riesgos_climaticos", "bd_sectorial")):
+            print(f"\nNos saltamos a {empresa}: faltan uno o más archivos de insumo.\n")
+            continue
+
+        ruta_valorizacion = recursos["modelo_valorizacion"]["ruta"]
+        ruta_riesgos = recursos["riesgos_climaticos"]["ruta"]
+        ruta_bd_sectorial = recursos["bd_sectorial"]["ruta"]
+
+        print(f"\nCorriendo framework para {empresa} ({sector})...\n")
+        resultado = correr_framework_empresa(
+            ruta_valorizacion, ruta_riesgos, ruta_bd_sectorial, empresa, sector, rio_proxy_hidro
+        )
+
+        print("\n=== RESUMEN ===")
+        print("Scores:", resultado["scores"])
+        print("Concentración geográfica:", resultado["geo_concentracion"])
+        print("Vulnerability score:", resultado["vulnerability"]["vulnerability_score"])
+        print("Detalle vulnerability:", resultado["vulnerability"]["detalle"])
+        print("\nEscenario base -> ajuste EBITDA:", resultado["resultados_escenarios"]["base"]["ajuste_fin"])
+        print("Escenario base -> ajuste DCF:", resultado["resultados_escenarios"]["base"]["ajuste_dcf"])
+        print("\nSensibilidad alpha:", resultado["sensibilidad_alpha"])
+        print("\nMonte Carlo:", resultado["monte_carlo"])
+        print("\nCross-check:", resultado["cross_check"])
+
+        ruta_salida = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\Resultado_" + empresa + ".xlsx"
+        escribir_excel_resultados(resultado, ruta_salida)
+```
