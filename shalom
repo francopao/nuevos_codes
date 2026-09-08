@@ -1,0 +1,1150 @@
+"""
+Motor de Cálculo - Framework de Riesgo Físico Climático -> Impacto Financiero
+================================================================================
+Script único y autocontenido: localiza los 3 archivos de insumo en las
+carpetas de red, corre el framework completo (scores -> vulnerability ->
+elasticidades -> estados financieros ajustados -> DCF ajustado ->
+sensibilidad -> Monte Carlo -> cross-check empírico) y escribe un Excel
+con todos los resultados.
+
+Caso de prueba: Engie (Utilities).
+
+Para correr para otra empresa, cambiar EMPRESA / SECTOR / NOMBRE_ARCHIVO_
+VALORIZACION / RIO_PROXY_HIDRO al final del script.
+"""
+
+import os
+import re
+import math
+import random
+import statistics
+from datetime import datetime
+
+import openpyxl
+
+
+# ============================================================================
+# 0.A LOCALIZADOR DE RECURSOS (rutas reales de red)
+# ============================================================================
+
+RUTA_VALORIZACIONES = r"Z:\Mesa de Inversiones\Bottom-Up\4 Cobertura de Sectores - Empresas"
+
+RUTA_RIESGOS_CLIMATICOS = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD"
+    r"\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos"
+    r"\Python\Output"
+)
+
+RUTA_INPUTS_MACRO = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro"
+
+SECTOR_BD_ALIAS = {
+    "Utilities": ["utilities"],
+    "Minería": ["minería", "mineria"],
+    "Financiero": ["financieras", "financiero", "financiera"],
+    "Consumo": ["consumo"],
+    "Infraestructura": ["construcción", "construccion", "infraestructura"],
+    "Energía": ["energía", "energia", "utilities"],
+    "Salud": ["salud"],
+    "Educación": ["educación", "educacion"],
+}
+
+
+def _archivo_valido(nombre_archivo: str) -> bool:
+    return not nombre_archivo.startswith("~$")
+
+
+def buscar_archivos_recursivo(carpeta_raiz: str, patron_regex: str,
+                               extensiones=(".xlsx", ".xlsm")) -> list:
+    if not os.path.isdir(carpeta_raiz):
+        raise FileNotFoundError(
+            f"La carpeta raíz no existe o no es accesible: {carpeta_raiz}\n"
+            f"Verifica que la unidad de red (Z:) esté conectada."
+        )
+    regex = re.compile(patron_regex, re.IGNORECASE)
+    encontrados = []
+    for dirpath, _subdirs, filenames in os.walk(carpeta_raiz):
+        for filename in filenames:
+            if not _archivo_valido(filename):
+                continue
+            nombre_sin_ext, ext = os.path.splitext(filename)
+            if ext.lower() not in extensiones:
+                continue
+            if regex.search(nombre_sin_ext):
+                ruta_completa = os.path.join(dirpath, filename)
+                try:
+                    modificado = datetime.fromtimestamp(os.path.getmtime(ruta_completa))
+                except OSError:
+                    modificado = None
+                encontrados.append({"ruta": ruta_completa, "nombre": filename, "modificado": modificado})
+    return encontrados
+
+
+def _reportar_resultado(descripcion: str, resultados: list) -> None:
+    if not resultados:
+        print(f"[NO ENCONTRADO] {descripcion}: no se halló ningún archivo que coincida.")
+        return
+    if len(resultados) == 1:
+        print(f"[OK] {descripcion}: 1 archivo encontrado.")
+        print(f"     -> {resultados[0]['ruta']}")
+        return
+    print(f"[MÚLTIPLES COINCIDENCIAS] {descripcion}: se hallaron {len(resultados)} archivos.")
+    for i, r in enumerate(resultados, start=1):
+        fecha = r["modificado"].strftime("%Y-%m-%d %H:%M") if r["modificado"] else "s/f"
+        print(f"     [{i}] {r['ruta']}  (modificado: {fecha})")
+
+
+def encontrar_modelo_valorizacion(nombre_archivo_exacto: str, carpeta_raiz: str = RUTA_VALORIZACIONES,
+                                   preferir_mas_reciente_si_multiple: bool = True) -> dict:
+    nombre_base = os.path.splitext(nombre_archivo_exacto)[0]
+    patron = rf"^{re.escape(nombre_base)}$"
+    candidatos = buscar_archivos_recursivo(carpeta_raiz, patron_regex=patron, extensiones=(".xlsx", ".xlsm"))
+    _reportar_resultado(f"Modelo de valorización '{nombre_base}'", candidatos)
+    if not candidatos:
+        return {"encontrado": False, "ruta": None, "candidatos": []}
+    if len(candidatos) == 1:
+        return {"encontrado": True, "ruta": candidatos[0]["ruta"], "candidatos": candidatos}
+    candidatos_ordenados = sorted(candidatos, key=lambda r: r["modificado"] or datetime.min, reverse=True)
+    seleccionado = candidatos_ordenados[0] if preferir_mas_reciente_si_multiple else None
+    if seleccionado:
+        print(f"     -> Por defecto se selecciona la más reciente: {seleccionado['ruta']}")
+    return {"encontrado": True, "ruta": seleccionado["ruta"] if seleccionado else None,
+            "candidatos": candidatos_ordenados}
+
+
+_PATRON_PERIODO = re.compile(r"riesgos\s*clim[aá]ticos\s*-\s*([12])S(\d{2})", re.IGNORECASE)
+
+
+def _extraer_periodo(nombre_archivo: str):
+    m = _PATRON_PERIODO.search(nombre_archivo.replace("_", " "))
+    if not m:
+        return None
+    return (2000 + int(m.group(2)), int(m.group(1)))
+
+
+def listar_archivos_riesgos_climaticos(carpeta_raiz: str = RUTA_RIESGOS_CLIMATICOS) -> list:
+    candidatos = buscar_archivos_recursivo(carpeta_raiz, patron_regex=r"riesgos\s*clim[aá]ticos",
+                                            extensiones=(".xlsx", ".xlsm"))
+    con_periodo = []
+    for c in candidatos:
+        periodo = _extraer_periodo(c["nombre"])
+        if periodo is None:
+            continue
+        c = dict(c)
+        c["anio"], c["semestre"] = periodo
+        con_periodo.append(c)
+    con_periodo.sort(key=lambda r: (r["anio"], r["semestre"]), reverse=True)
+    return con_periodo
+
+
+def encontrar_archivo_riesgos_climaticos(periodo: str = None, carpeta_raiz: str = RUTA_RIESGOS_CLIMATICOS) -> dict:
+    disponibles = listar_archivos_riesgos_climaticos(carpeta_raiz)
+    if not disponibles:
+        print(f"[NO ENCONTRADO] Ningún archivo 'Riesgos Climáticos - XSYY' en:\n     {carpeta_raiz}")
+        return {"encontrado": False, "ruta": None, "periodo": None, "todos_los_periodos": []}
+    etiquetas = [f"{d['semestre']}S{str(d['anio'])[-2:]}" for d in disponibles]
+    if periodo is None:
+        seleccionado = disponibles[0]
+        etiqueta = etiquetas[0]
+        print(f"[OK] Riesgos Climáticos: se usa el período más reciente disponible -> {etiqueta}")
+        print(f"     -> {seleccionado['ruta']}")
+        if len(disponibles) > 1:
+            print(f"     Períodos disponibles: {', '.join(etiquetas)}")
+        return {"encontrado": True, "ruta": seleccionado["ruta"], "periodo": etiqueta, "todos_los_periodos": etiquetas}
+    periodo_norm = periodo.strip().upper()
+    m = re.match(r"^([12])S(\d{2})$", periodo_norm)
+    if not m:
+        raise ValueError(f"Formato de período inválido: '{periodo}'. Usa 'XSYY', ej. '1S26'.")
+    sem_buscado, anio_buscado = int(m.group(1)), 2000 + int(m.group(2))
+    for d, etiqueta in zip(disponibles, etiquetas):
+        if d["anio"] == anio_buscado and d["semestre"] == sem_buscado:
+            print(f"[OK] Riesgos Climáticos: período solicitado '{periodo_norm}' encontrado.")
+            print(f"     -> {d['ruta']}")
+            return {"encontrado": True, "ruta": d["ruta"], "periodo": etiqueta, "todos_los_periodos": etiquetas}
+    print(f"[NO ENCONTRADO] El período solicitado '{periodo_norm}' no existe entre los disponibles.")
+    print(f"     Períodos disponibles: {', '.join(etiquetas)}")
+    return {"encontrado": False, "ruta": None, "periodo": None, "todos_los_periodos": etiquetas}
+
+
+def encontrar_bd_sectorial(sector: str, carpeta_raiz: str = RUTA_INPUTS_MACRO) -> dict:
+    alias = SECTOR_BD_ALIAS.get(sector, [sector.lower()])
+    candidatos_bd = buscar_archivos_recursivo(carpeta_raiz, patron_regex=r"^BD\s", extensiones=(".xlsx", ".xlsm"))
+    coincidencias = [c for c in candidatos_bd if any(a in c["nombre"].lower() for a in alias)]
+    _reportar_resultado(f"Base sectorial para sector '{sector}'", coincidencias)
+    if not coincidencias:
+        disponibles = [c["nombre"] for c in candidatos_bd] if candidatos_bd else "ninguno"
+        print(f"     Archivos 'BD *' disponibles en la carpeta: {disponibles}")
+        return {"encontrado": False, "ruta": None, "candidatos": []}
+    return {"encontrado": True, "ruta": coincidencias[0]["ruta"], "candidatos": coincidencias}
+
+
+def resolver_recursos_empresa(nombre_archivo_valorizacion: str, sector: str, periodo_riesgos: str = None) -> dict:
+    print("=" * 70)
+    print("RESOLVIENDO RECURSOS DE DATOS")
+    print("=" * 70)
+    print("\n[1/3] Modelo de valorización")
+    r1 = encontrar_modelo_valorizacion(nombre_archivo_valorizacion)
+    print("\n[2/3] Archivo de Scores CENEPRED (Riesgos Climáticos)")
+    r2 = encontrar_archivo_riesgos_climaticos(periodo=periodo_riesgos)
+    print("\n[3/3] Base de datos sectorial")
+    r3 = encontrar_bd_sectorial(sector=sector)
+    print("\n" + "=" * 70)
+    resumen_ok = all([r1["encontrado"], r2["encontrado"], r3["encontrado"]])
+    if resumen_ok:
+        print("RESUMEN: los 3 recursos fueron localizados correctamente.")
+    else:
+        faltantes = []
+        if not r1["encontrado"]:
+            faltantes.append("modelo de valorización")
+        if not r2["encontrado"]:
+            faltantes.append("Riesgos Climáticos")
+        if not r3["encontrado"]:
+            faltantes.append("BD sectorial")
+        print(f"RESUMEN: faltan por resolver -> {', '.join(faltantes)}")
+    print("=" * 70)
+    return {"modelo_valorizacion": r1, "riesgos_climaticos": r2, "bd_sectorial": r3}
+
+
+# ============================================================================
+# 0.B CONFIGURACIÓN DE LA CORRIDA
+# ============================================================================
+
+EMPRESA = "Engie"
+SECTOR = "Utilities"
+NOMBRE_ARCHIVO_VALORIZACION = "Engie 261Q.xlsx"
+RIO_PROXY_HIDRO = "Santa"          # proxy hidrológico para las centrales hidro del sector
+PERIODO_RIESGOS = None             # None = usar el período más reciente disponible; o ej. "1S26"
+TC_USD_PEN = 3.3609                # mismo TC usado en el archivo de Riesgos Climáticos
+
+RUTA_SALIDA_EXCEL = f"Resultado_{EMPRESA}.xlsx"
+
+
+# ============================================================================
+# 1. SUPUESTOS Y PARÁMETROS DEL FRAMEWORK (editables, documentados)
+# ============================================================================
+
+ALPHA_CONVEXIDAD = 1.5   # φ(S) = (S-1)^alpha / (5-1)^alpha
+
+# Pesos del Vulnerability Score (7 variables, sin cobertura de seguros),
+# redistribuidos proporcionalmente desde la tabla original de 8 variables.
+PESOS_VULNERABILITY = {
+    "Utilities": {
+        "concentracion_geografica": 0.22,
+        "leverage": 0.17,
+        "liquidez": 0.11,
+        "intensidad_activos_fijos": 0.17,
+        "margen_operativo": 0.11,
+        "dependencia_hidrica": 0.17,
+        "capacidad_adaptacion": 0.05,
+    }
+}
+
+# Elasticidades por sector-pathway. Rango (min, moda, max) en % sobre la
+# variable financiera indicada. Signo ya incluido (negativo = reduce revenue).
+#
+# NOTA: el rango de Movimiento de Masa para Utilities NO estaba en la
+# versión original del framework (solo existía la descripción cualitativa
+# del pathway). Se propone aquí por primera vez, calibrado por analogía con
+# el rango de Infraestructura-MM (concesiones viales), ajustado levemente a
+# la baja porque activos de generación/transmisión son en parte más
+# reforzados que vías, pero las líneas de transmisión en zona andina son
+# igual de vulnerables. QUEDA MARCADO COMO SUPUESTO NUEVO A ESCRUTAR.
+ELASTICIDADES = {
+    "Utilities": {
+        "Inundación": {
+            "revenue": {"min": -0.04, "moda": -0.025, "max": -0.01},
+            "cogs": None,
+        },
+        "Movimiento de Masa": {
+            "revenue": {"min": -0.10, "moda": -0.06, "max": -0.02},
+            "cogs": None,
+        },
+        "Sequía": {
+            # Pathway específico hidro: revenue cae por menor generación,
+            # COGS sube por compra de energía en spot para cubrir contratos.
+            "revenue": {"min": -0.15, "moda": -0.09, "max": -0.03},
+            "cogs": {"min": 0.02, "moda": 0.06, "max": 0.10},
+        },
+    }
+}
+
+MAPA_MITIGANTE_A_VULNERABILIDAD = {
+    "Alto": 0.2,
+    "Medio": 0.5,
+    "Bajo": 0.8,
+    "—": 1.0,     # sin mitigante declarado -> supuesto conservador (máxima vulnerabilidad)
+    None: 1.0,
+}
+
+# Normalización de cada variable de vulnerabilidad a escala [0,1],
+# donde 1 = máxima vulnerabilidad. Documentado explícitamente porque
+# afecta materialmente el resultado.
+NORMALIZACION = {
+    "leverage_cap_x": 5.0,          # Deuda Neta/EBITDA >= 5.0x -> vulnerabilidad 1
+    "liquidez_buena_x": 2.0,        # Current ratio >= 2.0x -> vulnerabilidad 0
+    "liquidez_mala_x": 0.5,         # Current ratio <= 0.5x -> vulnerabilidad 1
+    "margen_bueno_pct": 0.50,       # EBITDA margin >= 50% -> vulnerabilidad 0
+    "margen_malo_pct": 0.00,        # EBITDA margin <= 0%  -> vulnerabilidad 1
+}
+
+N_SIMULACIONES_MONTE_CARLO = 10000
+
+
+# ============================================================================
+# 2. CARGA DE DATOS
+# ============================================================================
+
+def _clip(x, lo=0.0, hi=1.0):
+    return max(lo, min(hi, x))
+
+
+def cargar_score_riesgo(ruta_riesgos: str, empresa: str) -> dict:
+    """Lee la hoja 'Score por Empresa' y devuelve los scores agregados."""
+    wb = openpyxl.load_workbook(ruta_riesgos, data_only=True)
+    ws = wb["Score por Empresa"]
+    headers = [ws.cell(4, c).value for c in range(1, ws.max_column + 1)]
+    idx = {h: i + 1 for i, h in enumerate(headers) if h}
+
+    for r in range(5, ws.max_row + 1):
+        if ws.cell(r, idx["Empresa"]).value == empresa:
+            return {
+                "empresa": empresa,
+                "sector": ws.cell(r, idx["Sector"]).value,
+                "aum_total_pen": ws.cell(r, idx["AUM Total (S/)"]).value,
+                "score_mm": ws.cell(r, idx["Score MM"]).value,
+                "score_inund": ws.cell(r, idx["Score Inund."]).value,
+                "score_sequia": ws.cell(r, idx["Score Sequía"]).value,
+                "score_global": ws.cell(r, idx["Score Global"]).value,
+                "mitigante": ws.cell(r, idx["Mitigante (2S26)"]).value,
+            }
+    raise ValueError(f"Empresa '{empresa}' no encontrada en 'Score por Empresa'.")
+
+
+def cargar_activos_empresa(ruta_riesgos: str, empresa: str) -> list:
+    """Lee la hoja 'Activos por Empresa' filtrada a la empresa dada."""
+    wb = openpyxl.load_workbook(ruta_riesgos, data_only=True)
+    ws = wb["Activos por Empresa"]
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    idx = {h: i + 1 for i, h in enumerate(headers) if h}
+
+    activos = []
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, idx["Empresa"]).value == empresa:
+            activos.append({
+                "activo": ws.cell(r, idx["Activo Físico"]).value,
+                "departamento": ws.cell(r, idx["Departamento"]).value,
+                "score_mm": ws.cell(r, idx["Score MM"]).value,
+                "score_inund": ws.cell(r, idx["Score Inund."]).value,
+                "score_sequia": ws.cell(r, idx["Score Sequía"]).value,
+                "monto_pen": ws.cell(r, idx["Plata del Activo (S/)"]).value,
+            })
+    return activos
+
+
+def concentracion_geografica(activos: list) -> float:
+    """
+    % del AUM mapeado de la empresa concentrado en un solo departamento.
+    Se usa directamente como sub-score de vulnerabilidad (ya en [0,1]).
+    """
+    if not activos:
+        return None
+    por_depto = {}
+    total = 0.0
+    for a in activos:
+        monto = a["monto_pen"] or 0.0
+        por_depto[a["departamento"]] = por_depto.get(a["departamento"], 0.0) + monto
+        total += monto
+    if total == 0:
+        return None
+    return max(por_depto.values()) / total
+
+
+def _buscar_fila(ws, columna_etiqueta: int, etiqueta: str, fila_inicio=1, fila_fin=None):
+    fila_fin = fila_fin or ws.max_row
+    for r in range(fila_inicio, fila_fin + 1):
+        if ws.cell(r, columna_etiqueta).value == etiqueta:
+            return r
+    return None
+
+
+def cargar_financieros(ruta_valorizacion: str, anio_base: int = 2025) -> dict:
+    """
+    Lee la hoja 'Ratios_Engie' (ratios ya calculados) y la hoja 'DCF' para
+    obtener las variables financieras necesarias para el vulnerability score
+    y para el ajuste de estados financieros.
+    """
+    wb = openpyxl.load_workbook(ruta_valorizacion, data_only=True)
+    ws = wb["Ratios_Engie"]
+
+    headers = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+    col_anio = None
+    for c, h in enumerate(headers, start=1):
+        if h == anio_base:
+            col_anio = c
+            break
+    if col_anio is None:
+        raise ValueError(f"No se encontró la columna del año {anio_base} en 'Ratios_Engie'.")
+
+    def valor(etiqueta):
+        fila = _buscar_fila(ws, 1, etiqueta)
+        if fila is None:
+            return None
+        return ws.cell(fila, col_anio).value
+
+    financieros = {
+        "anio_base": anio_base,
+        "revenue_usd": valor("Revenue"),
+        "ebitda_usd": valor("EBITDA"),
+        "ebitda_margin": valor("EBITDA Margin (%)"),
+        "net_debt_ebitda_x": valor("Net debt / EBITDA (x)"),
+        "current_ratio_x": valor("Current ratio (x)"),
+        "net_ppe_usd": valor("Net PPE"),
+        "total_assets_usd": valor("Total assets"),
+        "net_debt_usd": None,  # se completa abajo desde DCF si aplica
+    }
+
+    ws_dcf = wb["DCF"]
+    financieros["wacc"] = ws_dcf.cell(2, 5).value
+    financieros["g_terminal"] = ws_dcf.cell(3, 5).value
+    financieros["coe"] = ws_dcf.cell(4, 5).value
+
+    # fila de años del DCF (fila 6) y datos anuales de FCL, capex, etc. (filas 7-14)
+    fila_anios = 6
+    anios_dcf = {}
+    for c in range(1, ws_dcf.max_column + 1):
+        v = ws_dcf.cell(fila_anios, c).value
+        if isinstance(v, (int, float)) and v and v > 2000:
+            anios_dcf[int(v)] = c
+
+    etiquetas_dcf = {
+        "revenue": "Ingresos Totales",
+        "ebit": "Resultado Operativo*",
+        "depreciacion": "(+) Depreciación",
+        "ebitda": "EBITDA*",
+        "impuestos": "(-) Impuestos",
+        "delta_wc": "(-) ∆ Capital de Trabajo",
+        "capex": "(-) Capex",
+        "fcl": "Flujo de Caja Libre (FCL)",
+    }
+    filas_dcf = {}
+    for clave, etiqueta in etiquetas_dcf.items():
+        for r in range(1, ws_dcf.max_row + 1):
+            if ws_dcf.cell(r, 2).value == etiqueta:
+                filas_dcf[clave] = r
+                break
+
+    proyeccion = {}
+    for anio, c in sorted(anios_dcf.items()):
+        proyeccion[anio] = {clave: ws_dcf.cell(fila, c).value for clave, fila in filas_dcf.items()}
+
+    # Las celdas de resultado (Valor de la Firma, Deuda Neta, Patrimonio, etc.)
+    # están en la columna E (índice 5), igual que WACC/G/CoE más arriba.
+    financieros["dcf_proyeccion"] = proyeccion
+    financieros["valor_firma"] = ws_dcf.cell(19, 5).value
+    financieros["deuda_neta_dcf"] = ws_dcf.cell(20, 5).value
+    financieros["patrimonio_dcf"] = ws_dcf.cell(21, 5).value
+    financieros["n_acciones_mn"] = ws_dcf.cell(24, 5).value
+    financieros["valor_fundamental_x_accion"] = ws_dcf.cell(25, 5).value
+    financieros["ultimo_precio"] = ws_dcf.cell(26, 5).value
+
+    return financieros
+
+
+def cargar_produccion(ruta_valorizacion: str) -> dict:
+    """Lee la hoja 'Production' y devuelve generación Hidro/Termo anual."""
+    wb = openpyxl.load_workbook(ruta_valorizacion, data_only=True)
+    ws = wb["Production"]
+    headers = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+
+    filas = {}
+    for r in range(1, 12):
+        etiqueta = ws.cell(r, 2).value
+        if etiqueta in ("Hidro", "Termo", "Total generación"):
+            filas[etiqueta] = r
+
+    resultado = {}
+    for etiqueta, fila in filas.items():
+        serie_anual = {}
+        for c, h in enumerate(headers, start=1):
+            if isinstance(h, int) and h > 2000:
+                v = ws.cell(fila, c).value
+                if v is not None:
+                    serie_anual[h] = v
+        resultado[etiqueta] = serie_anual
+
+    return resultado
+
+
+def cargar_caudal_rio_anual(ruta_bd_sectorial: str, rio: str) -> dict:
+    """Lee 'BD_Utilities.xlsm' -> hoja '4. Caudales y Volumen', promedio anual (m3/s)."""
+    wb = openpyxl.load_workbook(ruta_bd_sectorial, data_only=True, keep_vba=True)
+    ws = wb["4. Caudales y Volumen"]
+
+    fila_rio = None
+    for r in range(8, ws.max_row + 1):
+        if ws.cell(r, 6).value == rio:
+            fila_rio = r
+            break
+    if fila_rio is None:
+        raise ValueError(f"Río '{rio}' no encontrado en la hoja de caudales.")
+
+    por_anio = {}
+    for c in range(8, ws.max_column + 1):
+        anio = ws.cell(6, c).value
+        caudal = ws.cell(fila_rio, c).value
+        if isinstance(anio, (int, float)) and isinstance(caudal, (int, float)):
+            por_anio.setdefault(int(anio), []).append(caudal)
+
+    return {anio: statistics.mean(vals) for anio, vals in sorted(por_anio.items())}
+
+
+# ============================================================================
+# 3. CÁLCULO DEL FRAMEWORK
+# ============================================================================
+
+def phi(score, alpha=ALPHA_CONVEXIDAD):
+    """
+    Mapeo convexo score CENEPRED (1-5) -> intensidad económica [0,1].
+    Si score <= 1 (incluye el caso de scores diluidos por N/D, ej. 0.22),
+    se trata como intensidad 0: no hay evidencia de exposición por debajo
+    del piso de la escala. Esto es una consecuencia directa, no un parche,
+    de la limitación de dilución por datos faltantes ya documentada.
+    """
+    if score is None or score <= 1:
+        return 0.0
+    return ((score - 1) ** alpha) / ((5 - 1) ** alpha)
+
+
+def normalizar_variables_vulnerability(financieros: dict, produccion: dict, mitigante) -> dict:
+    net_debt_ebitda = financieros["net_debt_ebitda_x"] or 0
+    current_ratio = financieros["current_ratio_x"] or 0
+    ebitda_margin = financieros["ebitda_margin"] or 0
+    net_ppe = financieros["net_ppe_usd"] or 0
+    total_assets = financieros["total_assets_usd"] or 1
+
+    anio = financieros["anio_base"]
+    hidro = produccion.get("Hidro", {}).get(anio, 0) or 0
+    total_gen = produccion.get("Total generación", {}).get(anio, 0) or 1
+    dependencia_hidrica = hidro / total_gen if total_gen else 0
+
+    leverage_v = _clip(net_debt_ebitda / NORMALIZACION["leverage_cap_x"])
+    liquidez_v = _clip(
+        (NORMALIZACION["liquidez_buena_x"] - current_ratio)
+        / (NORMALIZACION["liquidez_buena_x"] - NORMALIZACION["liquidez_mala_x"])
+    )
+    margen_v = _clip(
+        (NORMALIZACION["margen_bueno_pct"] - ebitda_margin)
+        / (NORMALIZACION["margen_bueno_pct"] - NORMALIZACION["margen_malo_pct"])
+    )
+    activos_fijos_v = _clip(net_ppe / total_assets)
+    adaptacion_v = MAPA_MITIGANTE_A_VULNERABILIDAD.get(mitigante, 1.0)
+
+    return {
+        "leverage": leverage_v,
+        "liquidez": liquidez_v,
+        "margen_operativo": margen_v,
+        "intensidad_activos_fijos": activos_fijos_v,
+        "dependencia_hidrica": _clip(dependencia_hidrica),
+        "capacidad_adaptacion": adaptacion_v,
+        # concentracion_geografica se agrega fuera (viene de otra fuente)
+    }
+
+
+def calcular_vulnerability_score(variables_norm: dict, sector: str) -> dict:
+    pesos = PESOS_VULNERABILITY[sector]
+    v_total = sum(pesos[k] * variables_norm[k] for k in pesos)
+    return {"vulnerability_score": v_total, "detalle": variables_norm, "pesos": pesos}
+
+
+def calcular_impacto_por_hazard(scores: dict, vulnerability: float, sector: str,
+                                 alpha=ALPHA_CONVEXIDAD, escenario="moda") -> dict:
+    """
+    Devuelve, por hazard, el delta% sobre revenue y sobre COGS, para el
+    escenario indicado ("min"=conservador en magnitud de impacto positivo
+    para la empresa / menor daño, "moda"=base, "max"=severo).
+    """
+    mapa_hazard_score = {
+        "Movimiento de Masa": scores["score_mm"],
+        "Inundación": scores["score_inund"],
+        "Sequía": scores["score_sequia"],
+    }
+    resultado = {}
+    for hazard, score in mapa_hazard_score.items():
+        elast = ELASTICIDADES[sector][hazard]
+        intensidad = phi(score, alpha=alpha)
+        delta_revenue = intensidad * vulnerability * elast["revenue"][escenario]
+        delta_cogs = None
+        if elast["cogs"] is not None:
+            delta_cogs = intensidad * vulnerability * elast["cogs"][escenario]
+        resultado[hazard] = {
+            "score": score,
+            "intensidad_phi": intensidad,
+            "delta_revenue_pct": delta_revenue,
+            "delta_cogs_pct": delta_cogs,
+        }
+    return resultado
+
+
+def agregar_impacto_total(impacto_por_hazard: dict) -> dict:
+    """Suma across hazards. Se tratan como independientes (sin haircut),
+    consistente con la metodología documentada."""
+    total_revenue = sum(v["delta_revenue_pct"] for v in impacto_por_hazard.values())
+    total_cogs = sum(v["delta_cogs_pct"] for v in impacto_por_hazard.values() if v["delta_cogs_pct"])
+    return {"delta_revenue_total_pct": total_revenue, "delta_cogs_total_pct": total_cogs}
+
+
+def ajustar_estados_financieros(financieros: dict, impacto_total: dict) -> dict:
+    revenue_base = financieros["revenue_usd"]
+    ebitda_base = financieros["ebitda_usd"]
+    margen_base = ebitda_base / revenue_base if revenue_base else None
+
+    d_rev = impacto_total["delta_revenue_total_pct"]
+    d_cogs = impacto_total["delta_cogs_total_pct"]
+
+    revenue_adj = revenue_base * (1 + d_rev)
+    cogs_base = revenue_base - ebitda_base
+    cogs_adj = cogs_base * (1 + d_cogs)
+    ebitda_adj = revenue_adj - cogs_adj
+
+    net_debt = financieros["net_debt_ebitda_x"] * ebitda_base if financieros["net_debt_ebitda_x"] else None
+    net_debt_ebitda_adj = net_debt / ebitda_adj if net_debt and ebitda_adj else None
+
+    return {
+        "revenue_base": revenue_base,
+        "revenue_ajustado": revenue_adj,
+        "ebitda_base": ebitda_base,
+        "ebitda_ajustado": ebitda_adj,
+        "delta_ebitda_pct": (ebitda_adj / ebitda_base - 1) if ebitda_base else None,
+        "net_debt_ebitda_base_x": financieros["net_debt_ebitda_x"],
+        "net_debt_ebitda_ajustado_x": net_debt_ebitda_adj,
+    }
+
+
+def ajustar_dcf(financieros: dict, delta_ebitda_pct: float) -> dict:
+    """
+    Ajuste de flujos (método preferido del framework): escala el FCL
+    proyectado por (1+delta_ebitda_pct), manteniendo WACC y g. Recalcula
+    Valor de la Firma y Valor Fundamental por acción.
+    """
+    wacc = financieros["wacc"]
+    proyeccion = financieros["dcf_proyeccion"]
+    g = financieros["g_terminal"]
+
+    anios_ordenados = sorted(proyeccion.keys())
+    anio_valuacion = anios_ordenados[0]  # año base del DCF (t=0)
+
+    vp_fcl_total = 0.0
+    fcl_ultimo_anio = None
+    for t, anio in enumerate(anios_ordenados):
+        fcl_base = proyeccion[anio]["fcl"]
+        if fcl_base is None:
+            continue
+        fcl_ajustado = fcl_base * (1 + delta_ebitda_pct)
+        if anio == anios_ordenados[-1]:
+            fcl_ultimo_anio = fcl_ajustado
+        if t > 0:  # t=0 es el año de referencia, no se descuenta como flujo futuro
+            vp_fcl_total += fcl_ajustado / ((1 + wacc) ** t)
+
+    t_terminal = len(anios_ordenados) - 1
+    valor_terminal = fcl_ultimo_anio * (1 + g) / (wacc - g) if fcl_ultimo_anio else None
+    vp_terminal = valor_terminal / ((1 + wacc) ** t_terminal) if valor_terminal else None
+
+    valor_firma_ajustado = vp_fcl_total + vp_terminal if vp_terminal else None
+    patrimonio_ajustado = (
+        valor_firma_ajustado - financieros["deuda_neta_dcf"] if valor_firma_ajustado else None
+    )
+    valor_x_accion_ajustado = (
+        patrimonio_ajustado / financieros["n_acciones_mn"] if patrimonio_ajustado else None
+    )
+
+    return {
+        "valor_firma_base": financieros["valor_firma"],
+        "valor_firma_ajustado": valor_firma_ajustado,
+        "valor_fundamental_base": financieros["valor_fundamental_x_accion"],
+        "valor_fundamental_ajustado": valor_x_accion_ajustado,
+    }
+
+
+# ============================================================================
+# 4. SENSIBILIDAD A ALPHA Y MONTE CARLO
+# ============================================================================
+
+def correr_pipeline_completo(scores, vulnerability, financieros, sector, alpha, escenario="moda"):
+    impacto_hazard = calcular_impacto_por_hazard(scores, vulnerability, sector, alpha=alpha, escenario=escenario)
+    impacto_total = agregar_impacto_total(impacto_hazard)
+    ajuste_fin = ajustar_estados_financieros(financieros, impacto_total)
+    ajuste_dcf = ajustar_dcf(financieros, ajuste_fin["delta_ebitda_pct"])
+    return impacto_hazard, impacto_total, ajuste_fin, ajuste_dcf
+
+
+def sensibilidad_alpha(scores, vulnerability, financieros, sector,
+                        rango_alpha=(1.0, 1.25, 1.5, 1.75, 2.0)):
+    filas = []
+    for a in rango_alpha:
+        _, impacto_total, ajuste_fin, ajuste_dcf = correr_pipeline_completo(
+            scores, vulnerability, financieros, sector, alpha=a, escenario="moda"
+        )
+        filas.append({
+            "alpha": a,
+            "delta_revenue_pct": impacto_total["delta_revenue_total_pct"],
+            "delta_ebitda_pct": ajuste_fin["delta_ebitda_pct"],
+            "valor_fundamental_ajustado": ajuste_dcf["valor_fundamental_ajustado"],
+        })
+    return filas
+
+
+def _triangular(rng, minimo, moda, maximo):
+    return rng.triangular(minimo, maximo, moda)
+
+
+def monte_carlo(scores, vulnerability_detalle, pesos, financieros, sector,
+                 n=N_SIMULACIONES_MONTE_CARLO, semilla=42):
+    rng = random.Random(semilla)
+    resultados_delta_ebitda = []
+    resultados_valor_fundamental = []
+
+    for _ in range(n):
+        alpha_sim = rng.uniform(1.0, 2.0)
+
+        # Ruido +/-10% sobre cada variable de vulnerabilidad ya normalizada
+        vars_sim = {}
+        for k, v in vulnerability_detalle.items():
+            ruido = rng.uniform(-0.10, 0.10)
+            vars_sim[k] = _clip(v * (1 + ruido))
+        v_sim = sum(pesos[k] * vars_sim[k] for k in pesos)
+
+        elast_sim = {}
+        for hazard, e in ELASTICIDADES[sector].items():
+            rev = _triangular(rng, e["revenue"]["min"], e["revenue"]["moda"], e["revenue"]["max"])
+            cogs = None
+            if e["cogs"] is not None:
+                cogs = _triangular(rng, e["cogs"]["min"], e["cogs"]["moda"], e["cogs"]["max"])
+            elast_sim[hazard] = {"revenue": rev, "cogs": cogs}
+
+        mapa_hazard_score = {
+            "Movimiento de Masa": scores["score_mm"],
+            "Inundación": scores["score_inund"],
+            "Sequía": scores["score_sequia"],
+        }
+        d_rev_total = 0.0
+        d_cogs_total = 0.0
+        for hazard, score in mapa_hazard_score.items():
+            intensidad = phi(score, alpha=alpha_sim)
+            d_rev_total += intensidad * v_sim * elast_sim[hazard]["revenue"]
+            if elast_sim[hazard]["cogs"] is not None:
+                d_cogs_total += intensidad * v_sim * elast_sim[hazard]["cogs"]
+
+        ajuste_fin = ajustar_estados_financieros(
+            financieros, {"delta_revenue_total_pct": d_rev_total, "delta_cogs_total_pct": d_cogs_total}
+        )
+        ajuste_dcf = ajustar_dcf(financieros, ajuste_fin["delta_ebitda_pct"])
+
+        resultados_delta_ebitda.append(ajuste_fin["delta_ebitda_pct"])
+        if ajuste_dcf["valor_fundamental_ajustado"] is not None:
+            resultados_valor_fundamental.append(ajuste_dcf["valor_fundamental_ajustado"])
+
+    def percentiles(lista, ps=(10, 25, 50, 75, 90)):
+        lista_ordenada = sorted(lista)
+        n_ = len(lista_ordenada)
+        out = {}
+        for p in ps:
+            idx = min(n_ - 1, max(0, int(round(p / 100 * (n_ - 1)))))
+            out[f"p{p}"] = lista_ordenada[idx]
+        return out
+
+    return {
+        "delta_ebitda_pct": percentiles(resultados_delta_ebitda),
+        "valor_fundamental_ajustado": percentiles(resultados_valor_fundamental),
+        "n_simulaciones": n,
+    }
+
+
+# ============================================================================
+# 5. CROSS-CHECK EMPÍRICO: GENERACIÓN HIDRO VS. CAUDAL DEL RÍO
+# ============================================================================
+
+def cross_check_hidro_vs_caudal(produccion: dict, caudal_anual: dict, anios_covid=(2020,)) -> list:
+    hidro = produccion.get("Hidro", {})
+    filas = []
+    anios_comunes = sorted(set(hidro.keys()) & set(caudal_anual.keys()))
+    for anio in anios_comunes:
+        filas.append({
+            "anio": anio,
+            "hidro_gwh": hidro[anio],
+            "caudal_promedio_m3s": caudal_anual[anio],
+            "nota": "Año atípico (demanda COVID-19)" if anio in anios_covid else "",
+        })
+    return filas
+
+
+# ============================================================================
+# 6. ORQUESTADOR PRINCIPAL
+# ============================================================================
+
+def correr_framework_empresa(ruta_valorizacion, ruta_riesgos, ruta_bd_sectorial,
+                              empresa, sector, rio_proxy_hidro):
+    print(f"Cargando datos para {empresa}...")
+    scores = cargar_score_riesgo(ruta_riesgos, empresa)
+    activos = cargar_activos_empresa(ruta_riesgos, empresa)
+    financieros = cargar_financieros(ruta_valorizacion, anio_base=2025)
+    produccion = cargar_produccion(ruta_valorizacion)
+    caudal_anual = cargar_caudal_rio_anual(ruta_bd_sectorial, rio_proxy_hidro)
+
+    geo_concentracion = concentracion_geografica(activos)
+    vars_norm = normalizar_variables_vulnerability(financieros, produccion, scores["mitigante"])
+    vars_norm["concentracion_geografica"] = geo_concentracion or 0.0
+
+    vulnerability = calcular_vulnerability_score(vars_norm, sector)
+
+    impacto_hazard_base, impacto_total_base, ajuste_fin_base, ajuste_dcf_base = correr_pipeline_completo(
+        scores, vulnerability["vulnerability_score"], financieros, sector, alpha=ALPHA_CONVEXIDAD, escenario="moda"
+    )
+
+    print("Corriendo escenarios conservador/severo...")
+    # Las elasticidades están guardadas como números negativos (reducen revenue).
+    # "min" = el valor más negativo (mayor magnitud de daño) -> escenario SEVERO.
+    # "max" = el valor menos negativo (menor magnitud de daño) -> escenario CONSERVADOR.
+    resultados_escenarios = {}
+    for nombre_escenario, clave in [("conservador", "max"), ("base", "moda"), ("severo", "min")]:
+        ih, it, af, ad = correr_pipeline_completo(
+            scores, vulnerability["vulnerability_score"], financieros, sector,
+            alpha=ALPHA_CONVEXIDAD, escenario=clave
+        )
+        resultados_escenarios[nombre_escenario] = {
+            "impacto_hazard": ih, "impacto_total": it, "ajuste_fin": af, "ajuste_dcf": ad,
+        }
+
+    print("Corriendo sensibilidad a alpha...")
+    sens_alpha = sensibilidad_alpha(scores, vulnerability["vulnerability_score"], financieros, sector)
+
+    print(f"Corriendo Monte Carlo ({N_SIMULACIONES_MONTE_CARLO:,} simulaciones)...")
+    mc = monte_carlo(scores, vulnerability["detalle"], vulnerability["pesos"], financieros, sector)
+
+    print("Corriendo cross-check hidro vs. caudal...")
+    cross_check = cross_check_hidro_vs_caudal(produccion, caudal_anual)
+
+    return {
+        "empresa": empresa,
+        "sector": sector,
+        "scores": scores,
+        "activos": activos,
+        "geo_concentracion": geo_concentracion,
+        "financieros": financieros,
+        "produccion": produccion,
+        "caudal_anual": caudal_anual,
+        "vulnerability": vulnerability,
+        "resultados_escenarios": resultados_escenarios,
+        "sensibilidad_alpha": sens_alpha,
+        "monte_carlo": mc,
+        "cross_check": cross_check,
+    }
+
+
+# ============================================================================
+# 7. ESCRITOR DE EXCEL
+# ============================================================================
+
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+_FUENTE = "Arial"
+_TITULO_FONT = Font(name=_FUENTE, size=14, bold=True, color="FFFFFF")
+_TITULO_FILL = PatternFill("solid", fgColor="1A5276")
+_HEADER_FONT = Font(name=_FUENTE, size=10, bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="2980B9")
+_NOTA_FONT = Font(name=_FUENTE, size=9, italic=True, color="666666")
+_BASE_FONT = Font(name=_FUENTE, size=10)
+_BORDE_FINO = Border(bottom=Side(style="thin", color="D5D5D0"))
+
+
+def _titulo_hoja(ws, texto, col_span=6):
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=col_span)
+    celda = ws.cell(1, 1, texto)
+    celda.font = _TITULO_FONT
+    celda.fill = _TITULO_FILL
+    celda.alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 24
+
+
+def _encabezados(ws, fila, etiquetas):
+    for c, etiqueta in enumerate(etiquetas, start=1):
+        celda = ws.cell(fila, c, etiqueta)
+        celda.font = _HEADER_FONT
+        celda.fill = _HEADER_FILL
+
+
+def _autoancho(ws, min_ancho=12, max_ancho=55):
+    for col_cells in ws.columns:
+        longitud = max((len(str(c.value)) for c in col_cells if c.value is not None), default=0)
+        letra = get_column_letter(col_cells[0].column)
+        ws.column_dimensions[letra].width = min(max(longitud + 2, min_ancho), max_ancho)
+
+
+def escribir_excel_resultados(resultado: dict, ruta_salida: str):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    # ---------------- Hoja 1: Resumen Ejecutivo ----------------
+    ws = wb.create_sheet("Resumen")
+    _titulo_hoja(ws, f"Framework de Riesgo Físico Climático - {resultado['empresa']} ({resultado['sector']})")
+
+    base = resultado["resultados_escenarios"]["base"]
+    cons = resultado["resultados_escenarios"]["conservador"]
+    sev = resultado["resultados_escenarios"]["severo"]
+
+    filas_resumen = [
+        ("Score Movimiento de Masa", resultado["scores"]["score_mm"]),
+        ("Score Inundación", resultado["scores"]["score_inund"]),
+        ("Score Sequía", resultado["scores"]["score_sequia"]),
+        ("Score Global CENEPRED", resultado["scores"]["score_global"]),
+        ("Mitigante declarado", resultado["scores"]["mitigante"]),
+        ("Concentración geográfica (máx. % AUM en 1 depto.)", resultado["geo_concentracion"]),
+        ("Vulnerability Score (0=mínima, 1=máxima)", resultado["vulnerability"]["vulnerability_score"]),
+        (None, None),
+        ("--- Escenario Conservador ---", None),
+        ("Δ Revenue %", cons["impacto_total"]["delta_revenue_total_pct"]),
+        ("Δ EBITDA %", cons["ajuste_fin"]["delta_ebitda_pct"]),
+        ("Valor Fundamental ajustado (USD/acción)", cons["ajuste_dcf"]["valor_fundamental_ajustado"]),
+        (None, None),
+        ("--- Escenario Base ---", None),
+        ("Δ Revenue %", base["impacto_total"]["delta_revenue_total_pct"]),
+        ("Δ EBITDA %", base["ajuste_fin"]["delta_ebitda_pct"]),
+        ("Valor Fundamental ajustado (USD/acción)", base["ajuste_dcf"]["valor_fundamental_ajustado"]),
+        ("Valor Fundamental BASE sin ajuste (USD/acción)", base["ajuste_dcf"]["valor_fundamental_base"]),
+        (None, None),
+        ("--- Escenario Severo ---", None),
+        ("Δ Revenue %", sev["impacto_total"]["delta_revenue_total_pct"]),
+        ("Δ EBITDA %", sev["ajuste_fin"]["delta_ebitda_pct"]),
+        ("Valor Fundamental ajustado (USD/acción)", sev["ajuste_dcf"]["valor_fundamental_ajustado"]),
+    ]
+    r = 3
+    for etiqueta, valor in filas_resumen:
+        if etiqueta is None:
+            r += 1
+            continue
+        ws.cell(r, 1, etiqueta).font = _BASE_FONT if not etiqueta.startswith("---") else Font(
+            name=_FUENTE, bold=True, color="1A5276"
+        )
+        if valor is not None:
+            c = ws.cell(r, 2, valor)
+            if isinstance(valor, float) and abs(valor) < 3:
+                c.number_format = "0.00%" if "%" in etiqueta else "0.000"
+            c.font = _BASE_FONT
+        r += 1
+
+    ws.cell(r + 1, 1, "NOTA: la Sequía tiene score 0.22 (por debajo del piso de la escala 1-5) "
+                       "debido a dilución por activos N/D. φ(score≤1)=0 por diseño: el pathway "
+                       "de sequía no aporta impacto en esta corrida. Ver hoja 'Supuestos y Limitaciones'."
+            ).font = _NOTA_FONT
+    _autoancho(ws)
+
+    # ---------------- Hoja 2: Vulnerability Score - Detalle ----------------
+    ws = wb.create_sheet("Vulnerability Score")
+    _titulo_hoja(ws, "Vulnerability Score - Detalle por Variable", col_span=4)
+    _encabezados(ws, 3, ["Variable", "Valor normalizado [0,1]", "Peso (sector Utilities)", "Contribución"])
+    detalle = resultado["vulnerability"]["detalle"]
+    pesos = resultado["vulnerability"]["pesos"]
+    r = 4
+    for var in pesos:
+        v = detalle.get(var)
+        w = pesos[var]
+        ws.cell(r, 1, var.replace("_", " ").capitalize())
+        ws.cell(r, 2, v).number_format = "0.000"
+        ws.cell(r, 3, w).number_format = "0%"
+        ws.cell(r, 4, (v or 0) * w).number_format = "0.000"
+        r += 1
+    ws.cell(r, 1, "VULNERABILITY SCORE TOTAL").font = Font(name=_FUENTE, bold=True)
+    ws.cell(r, 4, resultado["vulnerability"]["vulnerability_score"]).number_format = "0.000"
+    ws.cell(r, 4).font = Font(name=_FUENTE, bold=True)
+    _autoancho(ws)
+
+    # ---------------- Hoja 3: Impacto por Hazard (3 escenarios) ----------------
+    ws = wb.create_sheet("Impacto por Hazard")
+    _titulo_hoja(ws, "Impacto por Hazard y Escenario", col_span=6)
+    _encabezados(ws, 3, ["Escenario", "Hazard", "Score", "φ(Score)", "Δ Revenue %", "Δ COGS %"])
+    r = 4
+    for nombre_escenario in ["conservador", "base", "severo"]:
+        ih = resultado["resultados_escenarios"][nombre_escenario]["impacto_hazard"]
+        for hazard, vals in ih.items():
+            ws.cell(r, 1, nombre_escenario)
+            ws.cell(r, 2, hazard)
+            ws.cell(r, 3, vals["score"])
+            ws.cell(r, 4, vals["intensidad_phi"]).number_format = "0.000"
+            ws.cell(r, 5, vals["delta_revenue_pct"]).number_format = "0.00%"
+            ws.cell(r, 6, vals["delta_cogs_pct"] if vals["delta_cogs_pct"] is not None else "n/a").number_format = "0.00%"
+            r += 1
+    _autoancho(ws)
+
+    # ---------------- Hoja 4: Estados Financieros Ajustados ----------------
+    ws = wb.create_sheet("Estados Financieros Ajust.")
+    _titulo_hoja(ws, "Estados Financieros Ajustados (USD mm) - Escenario Base", col_span=3)
+    af = base["ajuste_fin"]
+    filas = [
+        ("Revenue base", af["revenue_base"]),
+        ("Revenue ajustado", af["revenue_ajustado"]),
+        ("EBITDA base", af["ebitda_base"]),
+        ("EBITDA ajustado", af["ebitda_ajustado"]),
+        ("Δ EBITDA %", af["delta_ebitda_pct"]),
+        ("Deuda Neta / EBITDA base (x)", af["net_debt_ebitda_base_x"]),
+        ("Deuda Neta / EBITDA ajustado (x)", af["net_debt_ebitda_ajustado_x"]),
+    ]
+    r = 3
+    for etiqueta, valor in filas:
+        ws.cell(r, 1, etiqueta)
+        c = ws.cell(r, 2, valor)
+        c.number_format = "0.00%" if "%" in etiqueta else ("0.00\"x\"" if "(x)" in etiqueta else "#,##0.0")
+        r += 1
+    _autoancho(ws)
+
+    # ---------------- Hoja 5: DCF Comparado ----------------
+    ws = wb.create_sheet("DCF Comparado")
+    _titulo_hoja(ws, "DCF Ajustado por Escenario (USD)", col_span=4)
+    _encabezados(ws, 3, ["Escenario", "Valor de la Firma", "Valor Fundamental / acción", "Δ vs. base sin ajuste"])
+    r = 4
+    vf_base_sin_ajuste = base["ajuste_dcf"]["valor_fundamental_base"]
+    for nombre_escenario in ["conservador", "base", "severo"]:
+        ad = resultado["resultados_escenarios"][nombre_escenario]["ajuste_dcf"]
+        ws.cell(r, 1, nombre_escenario)
+        ws.cell(r, 2, ad["valor_firma_ajustado"]).number_format = "#,##0.0"
+        ws.cell(r, 3, ad["valor_fundamental_ajustado"]).number_format = "$#,##0.00"
+        delta = (ad["valor_fundamental_ajustado"] / vf_base_sin_ajuste - 1) if vf_base_sin_ajuste else None
+        ws.cell(r, 4, delta).number_format = "0.00%"
+        r += 1
+    ws.cell(r + 1, 1, f"Referencia - Valor Fundamental SIN ajuste climático: ${vf_base_sin_ajuste:,.2f}").font = _NOTA_FONT
+    ws.cell(r + 2, 1, f"Referencia - Último precio de mercado: ${base['ajuste_dcf']['valor_fundamental_base']:,.2f} "
+                       f"(tomar de fuente de mercado; el DCF no lo actualiza).").font = _NOTA_FONT
+    _autoancho(ws)
+
+    # ---------------- Hoja 6: Sensibilidad Alpha ----------------
+    ws = wb.create_sheet("Sensibilidad Alpha")
+    _titulo_hoja(ws, "Sensibilidad del Resultado al Parámetro de Convexidad (α)", col_span=4)
+    _encabezados(ws, 3, ["Alpha", "Δ Revenue %", "Δ EBITDA %", "Valor Fundamental ajustado"])
+    r = 4
+    for fila in resultado["sensibilidad_alpha"]:
+        ws.cell(r, 1, fila["alpha"]).number_format = "0.00"
+        ws.cell(r, 2, fila["delta_revenue_pct"]).number_format = "0.00%"
+        ws.cell(r, 3, fila["delta_ebitda_pct"]).number_format = "0.00%"
+        ws.cell(r, 4, fila["valor_fundamental_ajustado"]).number_format = "$#,##0.00"
+        r += 1
+    ws.cell(r + 1, 1, "Lectura: si el ranking/orden de magnitud se mantiene estable a través de "
+                       "los distintos alpha, el resultado es robusto a este supuesto.").font = _NOTA_FONT
+    _autoancho(ws)
+
+    # ---------------- Hoja 7: Monte Carlo ----------------
+    ws = wb.create_sheet("Monte Carlo")
+    _titulo_hoja(ws, f"Monte Carlo - {resultado['monte_carlo']['n_simulaciones']:,} simulaciones", col_span=3)
+    _encabezados(ws, 3, ["Percentil", "Δ EBITDA %", "Valor Fundamental ajustado"])
+    r = 4
+    for p in ["p10", "p25", "p50", "p75", "p90"]:
+        ws.cell(r, 1, p)
+        ws.cell(r, 2, resultado["monte_carlo"]["delta_ebitda_pct"][p]).number_format = "0.00%"
+        ws.cell(r, 3, resultado["monte_carlo"]["valor_fundamental_ajustado"][p]).number_format = "$#,##0.00"
+        r += 1
+    ws.cell(r + 1, 1, "Simula alpha ~ U(1.0,2.0), elasticidades ~ Triangular(min,moda,max) y "
+                       "ruido ±10% en cada variable de vulnerabilidad.").font = _NOTA_FONT
+    _autoancho(ws)
+
+    # ---------------- Hoja 8: Cross-check Hidro vs Caudal ----------------
+    ws = wb.create_sheet("Cross-check Hidro-Caudal")
+    _titulo_hoja(ws, "Cross-check Empírico: Generación Hidro vs. Caudal Río Santa (proxy)", col_span=4)
+    _encabezados(ws, 3, ["Año", "Generación Hidro (GWh)", "Caudal promedio Río Santa (m3/s)", "Nota"])
+    r = 4
+    for fila in resultado["cross_check"]:
+        ws.cell(r, 1, fila["anio"])
+        ws.cell(r, 2, fila["hidro_gwh"]).number_format = "#,##0"
+        ws.cell(r, 3, fila["caudal_promedio_m3s"]).number_format = "#,##0.0"
+        ws.cell(r, 4, fila["nota"])
+        r += 1
+    ws.cell(r + 1, 1, "No es una regresión formal (n insuficiente para inferencia estadística "
+                       "robusta). Es evidencia de ingeniería/observación directa: se espera que "
+                       "años de mayor caudal muestren mayor generación hidro. 2020 está marcado "
+                       "como atípico por el shock de demanda del COVID-19.").font = _NOTA_FONT
+    _autoancho(ws)
+
+    # ---------------- Hoja 9: Supuestos y Limitaciones ----------------
+    ws = wb.create_sheet("Supuestos y Limitaciones")
+    _titulo_hoja(ws, "Supuestos, Calibraciones y Limitaciones de esta Corrida", col_span=2)
+    supuestos = [
+        ("Convexidad φ(S)", "α = 1.5. Si score ≤ 1, φ = 0 (piso de la escala)."),
+        ("Sequía - Engie", "Score = 0.22 (por debajo del piso de escala) porque solo 1 de 9 "
+                            "activos mapeados tiene score de sequía válido (C.H. Yuncán, "
+                            "peso 7.4% del AUM mapeado). Los otros 8 activos son N/D en sequía. "
+                            "Además, Quitaracsa (la hidro más grande de Engie) NO aparece en el "
+                            "archivo de activos mapeados de Riesgos Climáticos: el score de "
+                            "sequía de Engie NO refleja su exposición hídrica real."),
+        ("Movimiento de Masa - Utilities", "Elasticidad de revenue [-10%,-6%,-2%] es una "
+                            "calibración NUEVA propuesta por analogía con Infraestructura-MM. "
+                            "No existía en la versión original del framework. Requiere escrutinio "
+                            "adicional del comité."),
+        ("Backtesting 2017 (El Niño Costero)", "Se descartó como test del pathway de Sequía: "
+                            "el caudal del Río Santa fue 43% MÁS ALTO en 2017 que en 2016, y la "
+                            "generación hidro de Engie subió 15.6% mientras sus compras de "
+                            "energía en spot colapsaron. 2017 fue un año de abundancia hídrica, "
+                            "no de sequía."),
+        ("Backtesting 2020", "Año más seco disponible en la ventana 2016-2024, pero confundido "
+                            "por el shock de demanda del COVID-19. No se usa como test aislado; "
+                            "se reporta como referencia en la hoja de cross-check."),
+        ("Cobertura de seguros", "Excluida del Vulnerability Score por falta de dato público. "
+                            "Pesos redistribuidos proporcionalmente entre las 7 variables restantes."),
+        ("Activos N/D (sin score)", "Tratados como dato faltante: se excluyen del cálculo "
+                            "correspondiente, nunca se imputa un valor."),
+        ("Concentración geográfica", "Calculada solo sobre el AUM mapeado en el archivo de "
+                            "Riesgos Climáticos (S/ 220.3mm para Engie), que es una fracción del "
+                            "balance total de la empresa, no su exposición total."),
+        ("Año financiero base", f"{resultado['financieros']['anio_base']} (último año fiscal "
+                            "completo disponible en el modelo de valorización)."),
+        ("Ajuste de DCF", "Se ajustan los flujos (FCL) proporcionalmente al Δ EBITDA%, "
+                            "manteniendo WACC y g sin cambio (método preferido del framework: "
+                            "ajuste de flujos, no de tasa de descuento)."),
+        ("Agregación entre hazards", "Se suman sin haircut (se tratan como independientes entre "
+                            "sí). El haircut de 10-20% documentado en el framework aplica solo "
+                            "quando existen múltiples pathways DENTRO de un mismo hazard, no aquí."),
+    ]
+    r = 3
+    for titulo, texto in supuestos:
+        ws.cell(r, 1, titulo).font = Font(name=_FUENTE, bold=True, size=10)
+        ws.cell(r, 1).alignment = Alignment(vertical="top", wrap_text=True)
+        celda_texto = ws.cell(r, 2, texto)
+        celda_texto.font = _BASE_FONT
+        celda_texto.alignment = Alignment(vertical="top", wrap_text=True)
+        ws.row_dimensions[r].height = 60
+        r += 1
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 90
+
+    wb.save(ruta_salida)
+    print(f"\nExcel guardado en: {ruta_salida}")
+
+
+def main():
+    recursos = resolver_recursos_empresa(NOMBRE_ARCHIVO_VALORIZACION, SECTOR, PERIODO_RIESGOS)
+
+    if not all(recursos[k]["encontrado"] for k in ("modelo_valorizacion", "riesgos_climaticos", "bd_sectorial")):
+        print("\nNo se pudo continuar: faltan uno o más archivos de insumo. Revisa los mensajes arriba.")
+        return
+
+    ruta_valorizacion = recursos["modelo_valorizacion"]["ruta"]
+    ruta_riesgos = recursos["riesgos_climaticos"]["ruta"]
+    ruta_bd_sectorial = recursos["bd_sectorial"]["ruta"]
+
+    print(f"\nCorriendo framework para {EMPRESA} ({SECTOR})...\n")
+    resultado = correr_framework_empresa(
+        ruta_valorizacion, ruta_riesgos, ruta_bd_sectorial, EMPRESA, SECTOR, RIO_PROXY_HIDRO
+    )
+
+    print("\n=== RESUMEN ===")
+    print("Scores:", resultado["scores"])
+    print("Concentración geográfica:", resultado["geo_concentracion"])
+    print("Vulnerability score:", resultado["vulnerability"]["vulnerability_score"])
+    print("Detalle vulnerability:", resultado["vulnerability"]["detalle"])
+    print("\nEscenario base -> ajuste EBITDA:", resultado["resultados_escenarios"]["base"]["ajuste_fin"])
+    print("Escenario base -> ajuste DCF:", resultado["resultados_escenarios"]["base"]["ajuste_dcf"])
+    print("\nSensibilidad alpha:", resultado["sensibilidad_alpha"])
+    print("\nMonte Carlo:", resultado["monte_carlo"])
+    print("\nCross-check:", resultado["cross_check"])
+
+    escribir_excel_resultados(resultado, RUTA_SALIDA_EXCEL)
+
+
+if __name__ == "__main__":
+    main()
