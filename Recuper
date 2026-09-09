@@ -1,0 +1,97 @@
+# ============================================================
+# BLOQUE 1 — Nuevas constantes (agregar cerca de OUT_DIR)
+# Ctrl+F: GEOJSON_LOCAL = os.path.join(OUT_DIR, "peru_distritos.geojson")
+# Pegar ANTES de esa línea.
+# ============================================================
+TCFD_OUT_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD\Reporte TCFD\Dashboard Riesgos Fisicos"
+TCFD_GRACIA_DIAS = 20  # días de tolerancia extra para asignar el semestre "anterior"
+
+
+# ============================================================
+# BLOQUE 2 — Nuevas funciones auxiliares
+# Ctrl+F: def main():
+# Pegar TODO este bloque justo ANTES de esa línea.
+# ============================================================
+def _semestre_anio_tcfd(fecha_valorizacion):
+    """
+    fecha_valorizacion: valor de la celda B1 (ej. '20260630' o 20260630 -> YYYYMMDD).
+    Devuelve (semestre, anio) ej. ('1S', 2026).
+    Ventana de gracia de TCFD_GRACIA_DIAS días: una fecha poco después del cierre
+    de un semestre (ej. 20260715) se sigue asignando al semestre que cerró.
+    """
+    from datetime import datetime, timedelta
+    fecha = datetime.strptime(str(fecha_valorizacion).strip()[:8], "%Y%m%d")
+    anio = fecha.year
+    fin_2s_anterior = datetime(anio - 1, 12, 31)
+    fin_1s_actual = datetime(anio, 6, 30)
+    if fecha <= fin_2s_anterior + timedelta(days=TCFD_GRACIA_DIAS):
+        return "2S", anio - 1
+    elif fecha <= fin_1s_actual + timedelta(days=TCFD_GRACIA_DIAS):
+        return "1S", anio
+    else:
+        return "2S", anio
+
+
+def _exportar_copia_tcfd(src_html_path, dest_dir, nombre_base, tag):
+    """Copia un dashboard HTML ya generado a dest_dir como '<nombre_base> - <tag>.html',
+    agregando ' - <tag>' al final del <title> y del primer <h1>. Sobrescribe si existe."""
+    import re as _re
+    os.makedirs(dest_dir, exist_ok=True)
+    with open(src_html_path, "r", encoding="utf-8") as fh:
+        html = fh.read()
+    sufijo = f" - {tag}"
+    html = _re.sub(r"(<title>.*?)(</title>)", lambda m: m.group(1) + sufijo + m.group(2),
+                    html, count=1, flags=_re.S)
+    html = _re.sub(r"(<h1[^>]*>.*?)(</h1>)", lambda m: m.group(1) + sufijo + m.group(2),
+                    html, count=1, flags=_re.S)
+    dest_path = os.path.join(dest_dir, f"{nombre_base} - {tag}.html")
+    with open(dest_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    log(f"[TCFD] Copia generada: {dest_path}")
+    return dest_path
+
+
+# ============================================================
+# BLOQUE 3 — Calcular semestre/año (dentro de main())
+# Ctrl+F, buscar estas 3 líneas juntas:
+#     sheet_cen = pick_sheet(risk_path, SHEET_CENEPRED_HINTS, "CENEPRED")
+#     sheet_val = pick_sheet(risk_path, SHEET_VALORIZ_HINTS, "Valorización de Instrumentos")
+#     scores = load_cenepred(risk_path, sheet_cen)
+# Pegar el nuevo código JUSTO DESPUÉS de esas 3 líneas.
+# ============================================================
+    from openpyxl import load_workbook as _load_workbook_tcfd
+    _wb_tcfd = _load_workbook_tcfd(risk_path, data_only=True, read_only=True)
+    _b1_val = _wb_tcfd[sheet_val]["B1"].value
+    _wb_tcfd.close()
+    tcfd_semestre, tcfd_anio = _semestre_anio_tcfd(_b1_val)
+    tcfd_tag = f"{tcfd_semestre}{tcfd_anio}"
+    log(f"Periodo TCFD detectado: {tcfd_tag} (B1 Valorización = {_b1_val})")
+
+
+# ============================================================
+# BLOQUE 4 — Capturar el path del dashboard de Activos
+# Ctrl+F: (con la indentación exacta, 8 espacios)
+#         generar_dashboard_activos(
+# Reemplazar SOLO esa línea por:
+# ============================================================
+        _dash_activos_path = generar_dashboard_activos(
+
+
+# ============================================================
+# BLOQUE 5 — Copia semestral hacia el Reporte TCFD
+# Ctrl+F, buscar:
+#     except Exception as _e_fen:
+#         log(f"FEN chart no generado (no afecta el resto): {_e_fen}", "WARN")
+# Pegar el nuevo bloque JUSTO DESPUÉS de esas 2 líneas.
+# ============================================================
+
+    try:
+        if '_dash_activos_path' in dir() and _dash_activos_path:
+            _exportar_copia_tcfd(_dash_activos_path, TCFD_OUT_DIR,
+                                  "Dashboard Riesgos Fisicos", tcfd_tag)
+        _fen_html_path = os.path.join(OUT_DIR, f"FEN_Impacto_{stamp}.html")
+        if os.path.isfile(_fen_html_path):
+            _exportar_copia_tcfd(_fen_html_path, TCFD_OUT_DIR,
+                                  "Impacto del FEN", tcfd_tag)
+    except Exception as e:
+        log(f"No se pudo generar la copia semestral TCFD: {e}", "WARN")
