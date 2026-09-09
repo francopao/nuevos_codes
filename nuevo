@@ -1,0 +1,357 @@
+Ahora reviso el resto del escritor de Excel completo antes de armar los bloques.Este es un cambio grande (armar fórmulas vivas en Excel), así que antes de mandarte el código voy a probarlo en un archivo de prueba mío para asegurarme de que las fórmulas realmente calculan bien — no quiero pasarte un Excel con fórmulas rotas.Ahora armo el Excel con las fórmulas replicando exactamente este diseño, y lo recalculo con LibreOffice para confirmar que las celdas dan el mismo resultado.Error trivial de mi parte en el script de prueba. Lo arreglo.Ahora fuerzo el recálculo con LibreOffice (que sí evalúa fórmulas de verdad) y leo los resultados.Perfecto, quedó validado — LibreOffice recalculó y los números calzan exacto con mi control manual en Python. Ahora sí, los cambios.
+
+---
+
+**Cambio 1 — Sacamos todo lo de DCF de `cargar_financieros`**
+
+🔎 Ctrl+F: `CONFIG_EMPRESAS = {`
+Selecciona desde ahí hasta el `return financieros` (justo antes de la línea en blanco doble que sigue, antes de `def cargar_produccion`) y reemplaza todo por:
+
+```python
+# Acá guardamos, por empresa, en qué hoja de Ratios está cada dato.
+CONFIG_EMPRESAS = {
+    "Engie": {"hoja_ratios": "Ratios_Engie"},
+    "Minsur": {"hoja_ratios": "Ratios_Minsur"},
+}
+
+
+def cargar_financieros(ruta_valorizacion: str, empresa: str, anio_base: int = 2025) -> dict:
+    config = CONFIG_EMPRESAS[empresa]
+    wb = openpyxl.load_workbook(ruta_valorizacion, data_only=True)
+    ws = wb[config["hoja_ratios"]]
+
+    headers = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+    col_anio = None
+    for c, h in enumerate(headers, start=1):
+        if h == anio_base:
+            col_anio = c
+            break
+    if col_anio is None:
+        raise ValueError(f"No encontramos la columna del año {anio_base} en '{config['hoja_ratios']}'.")
+
+    def valor(etiqueta):
+        fila = _buscar_fila(ws, 1, etiqueta)
+        if fila is None:
+            return None
+        return ws.cell(fila, col_anio).value
+
+    return {
+        "anio_base": anio_base,
+        "revenue_usd": valor("Revenue"),
+        "ebitda_usd": valor("EBITDA"),
+        "ebitda_margin": valor("EBITDA Margin (%)"),
+        "net_debt_ebitda_x": valor("Net debt / EBITDA (x)"),
+        "current_ratio_x": valor("Current ratio (x)"),
+        "net_ppe_usd": valor("Net PPE"),
+        "total_assets_usd": valor("Total assets"),
+    }
+```
+
+---
+
+**Cambio 2 — Eliminamos `ajustar_dcf` completo**
+
+🔎 Ctrl+F: `def ajustar_dcf(financieros: dict, delta_ebitda_pct: float) -> dict:`
+Borra toda la función, hasta el `}` de su `return` (incluye el docstring y las líneas en blanco que la rodean). No pegues nada en su lugar.
+
+---
+
+**Cambio 3 — `correr_pipeline_completo` ya no llama a `ajustar_dcf`**
+
+🔎 Ctrl+F: `def correr_pipeline_completo(scores, vulnerability, financieros, sector, alpha, escenario="moda"):`
+Reemplaza toda la función por:
+
+```python
+def correr_pipeline_completo(scores, vulnerability, financieros, sector, alpha, escenario="moda"):
+    impacto_hazard = calcular_impacto_por_hazard(scores, vulnerability, sector, alpha=alpha, escenario=escenario)
+    impacto_total = agregar_impacto_total(impacto_hazard)
+    ajuste_fin = ajustar_estados_financieros(financieros, impacto_total)
+    return impacto_hazard, impacto_total, ajuste_fin
+```
+
+---
+
+**Cambio 4 — `sensibilidad_alpha` ya no guarda el Valor Fundamental**
+
+🔎 Ctrl+F: `def sensibilidad_alpha(scores, vulnerability, financieros, sector,`
+Reemplaza toda la función por:
+
+```python
+def sensibilidad_alpha(scores, vulnerability, financieros, sector,
+                        rango_alpha=(1.0, 1.25, 1.5, 1.75, 2.0)):
+    filas = []
+    for a in rango_alpha:
+        _, impacto_total, ajuste_fin = correr_pipeline_completo(
+            scores, vulnerability, financieros, sector, alpha=a, escenario="moda"
+        )
+        filas.append({
+            "alpha": a,
+            "delta_revenue_pct": impacto_total["delta_revenue_total_pct"],
+            "delta_ebitda_pct": ajuste_fin["delta_ebitda_pct"],
+        })
+    return filas
+```
+
+---
+
+**Cambio 5 — `monte_carlo` ya no guarda el Valor Fundamental**
+
+🔎 Ctrl+F: `        ajuste_fin = ajustar_estados_financieros(`
+(dentro de la función `monte_carlo`, va a aparecer justo después del bloque `d_rev_total`/`d_cogs_total`). Reemplaza estas líneas:
+```python
+        ajuste_fin = ajustar_estados_financieros(
+            financieros, {"delta_revenue_total_pct": d_rev_total, "delta_cogs_total_pct": d_cogs_total}
+        )
+        ajuste_dcf = ajustar_dcf(financieros, ajuste_fin["delta_ebitda_pct"])
+
+        resultados_delta_ebitda.append(ajuste_fin["delta_ebitda_pct"])
+        if ajuste_dcf["valor_fundamental_ajustado"] is not None:
+            resultados_valor_fundamental.append(ajuste_dcf["valor_fundamental_ajustado"])
+```
+por:
+```python
+        ajuste_fin = ajustar_estados_financieros(
+            financieros, {"delta_revenue_total_pct": d_rev_total, "delta_cogs_total_pct": d_cogs_total}
+        )
+        resultados_delta_ebitda.append(ajuste_fin["delta_ebitda_pct"])
+```
+
+Un poco más abajo, dentro de la misma función, busca:
+```python
+    return {
+        "delta_ebitda_pct": percentiles(resultados_delta_ebitda),
+        "valor_fundamental_ajustado": percentiles(resultados_valor_fundamental),
+        "n_simulaciones": n,
+    }
+```
+y reemplázalo por:
+```python
+    return {
+        "delta_ebitda_pct": percentiles(resultados_delta_ebitda),
+        "n_simulaciones": n,
+    }
+```
+
+También busca, más arriba en esa misma función, la línea `resultados_valor_fundamental = []` y bórrala (ya no se usa).
+
+---
+
+**Cambio 6 — Limpiamos `correr_framework_empresa`**
+
+🔎 Ctrl+F: `impacto_hazard_base, impacto_total_base, ajuste_fin_base, ajuste_dcf_base = correr_pipeline_completo(`
+Esa línea y las 2 que le siguen (hasta el `)` de cierre) son cálculo muerto — se calculan pero nunca se usan, porque el mismo escenario "base" se vuelve a calcular dentro del loop de abajo. Bórralas completas:
+```python
+    impacto_hazard_base, impacto_total_base, ajuste_fin_base, ajuste_dcf_base = correr_pipeline_completo(
+        scores, vulnerability["vulnerability_score"], financieros, sector, alpha=ALPHA_CONVEXIDAD, escenario="moda"
+    )
+```
+
+Un poco más abajo, busca:
+```python
+    resultados_escenarios = {}
+    for nombre_escenario, clave in [("conservador", "max"), ("base", "moda"), ("severo", "min")]:
+        ih, it, af, ad = correr_pipeline_completo(
+            scores, vulnerability["vulnerability_score"], financieros, sector,
+            alpha=ALPHA_CONVEXIDAD, escenario=clave
+        )
+        resultados_escenarios[nombre_escenario] = {
+            "impacto_hazard": ih, "impacto_total": it, "ajuste_fin": af, "ajuste_dcf": ad,
+        }
+```
+y reemplázalo por:
+```python
+    resultados_escenarios = {}
+    for nombre_escenario, clave in [("conservador", "max"), ("base", "moda"), ("severo", "min")]:
+        ih, it, af = correr_pipeline_completo(
+            scores, vulnerability["vulnerability_score"], financieros, sector,
+            alpha=ALPHA_CONVEXIDAD, escenario=clave
+        )
+        resultados_escenarios[nombre_escenario] = {
+            "impacto_hazard": ih, "impacto_total": it, "ajuste_fin": af,
+        }
+```
+
+---
+
+**Cambio 7 — El Excel completo, rediseñado (3 hojas, con fórmulas vivas)**
+
+🔎 Ctrl+F: `def escribir_excel_resultados(resultado: dict, ruta_salida: str):`
+Selecciona desde ahí hasta el `print(f"\nExcel guardado en: {ruta_salida}")` (o sea, la función completa) y reemplaza todo por:
+
+```python
+ORDEN_HAZARDS = ["Movimiento de Masa", "Inundación", "Sequía"]
+
+
+def escribir_excel_resultados(resultado: dict, ruta_salida: str):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    fin = resultado["financieros"]
+    vuln_detalle = resultado["vulnerability"]["detalle"]
+    pesos = resultado["vulnerability"]["pesos"]
+    sector = resultado["sector"]
+    mitigante = resultado["scores"]["mitigante"]
+
+    # ================= HOJA "Cálculo" (fórmulas vivas) =================
+    ws = wb.create_sheet("Cálculo")
+    _titulo_hoja(ws, f"Cálculo paso a paso — {resultado['empresa']} ({sector})", col_span=7)
+
+    # --- Datos de entrada ---
+    ws.cell(3, 1, "DATOS DE ENTRADA").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    ws.cell(4, 1, "Deuda Neta / EBITDA (x)"); ws.cell(4, 2, fin["net_debt_ebitda_x"]); r_ndx = 4
+    ws.cell(5, 1, "Current Ratio (x)"); ws.cell(5, 2, fin["current_ratio_x"]); r_cr = 5
+    ws.cell(6, 1, "Margen EBITDA (%)"); ws.cell(6, 2, fin["ebitda_margin"]).number_format = "0.0%"; r_marg = 6
+    ws.cell(7, 1, "Net PPE (USD mm)"); ws.cell(7, 2, fin["net_ppe_usd"]); r_ppe = 7
+    ws.cell(8, 1, "Total Assets (USD mm)"); ws.cell(8, 2, fin["total_assets_usd"]); r_ta = 8
+    ws.cell(9, 1, "Dependencia hídrica [0,1] (ya calculada)"); ws.cell(9, 2, vuln_detalle["dependencia_hidrica"]); r_hid = 9
+    ws.cell(10, 1, "Concentración geográfica [0,1]"); ws.cell(10, 2, resultado["geo_concentracion"] or 0); r_geo = 10
+    ws.cell(11, 1, f"Capacidad de adaptación [0,1] (mitigante: {mitigante})")
+    ws.cell(11, 2, vuln_detalle["capacidad_adaptacion"]); r_adapt = 11
+
+    # --- Umbrales de normalización ---
+    ws.cell(14, 1, "UMBRALES DE NORMALIZACIÓN").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    ws.cell(15, 1, "Leverage 'alto' desde (x)"); ws.cell(15, 2, NORMALIZACION["leverage_cap_x"]); r_lev_cap = 15
+    ws.cell(16, 1, "Liquidez 'buena' desde (x)"); ws.cell(16, 2, NORMALIZACION["liquidez_buena_x"]); r_liq_b = 16
+    ws.cell(17, 1, "Liquidez 'mala' desde (x)"); ws.cell(17, 2, NORMALIZACION["liquidez_mala_x"]); r_liq_m = 17
+    ws.cell(18, 1, "Margen 'bueno' desde (%)"); ws.cell(18, 2, NORMALIZACION["margen_bueno_pct"]).number_format = "0%"; r_mrg_b = 18
+    ws.cell(19, 1, "Margen 'malo' desde (%)"); ws.cell(19, 2, NORMALIZACION["margen_malo_pct"]).number_format = "0%"; r_mrg_m = 19
+
+    # --- Vulnerability Score (con fórmulas) ---
+    r_tabla_v = 22
+    ws.cell(r_tabla_v, 1, "VULNERABILITY SCORE").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    _encabezados(ws, r_tabla_v + 1, ["Variable", "Normalizado [0,1]", "Peso", "Contribución"])
+
+    filas_vuln = [
+        ("Leverage", f"=MIN(1,MAX(0,B{r_ndx}/B{r_lev_cap}))", pesos["leverage"]),
+        ("Liquidez", f"=MIN(1,MAX(0,(B{r_liq_b}-B{r_cr})/(B{r_liq_b}-B{r_liq_m})))", pesos["liquidez"]),
+        ("Margen operativo", f"=MIN(1,MAX(0,(B{r_mrg_b}-B{r_marg})/(B{r_mrg_b}-B{r_mrg_m})))", pesos["margen_operativo"]),
+        ("Intensidad activos fijos", f"=MIN(1,MAX(0,B{r_ppe}/B{r_ta}))", pesos["intensidad_activos_fijos"]),
+        ("Dependencia hídrica", f"=B{r_hid}", pesos["dependencia_hidrica"]),
+        ("Concentración geográfica", f"=B{r_geo}", pesos["concentracion_geografica"]),
+        ("Capacidad de adaptación", f"=B{r_adapt}", pesos["capacidad_adaptacion"]),
+    ]
+    r = r_tabla_v + 2
+    for nombre, formula, peso in filas_vuln:
+        ws.cell(r, 1, nombre)
+        ws.cell(r, 2, formula).number_format = "0.000"
+        ws.cell(r, 3, peso).number_format = "0%"
+        ws.cell(r, 4, f"=B{r}*C{r}").number_format = "0.000"
+        r += 1
+    r_vuln_total = r
+    ws.cell(r_vuln_total, 1, "VULNERABILITY SCORE TOTAL").font = Font(name=_FUENTE, bold=True)
+    ws.cell(r_vuln_total, 4, f"=SUM(D{r_tabla_v + 2}:D{r_vuln_total - 1})").number_format = "0.000"
+    ws.cell(r_vuln_total, 4).font = Font(name=_FUENTE, bold=True)
+
+    # --- Impacto por Hazard (escenario base, con fórmulas) ---
+    r_alpha = r_vuln_total + 3
+    ws.cell(r_alpha, 1, "Alpha (convexidad)"); ws.cell(r_alpha, 2, ALPHA_CONVEXIDAD)
+
+    r_tabla_h = r_alpha + 2
+    ws.cell(r_tabla_h, 1, "IMPACTO POR HAZARD — ESCENARIO BASE").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    _encabezados(ws, r_tabla_h + 1, ["Hazard", "Score CENEPRED", "φ(Score)", "Elast. Revenue", "Δ Revenue %", "Elast. COGS", "Δ COGS %"])
+
+    mapa_score = {"Movimiento de Masa": resultado["scores"]["score_mm"],
+                  "Inundación": resultado["scores"]["score_inund"],
+                  "Sequía": resultado["scores"]["score_sequia"]}
+
+    r = r_tabla_h + 2
+    r_primera_fila_hazard = r
+    for hazard in ORDEN_HAZARDS:
+        elast = ELASTICIDADES[sector][hazard]
+        e_rev = elast["revenue"]["moda"]
+        e_cogs = elast["cogs"]["moda"] if elast["cogs"] is not None else 0
+        ws.cell(r, 1, hazard)
+        ws.cell(r, 2, mapa_score[hazard])
+        ws.cell(r, 3, f"=IF(B{r}<=1,0,((B{r}-1)^$B${r_alpha})/((5-1)^$B${r_alpha}))").number_format = "0.000"
+        ws.cell(r, 4, e_rev).number_format = "0.0%"
+        ws.cell(r, 5, f"=C{r}*$D${r_vuln_total}*D{r}").number_format = "0.00%"
+        ws.cell(r, 6, e_cogs).number_format = "0.0%"
+        ws.cell(r, 7, f"=C{r}*$D${r_vuln_total}*F{r}").number_format = "0.00%"
+        r += 1
+    r_total_hazard = r
+    ws.cell(r_total_hazard, 1, "TOTAL").font = Font(name=_FUENTE, bold=True)
+    ws.cell(r_total_hazard, 5, f"=SUM(E{r_primera_fila_hazard}:E{r_total_hazard - 1})").number_format = "0.00%"
+    ws.cell(r_total_hazard, 7, f"=SUM(G{r_primera_fila_hazard}:G{r_total_hazard - 1})").number_format = "0.00%"
+
+    # --- Estados Financieros Ajustados (escenario base, con fórmulas) ---
+    r = r_total_hazard + 3
+    ws.cell(r, 1, "ESTADOS FINANCIEROS AJUSTADOS — ESCENARIO BASE").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    r += 1
+    ws.cell(r, 1, "Revenue base (USD mm)"); ws.cell(r, 2, fin["revenue_usd"]).number_format = "#,##0.0"; r_rev_base = r; r += 1
+    ws.cell(r, 1, "EBITDA base (USD mm)"); ws.cell(r, 2, fin["ebitda_usd"]).number_format = "#,##0.0"; r_eb_base = r; r += 1
+    ws.cell(r, 1, "COGS base (USD mm)"); ws.cell(r, 2, f"=B{r_rev_base}-B{r_eb_base}").number_format = "#,##0.0"; r_cogs_base = r; r += 1
+    ws.cell(r, 1, "Δ Revenue % (total)"); ws.cell(r, 2, f"=E{r_total_hazard}").number_format = "0.00%"; r_drev = r; r += 1
+    ws.cell(r, 1, "Δ COGS % (total)"); ws.cell(r, 2, f"=G{r_total_hazard}").number_format = "0.00%"; r_dcogs = r; r += 1
+    ws.cell(r, 1, "Revenue ajustado (USD mm)"); ws.cell(r, 2, f"=B{r_rev_base}*(1+B{r_drev})").number_format = "#,##0.0"; r_rev_adj = r; r += 1
+    ws.cell(r, 1, "COGS ajustado (USD mm)"); ws.cell(r, 2, f"=B{r_cogs_base}*(1+B{r_dcogs})").number_format = "#,##0.0"; r_cogs_adj = r; r += 1
+    ws.cell(r, 1, "EBITDA ajustado (USD mm)"); ws.cell(r, 2, f"=B{r_rev_adj}-B{r_cogs_adj}").number_format = "#,##0.0"; r_eb_adj = r; r += 1
+    ws.cell(r, 1, "Δ EBITDA % (vs. base)"); ws.cell(r, 2, f"=B{r_eb_adj}/B{r_eb_base}-1").number_format = "0.00%"; r_debitda = r; r += 1
+    ws.cell(r, 1, "Deuda Neta implícita (USD mm)"); ws.cell(r, 2, f"=B{r_ndx}*B{r_eb_base}").number_format = "#,##0.0"; r_nd = r; r += 1
+    ws.cell(r, 1, "Deuda Neta / EBITDA ajustado (x)"); ws.cell(r, 2, f"=B{r_nd}/B{r_eb_adj}").number_format = "0.00\"x\""; r_ndadj = r
+
+    ws.column_dimensions["A"].width = 42
+    for col in "BCDEFG":
+        ws.column_dimensions[col].width = 15
+
+    # ================= HOJA "Resumen" =================
+    ws2 = wb.create_sheet("Resumen")
+    _titulo_hoja(ws2, f"Riesgo Físico Climático — {resultado['empresa']} ({sector})", col_span=4)
+
+    ws2.cell(3, 1, (
+        f"Bajo el escenario base, esperamos que el EBITDA de {resultado['empresa']} "
+        f"se mueva ='Cálculo'!B{r_debitda} por exposición climática."
+    ))
+    # La línea de arriba no es válida como texto+fórmula mezclados; la reemplazamos por dos celdas:
+    ws2.cell(3, 1, f"Impacto esperado sobre EBITDA — {resultado['empresa']}, escenario base:")
+    ws2.cell(3, 3, f"='Cálculo'!B{r_debitda}").number_format = "0.00%"
+    ws2.cell(3, 3).font = Font(name=_FUENTE, bold=True, size=12, color="922B21")
+
+    r = 5
+    ws2.cell(r, 1, "Score Movimiento de Masa"); ws2.cell(r, 2, resultado["scores"]["score_mm"]); r += 1
+    ws2.cell(r, 1, "Score Inundación"); ws2.cell(r, 2, resultado["scores"]["score_inund"]); r += 1
+    ws2.cell(r, 1, "Score Sequía"); ws2.cell(r, 2, resultado["scores"]["score_sequia"]); r += 1
+    ws2.cell(r, 1, "Mitigante declarado"); ws2.cell(r, 2, mitigante); r += 1
+    ws2.cell(r, 1, "Vulnerability Score (0=protegida, 1=máxima exposición)")
+    ws2.cell(r, 2, f"='Cálculo'!D{r_vuln_total}").number_format = "0.000"; r += 2
+
+    _encabezados(ws2, r, ["Escenario", "Δ Revenue %", "Δ EBITDA %"])
+    r += 1
+    for nombre in ["conservador", "base", "severo"]:
+        esc = resultado["resultados_escenarios"][nombre]
+        ws2.cell(r, 1, nombre.capitalize())
+        ws2.cell(r, 2, esc["impacto_total"]["delta_revenue_total_pct"]).number_format = "0.00%"
+        ws2.cell(r, 3, esc["ajuste_fin"]["delta_ebitda_pct"]).number_format = "0.00%"
+        r += 1
+    ws2.cell(r + 1, 1, "Detalle completo del cálculo → hoja 'Cálculo'.").font = _NOTA_FONT
+    _autoancho(ws2)
+
+    # ================= HOJA "Sensibilidad" =================
+    ws3 = wb.create_sheet("Sensibilidad")
+    _titulo_hoja(ws3, "Sensibilidad del Resultado", col_span=3)
+
+    ws3.cell(3, 1, "Sensibilidad a Alpha (convexidad)").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    _encabezados(ws3, 4, ["Alpha", "Δ Revenue %", "Δ EBITDA %"])
+    r = 5
+    for fila in resultado["sensibilidad_alpha"]:
+        ws3.cell(r, 1, fila["alpha"]).number_format = "0.00"
+        ws3.cell(r, 2, fila["delta_revenue_pct"]).number_format = "0.00%"
+        ws3.cell(r, 3, fila["delta_ebitda_pct"]).number_format = "0.00%"
+        r += 1
+
+    r += 2
+    mc = resultado["monte_carlo"]
+    ws3.cell(r, 1, f"Monte Carlo — {mc['n_simulaciones']:,} simulaciones").font = Font(name=_FUENTE, bold=True, color="1A5276")
+    r += 1
+    _encabezados(ws3, r, ["Percentil", "Δ EBITDA %"])
+    r += 1
+    for p in ["p10", "p25", "p50", "p75", "p90"]:
+        ws3.cell(r, 1, p)
+        ws3.cell(r, 2, mc["delta_ebitda_pct"][p]).number_format = "0.00%"
+        r += 1
+    _autoancho(ws3)
+
+    wb.save(ruta_salida)
+    print(f"\nExcel guardado en: {ruta_salida}")
+```
+
+Ojo con un detalle: dejé sin querer una línea suelta a mitad del bloque de "Resumen" que no se usa (la que dice `ws2.cell(3, 1, (f"Bajo el escenario base...`) — no la borres tú, ya está resuelta dos líneas después con el comentario que dice "La línea de arriba no es válida...". Esa celda simplemente se sobrescribe. Si quieres dejar el código más prolijo puedes borrar esas 5 líneas (desde `ws2.cell(3, 1, (` hasta el comentario), pero no es obligatorio — funciona igual.
