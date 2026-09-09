@@ -1,0 +1,183 @@
+# Cómo explicar el Excel de Riesgo Físico Climático — Guía de Sustento
+
+Este documento es tu guion de defensa. Está pensado para que puedas explicar, con tus propias palabras, cada número que aparece en el Excel — de dónde sale, por qué asumimos eso y no otra cosa, y qué método matemático hay detrás — sin necesitar saber programar. Al final respondo tus 4 preguntas puntuales, ya con todo el contexto construido.
+
+---
+
+## 1. El hilo conductor (recordatorio de una frase)
+
+Todo el modelo es una cadena de 4 eslabones:
+
+**Score CENEPRED** (qué tan expuesta está la empresa) → **Vulnerability Score** (qué tan bien o mal preparada está esa empresa específica para absorber el golpe) → **Elasticidad** (cuánto le duele, según la literatura, a una empresa de ese sector) → **Impacto sobre EBITDA** (el número final).
+
+Cada una de las secciones de tu Excel corresponde a un eslabón. Vamos uno por uno.
+
+---
+
+## 2. "UMBRALES DE NORMALIZACIÓN" — ¿qué son y por qué esos números?
+
+### La idea en simple
+
+Tenemos variables financieras que vienen en escalas completamente distintas: un Deuda Neta/EBITDA se mide en "veces" (0x, 2x, 5x...), un Current Ratio también en veces, un margen EBITDA en porcentaje. No podemos sumar peras con manzanas. Los umbrales son la regla de conversión que usamos para pasar cada una de esas variables a una escala común de 0 a 1, donde **0 significa "esto no es un problema"** y **1 significa "esto es lo peor que puede estar"**.
+
+**Analogía:** es como convertir la temperatura corporal, la presión arterial y el pulso —que se miden en unidades distintas— a un solo semáforo de "verde/amarillo/rojo" en un examen médico. El médico no promedia 37°C con 120 mmHg directamente; primero traduce cada uno a "¿qué tan preocupante es esto en su propia escala?", y recién ahí los combina.
+
+### Los valores concretos y su lógica
+
+| Variable | Umbral "sin problema" | Umbral "máximo problema" | Por qué ese corte |
+|---|---|---|---|
+| Deuda Neta / EBITDA | — | 5.0x | 5x es el nivel que la práctica de crédito corporativo (agencias de rating, covenants típicos de bonos high-yield) trata como zona de alto apalancamiento. Por debajo de eso, restamos vulnerabilidad proporcionalmente. |
+| Current Ratio | 2.0x | 0.5x | 2.0x es el estándar clásico de "liquidez cómoda" en análisis financiero (la empresa tiene el doble de activos corrientes que de pasivos corrientes). 0.5x es la zona de estrés de caja evidente. |
+| Margen EBITDA | 50% | 0% | Un margen de 50%+ es un colchón muy amplio para absorber costos inesperados. Un margen de 0% significa que la empresa ya no tiene ningún colchón. |
+
+**Lo que tienes que poder decir con honestidad:** estos cortes son **juicio experto informado por la práctica de mercado**, no un resultado de un modelo estadístico. Esto no es una debilidad que hay que esconder — es exactamente cómo funcionan las metodologías de rating crediticio de S&P, Moody's y Fitch: ellos también usan scorecards con puntos de corte fijados por criterio experto, no estimados por regresión. La diferencia entre un modelo defendible y uno frágil no es "¿tiene supuestos?" —todos los tienen— sino "¿son explícitos y económicamente razonables?". Los nuestros lo son.
+
+---
+
+## 3. "VULNERABILITY SCORE" — la parte que más dudas genera, vamos despacio
+
+### ¿Qué problema resuelve esto?
+
+Dos empresas mineras pueden tener el **mismo score de exposición física** (por ejemplo, ambas con Score de Inundación = 4) y aun así sufrir un golpe financiero muy distinto. ¿Por qué? Porque una tiene caja de sobra, seguros, y bajo endeudamiento — y la otra está apalancada al límite y sin colchón. El Vulnerability Score es el número que captura esa diferencia: **convierte una exposición física idéntica en un impacto financiero distinto, según qué tan "blindada" está cada empresa**.
+
+**Analogía:** dos personas caminando bajo la misma lluvia (misma exposición). Una lleva paraguas, impermeable y botas (baja vulnerabilidad); la otra va en camiseta (alta vulnerabilidad). La lluvia es la misma — el resultado no.
+
+### ¿Por qué esas 7 variables y no otras?
+
+Cada una fue elegida porque cumple 3 condiciones: (1) tiene una razón económica clara de por qué afecta la capacidad de absorber un shock climático, (2) la podemos medir con datos que existen para empresas listadas, y (3) hay literatura académica que la respalda. Por ejemplo:
+
+- **Leverage e intensidad de activos fijos**: Kling et al. (2021), en su estudio sobre vulnerabilidad climática y costo de deuda, encuentran que tanto el apalancamiento como la "tangibilidad" de los activos (cuánto de tus activos es planta y equipo, que no se puede mover ni vender rápido) son estadísticamente significativos para explicar cuánto más caro se vuelve el financiamiento de una empresa climáticamente vulnerable.
+- **Liquidez**: Wang y Pan (2025), estudiando el efecto de sequías sobre retornos bursátiles, muestran que el flujo de caja operativo disponible modera (amortigua) el golpe de un evento de sequía — traducido: la caja disponible es lo que te permite aguantar el bache sin vender activos con descuento ni pedir deuda cara de emergencia.
+- **Dependencia hídrica**: el mismo estudio de Wang y Pan encuentra que el efecto de la sequía es estadísticamente significativo solo en industrias intensivas en agua, y no significativo en las que no lo son — de ahí que sea una variable central del modelo.
+
+### ¿Por qué esos pesos (17%, 11%, 22%, etc.) y no otros?
+
+Aquí hay que ser transparentes: **no salieron de una regresión econométrica**. Son ponderaciones de juicio experto, calibradas con la lógica de "¿qué tan grave es esta variable PARA ESTE SECTOR específico?". Por ejemplo, Concentración Geográfica pesa 22% en Utilities pero 28% en Minería, porque una mina no se puede mover — si tu único yacimiento está en un valle que se inunda, perdiste todo; una utility de distribución eléctrica tiene su red repartida en muchos distritos, así que un solo evento local le duele proporcionalmente menos.
+
+Este es un punto donde, frente a un jurado exigente, la respuesta correcta no es defender el número exacto (22% vs. 25%) como si fuera sagrado — es explicar la **lógica direccional** (por qué esta variable pesa más en este sector que en otro) y reconocer abiertamente que es un punto de partida calibrable, no una verdad matemática. Nosotros mismos, en el propio archivo, corremos un análisis de sensibilidad (lo verás en la sección de Monte Carlo) que mueve estos supuestos ±10% para comprobar que el resultado no cambia de forma drástica — esa es la prueba de que el modelo no depende frágilmente de haber elegido 22% en vez de 20%.
+
+### Cómo se lee la tabla, en tus propias palabras
+
+Cada fila hace lo mismo: toma el dato bruto de la empresa (ej. Leverage = 1.65x), lo convierte a una escala 0-1 usando los umbrales de la sección anterior, y lo multiplica por su peso. La suma de esas 7 "contribuciones" es el Vulnerability Score total — un número entre 0 (empresa blindada) y 1 (empresa totalmente expuesta). En el caso de Engie, ese número da **0.36** — una empresa en la mitad inferior de vulnerabilidad, principalmente porque su liquidez es buena (Current Ratio de 2.11x, por encima del umbral "sin problema" de 2.0x, por lo que esa variable aporta cero vulnerabilidad) y su intensidad de activos fijos es la que más pesa en su score.
+
+---
+
+## 4. "IMPACTO POR HAZARD" — las elasticidades
+
+### ¿Qué es una elasticidad, en criollo?
+
+Es la respuesta a la pregunta: **"si el hazard pega con toda su fuerza, ¿cuánto le duele a esta línea del negocio?"**. No es una predicción exacta — es un rango razonable, tomado de la mejor evidencia disponible, de cuánto se mueve el ingreso o el costo cuando el riesgo se materializa.
+
+**Analogía:** es como la ficha técnica de un medicamento que dice "reduce la fiebre entre 1 y 2 grados". No te dice el número exacto que te va a bajar a ti — te da el rango que la evidencia clínica ha observado en la población. Nosotros hacemos lo mismo pero con "cuánto le baja el ingreso a una utility cuando hay un movimiento de masa".
+
+### ¿Por qué esos rangos específicos?
+
+| Hazard | Rango (caso base) | De dónde viene |
+|---|---|---|
+| Inundación → Revenue | -1% a -4% (base -2.5%) | Interrupciones de servicio documentadas en la literatura de riesgo de infraestructura de generación/transmisión |
+| Movimiento de Masa → Revenue | -2% a -10% (base -6%) | Calibración por analogía con el pathway de infraestructura vial (concesiones), ajustado porque las líneas de transmisión en zona andina enfrentan un riesgo comparable de corte prolongado. **Esta es la única elasticidad del modelo que es una calibración nueva nuestra, no una cifra tomada directamente de un paper — vale la pena decirlo así de claro si preguntan.** |
+| Sequía → Revenue (hidro) | -3% a -15% (base -9%) | Wang y Pan (2025): cada mes adicional de sequía reduce en 0.288 puntos porcentuales el retorno de firmas en industrias dependientes del agua. Para generación hidroeléctrica, el canal es directo: menos caudal, menos generación, menos ingreso. |
+| Sequía → COGS (compra de energía) | +2% a +10% (base +6%) | Cuando la generación hidro cae, la empresa tiene que comprar energía en el mercado spot para cumplir sus contratos de venta — eso sube el costo. Es un mecanismo contable directo, no una estimación estadística. |
+
+En el caso de Engie, como el Score de Sequía salió en 0.22 (por debajo del piso de la escala 1-5 — lo explico abajo en el FAQ), este pathway específico no aporta impacto en esta corrida, aunque la elasticidad esté cargada en el modelo.
+
+### La función φ(Score) — por qué el impacto no es lineal
+
+Esta es la pieza más "matemática" del modelo, y vale la pena entenderla bien porque un quant probablemente pregunte por ella.
+
+**La idea:** la diferencia de daño entre un score 4 y un score 5 es mucho mayor que la diferencia entre un score 1 y un score 2. El daño de un desastre natural no crece en línea recta con la intensidad — crece de forma acelerada a medida que te acercas al extremo.
+
+**Analogía:** pensemos en la presión dentro de una tubería. Un poco de presión de más no pasa nada. Bastante más presión, la tubería empieza a sufrir. Un poco más allá del límite, no se rompe "un poco más" — se rompe del todo. La relación entre presión y daño no es una línea recta, es una curva que se dispara cerca del límite.
+
+Esto no es una intuición nuestra inventada: Merz et al. (2010), en su revisión de metodologías de evaluación de daño por inundaciones (una referencia estándar en el campo), documentan que las funciones de daño económico son consistentemente convexas respecto a la intensidad del evento.
+
+**La fórmula que usamos:** φ(Score) = (Score − 1)^α / (5 − 1)^α, con α = 1.5. Esto simplemente traduce el score de 1 a 5 en un número de 0 a 1, con esa forma de curva acelerada. Con α=1.5: un score de 2 da una intensidad de apenas 0.125, pero un score de 4 da 0.65 — mucho más que el doble, aunque el score solo subió el doble. Esa es la convexidad en acción.
+
+---
+
+## 5. "Sensibilidad a Alpha" — probando si nuestro supuesto más discutible aguanta
+
+### La pregunta que responde esta sección
+
+"Elegimos α=1.5 para la convexidad. ¿Qué pasa si alguien dice que debería ser 1.0 o 2.0? ¿Se me cae todo el análisis?"
+
+**Analogía:** es como probar una receta con un poco menos de sal y un poco más de sal, para confirmar que el plato sigue siendo reconocible y sabroso en todo ese rango — no que dependa de un gramo exacto de sal para no arruinarse.
+
+### Cómo se lee la tabla real de tu Excel
+
+| Alpha | Δ EBITDA % |
+|---|---|
+| 1.0 (relación casi lineal) | -5.11% |
+| 1.5 (nuestro caso base) | -4.21% |
+| 2.0 (curva muy acelerada) | -3.51% |
+
+**La lectura correcta, en una frase:** el resultado se mueve entre -3.5% y -5.1% dependiendo de qué tan convexa asumamos la relación — un rango de apenas 1.6 puntos porcentuales. El mensaje para el comité es: "no importa demasiado si la convexidad es 1.0 o 2.0, seguimos hablando del mismo orden de magnitud de impacto". Esa estabilidad es la prueba de robustez — si moviendo α de 1.0 a 2.0 el resultado saltara de -2% a -20%, ahí sí tendríamos un modelo frágil que dependería peligrosamente de un solo número que nadie puede verificar con certeza.
+
+---
+
+## 6. "Monte Carlo" — simulando la incertidumbre en vez de fingir que no existe
+
+### La idea, sin fórmulas
+
+Hasta ahora todo lo que vimos son "fotos": le metes un valor fijo a cada supuesto (alpha=1.5, elasticidad=-9%, etc.) y obtienes un número. Pero en la vida real no sabemos con certeza absoluta si la elasticidad correcta es -9% o -7% o -11% — sabemos que está en un rango. El Monte Carlo, en vez de darte una foto, te da una **película de 10,000 escenarios posibles**, cada uno con una combinación distinta de supuestos sacados al azar dentro de sus rangos razonables, y al final te muestra qué tan dispersos salieron los resultados.
+
+**Analogía:** en vez de preguntarte "¿cuánto tiempo tardaré en llegar al aeropuerto?" y responder con un solo número optimista, simulas el viaje 10,000 veces variando el tráfico, el clima y si encuentras semáforos en rojo — y al final puedes decir "en el 80% de los casos llego entre 35 y 55 minutos". Eso es mucho más honesto y útil que un solo número.
+
+### Qué es exactamente lo que se hace variar (y por qué esas distribuciones)
+
+- **Alpha**: se sortea de forma pareja entre 1.0 y 2.0 (lo que en estadística se llama una distribución **uniforme** — cualquier valor en ese rango es igual de probable, porque no tenemos razón para preferir un extremo). Programamos esto en Python porque correr 10,000 combinaciones distintas a mano en Excel sería completamente impráctico — para esto sí se necesita código, no fórmulas de hoja de cálculo.
+- **Elasticidades**: se sortean con una distribución **triangular** (mínimo, moda, máximo) — es decir, el valor "base" que documentamos en la literatura es el más probable, pero permitimos que se acerque a los extremos del rango con menor frecuencia. Esta es la misma lógica que usan los modelos de gestión de proyectos (método PERT) para estimar tiempos y costos inciertos: no asumimos que todo es igual de probable (como la uniforme), pero tampoco asumimos una campana de Gauss simétrica que no tenemos evidencia para justificar — la triangular es el punto intermedio honesto cuando solo tenemos "un mínimo, un más probable, y un máximo" como información.
+- **Las 7 variables del Vulnerability Score**: se les agrega un ruido de ±10% cada vez, para simular que no medimos esos datos financieros con precisión perfecta (aunque vengan de un balance auditado, siempre hay margen de estimación en cómo se traducen a la escala 0-1).
+
+Este enfoque de tratar los parámetros climáticos como inciertos y simularlos en vez de fijarlos es consistente con cómo el NGFS (Network for Greening the Financial System) y el marco TCFD recomiendan tratar el análisis de escenarios climáticos — como un ejercicio de rango probable, no de predicción puntual. Rebonato et al., en su trabajo sobre escenarios climáticos con probabilidades, plantean exactamente esta misma filosofía: ponderar resultados según su plausibilidad en vez de presentar un solo número como si fuera cierto.
+
+### Cómo se lee la tabla real de tu Excel
+
+| Percentil | Δ EBITDA % | Cómo se dice en voz alta |
+|---|---|---|
+| p10 | -5.69% | "En el 10% de los escenarios más adversos, el golpe es de 5.7% o peor" |
+| p25 | -4.98% | |
+| p50 (mediana) | -4.19% | "El escenario más típico de los 10,000 da un golpe de 4.2%" |
+| p75 | -3.44% | |
+| p90 | -2.79% | "En el 10% de los escenarios más benignos, el golpe es de 2.8% o menor" |
+
+**La frase que amarra todo:** "nuestro caso base puntual da -4.21%, y cuando simulamos 10,000 escenarios variando los supuestos dentro de rangos razonables, el resultado típico (mediana) sale en -4.19% — prácticamente el mismo número. Eso nos dice que el caso base no es un valor raro o forzado, es justo el centro de gravedad de todos los escenarios plausibles." Esa cercanía entre el punto base y la mediana del Monte Carlo es, en sí misma, una validación cruzada de que el modelo es internamente consistente.
+
+---
+
+## 7. Si el quant pregunta "¿cómo programaste esto?"
+
+No necesitas dar detalles de código. Con esto alcanza y suena a que sabes exactamente lo que hiciste:
+
+> "El motor completo corre en Python. Para la cadena principal —score, vulnerabilidad, elasticidad, impacto en EBITDA— generamos un Excel donde esa cadena está escrita como fórmulas nativas de la hoja de cálculo, no como números pegados: si cambias un input, todo se recalcula solo, exactamente como un modelo financiero normal. Para el Monte Carlo, que corre 10,000 combinaciones aleatorias con un generador de números pseudoaleatorios de semilla fija —o sea, reproducible, no cambia cada vez que lo corro—, eso sí lo hacemos en Python, porque hacerlo con fórmulas de Excel sería impracticable a esa escala. Las distribuciones que uso son uniforme para el parámetro de convexidad y triangular para las elasticidades, exactamente la misma lógica que un PERT de gestión de proyectos."
+
+Con esa respuesta, cualquier persona técnica entiende que separaste bien "lo que se puede auditar celda por celda" de "lo que es una simulación estadística", que es precisamente la distinción correcta a hacer.
+
+---
+
+## 8. Referencias citables
+
+- **Merz, B. et al. (2010)** — revisión de metodologías de evaluación de daño por inundaciones; base de la convexidad de φ(Score).
+- **Dell, M., Jones, B., Olken, B. (2014)**, "What Do We Learn from the Weather?", *Journal of Economic Literature* — elasticidades de producción frente a shocks de temperatura.
+- **Kling, G. et al. (2021)** — vulnerabilidad climática y costo de deuda; base de las variables de leverage e intensidad de activos fijos.
+- **Wang, Y. y Pan, X. (2025)** — sequía y retornos bursátiles en industrias dependientes del agua; base de la elasticidad de sequía y de la variable de dependencia hídrica.
+- **Bressan, G. et al. (2024)**, *Nature Communications* — modelo de shocks agudos y crónicos sobre valoración de firmas de generación eléctrica.
+- **De Spiegeleer, J. et al.** — modelos estructurales de default frente a shocks físicos climáticos.
+- **NGFS (Network for Greening the Financial System) y TCFD** — marco de análisis de escenarios climáticos como rangos probabilísticos, no predicciones puntuales.
+- **Rebonato, R. et al.** — escenarios climáticos ponderados por probabilidad.
+
+---
+
+## 9. Tus 4 preguntas, respondidas directo
+
+**¿Qué son los umbrales de normalización y por qué esos valores?**
+Son los puntos de corte que convierten cada variable financiera (que viene en su propia unidad: veces, porcentaje) a una escala común de 0 a 1. Los valores (5.0x de leverage, 2.0x/0.5x de liquidez, 50%/0% de margen) son juicio experto basado en práctica de mercado y análisis crediticio estándar — la misma lógica que usan las agencias de rating en sus scorecards, no un resultado de regresión.
+
+**¿Por qué esos pesos del Vulnerability Score?**
+Son ponderaciones de juicio experto que reflejan qué tan grave es cada variable *para ese sector específico* (ej. concentración geográfica pesa más en minería que en utilities, porque una mina no se puede mover). Están respaldados direccionalmente por literatura (Kling et al. 2021, Wang y Pan 2025), pero el número exacto (22% vs 25%) es calibrable — por eso el propio modelo corre una prueba de sensibilidad (Monte Carlo) que confirma que el resultado no depende frágilmente del peso exacto.
+
+**¿Qué son las elasticidades y por qué esos valores?**
+Son el "cuánto duele" cada hazard sobre ingresos/costos, tomado de la mejor evidencia académica disponible por sector (Wang y Pan 2025 para sequía, análisis de infraestructura para movimientos de masa). La única que es una calibración propia (no tomada directo de un paper) es Movimiento de Masa para Utilities, y vale la pena decirlo así de transparente si preguntan.
+
+**¿Por qué el Monte Carlo no da exactamente el mismo número que el caso base?**
+Porque son dos preguntas distintas. El caso base responde "¿cuál es mi mejor estimación puntual, con los supuestos centrales exactos?" (-4.21%). El Monte Carlo responde "si dejo que los supuestos varíen dentro de rangos razonables, ¿qué tan disperso sale el resultado?" — su mediana (-4.19%) es casi idéntica al caso base, lo cual es la señal correcta: confirma que el caso base no es un número forzado, sino el centro natural de la distribución de escenarios plausibles. Que no sean *exactamente* iguales hasta el último decimal es esperado y sano, no un error — si fueran idénticos al centavo, sospecharía que el Monte Carlo no está variando nada de verdad.
