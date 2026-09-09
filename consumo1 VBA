@@ -1,0 +1,359 @@
+Option Explicit
+
+Sub ActualizarDataSourceCharts_OP()
+
+    Dim ws As Worksheet
+    Dim co As ChartObject
+    Dim ch As Chart
+    Dim ser As Series
+    Dim i As Long, j As Long, k As Long
+
+    Dim totalSeries As Long
+    Dim cnt As Long
+    Dim appliedCount As Long
+    Dim totalUnchanged As Long
+
+    Dim targetSeries() As Series
+    Dim newFormulas() As String
+    Dim origFormulas() As String
+
+    Dim origF As String
+    Dim newF As String
+    Dim logMsg As String
+
+    On Error GoTo ErrHandlerInit
+
+    Set ws = ThisWorkbook.Worksheets("OP")
+
+    totalSeries = 0
+    For Each co In ws.ChartObjects
+        totalSeries = totalSeries + co.Chart.SeriesCollection.Count
+    Next co
+
+    If totalSeries = 0 Then
+        MsgBox "No se encontraron series en los charts de la hoja OP.", vbExclamation
+        Exit Sub
+    End If
+
+    ReDim targetSeries(1 To totalSeries)
+    ReDim newFormulas(1 To totalSeries)
+    ReDim origFormulas(1 To totalSeries)
+
+    cnt = 0
+    totalUnchanged = 0
+    logMsg = ""
+
+    ' ===================== FASE 1: CALCULAR (sin aplicar todavia) =====================
+    For Each co In ws.ChartObjects
+        Set ch = co.Chart
+        For i = 1 To ch.SeriesCollection.Count
+            Set ser = ch.SeriesCollection(i)
+
+            origF = ser.Formula
+
+            If Len(origF) = 0 Then
+                totalUnchanged = totalUnchanged + 1
+                logMsg = logMsg & co.Name & " / Serie " & i & ": sin formula (omitida)" & vbCrLf
+            Else
+                newF = BuildUpdatedSeriesFormula(origF)
+
+                If newF = origF Or Len(newF) = 0 Then
+                    totalUnchanged = totalUnchanged + 1
+                    logMsg = logMsg & co.Name & " / Serie " & i & ": sin cambios (rango vertical o no aplica)" & vbCrLf
+                Else
+                    cnt = cnt + 1
+                    Set targetSeries(cnt) = ser
+                    origFormulas(cnt) = origF
+                    newFormulas(cnt) = newF
+                    logMsg = logMsg & co.Name & " / Serie " & i & ": " & origF & "  ->  " & newF & vbCrLf
+                End If
+            End If
+        Next i
+    Next co
+
+    Debug.Print String(60, "=")
+    Debug.Print "Detalle actualizacion Data Source - " & Now
+    Debug.Print logMsg
+
+    ' ===================== FASE 2: APLICAR (con rollback si algo falla) =====================
+    appliedCount = 0
+
+    On Error GoTo ErrHandlerApply
+
+    For j = 1 To cnt
+        targetSeries(j).Formula = newFormulas(j)
+        appliedCount = appliedCount + 1
+    Next j
+
+    MsgBox "Data source actualizado correctamente." & vbCrLf & _
+           "Series con rango extendido: " & appliedCount & vbCrLf & _
+           "Series sin cambios: " & totalUnchanged & vbCrLf & vbCrLf & _
+           "Detalle completo en la ventana Inmediato (Ctrl+G).", _
+           vbInformation, "Actualizacion Data Source - OP"
+
+    Exit Sub
+
+ErrHandlerApply:
+    For k = 1 To appliedCount
+        On Error Resume Next
+        targetSeries(k).Formula = origFormulas(k)
+        On Error GoTo 0
+    Next k
+    MsgBox "Ocurrio un error al aplicar los cambios." & vbCrLf & _
+           "Se revirtieron los " & appliedCount & " cambios ya aplicados en esta corrida, " & _
+           "ningun chart quedo con el data source a medio actualizar." & vbCrLf & vbCrLf & _
+           "Detalle: " & Err.Description, vbCritical, "Actualizacion Data Source - OP (Rollback)"
+    Exit Sub
+
+ErrHandlerInit:
+    MsgBox "No se pudo iniciar la actualizacion. Verifique que exista la hoja 'OP'." & vbCrLf & _
+           "Detalle: " & Err.Description, vbCritical, "Actualizacion Data Source - OP"
+
+End Sub
+
+'==================================================================
+' Reconstruye =SERIES(nombre,categorias,valores,orden[,tamanos])
+' extendiendo 1 columna solo en categorias/valores/tamanos, y solo
+' en las areas que crecen por columna (fila fija). No toca nombre
+' ni orden. Si el formato no se reconoce, retorna la formula
+' original sin cambios (nunca corrompe el chart).
+'==================================================================
+Private Function BuildUpdatedSeriesFormula(ByVal originalFormula As String) As String
+
+    On Error GoTo Fallback
+
+    Dim firstParen As Long
+    Dim innerContent As String
+    Dim args As Variant
+    Dim ub As Long
+
+    If Left$(originalFormula, 1) <> "=" Then GoTo Fallback
+    If Right$(originalFormula, 1) <> ")" Then GoTo Fallback
+
+    firstParen = InStr(originalFormula, "(")
+    If firstParen = 0 Then GoTo Fallback
+
+    innerContent = Mid$(originalFormula, firstParen + 1, Len(originalFormula) - firstParen - 1)
+
+    args = SplitTopLevelArgs(innerContent)
+    ub = UBound(args)
+
+    ' Se espera al menos: nombre, categorias, valores, orden
+    If ub < 3 Then GoTo Fallback
+
+    ' args(0)=nombre (no tocar) | args(1)=categorias | args(2)=valores | args(3)=orden (no tocar)
+    args(1) = ProcessCatValArg(CStr(args(1)))
+    args(2) = ProcessCatValArg(CStr(args(2)))
+    If ub >= 4 Then
+        args(4) = ProcessCatValArg(CStr(args(4))) ' tamanos de burbuja, si existieran
+    End If
+
+    BuildUpdatedSeriesFormula = "=SERIES(" & JoinVariant(args) & ")"
+    Exit Function
+
+Fallback:
+    BuildUpdatedSeriesFormula = originalFormula
+
+End Function
+
+'==================================================================
+' Separa los argumentos de nivel superior de SERIES(...) respetando
+' parentesis (referencias multi-area) y comillas simples (nombres de hoja).
+'==================================================================
+Private Function SplitTopLevelArgs(ByVal s As String) As Variant
+
+    Dim result() As String
+    Dim n As Long
+    Dim depth As Long
+    Dim inQuote As Boolean
+    Dim current As String
+    Dim i As Long
+    Dim ch As String
+
+    ReDim result(0 To Len(s))
+    n = 0
+    depth = 0
+    inQuote = False
+    current = ""
+
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        If ch = "'" Then
+            inQuote = Not inQuote
+            current = current & ch
+        ElseIf ch = "(" And Not inQuote Then
+            depth = depth + 1
+            current = current & ch
+        ElseIf ch = ")" And Not inQuote Then
+            depth = depth - 1
+            current = current & ch
+        ElseIf ch = "," And depth = 0 And Not inQuote Then
+            result(n) = current
+            n = n + 1
+            current = ""
+        Else
+            current = current & ch
+        End If
+    Next i
+
+    result(n) = current
+    n = n + 1
+    ReDim Preserve result(0 To n - 1)
+
+    SplitTopLevelArgs = result
+
+End Function
+
+Private Function JoinVariant(ByVal arr As Variant) As String
+    Dim i As Long
+    Dim s As String
+    s = ""
+    For i = LBound(arr) To UBound(arr)
+        If i > LBound(arr) Then s = s & ","
+        s = s & CStr(arr(i))
+    Next i
+    JoinVariant = s
+End Function
+
+'==================================================================
+' Procesa un argumento de categorias/valores/tamanos: puede ser una
+' sola area ('Hoja'!$A$1:$B$1) o varias areas en union
+' (('Hoja'!$A$1:$B$1,'Hoja'!$D$1)).
+'==================================================================
+Private Function ProcessCatValArg(ByVal argStr As String) As String
+
+    Dim trimmed As String
+    trimmed = Trim$(argStr)
+
+    If Len(trimmed) = 0 Then
+        ProcessCatValArg = argStr
+        Exit Function
+    End If
+
+    If Left$(trimmed, 1) = "(" And Right$(trimmed, 1) = ")" Then
+        Dim inner As String
+        Dim parts() As String
+        Dim i As Long
+        inner = Mid$(trimmed, 2, Len(trimmed) - 2)
+        parts = Split(inner, ",")
+        For i = LBound(parts) To UBound(parts)
+            parts(i) = ProcessArea(Trim$(parts(i)))
+        Next i
+        ProcessCatValArg = "(" & Join(parts, ",") & ")"
+    Else
+        ProcessCatValArg = ProcessArea(trimmed)
+    End If
+
+End Function
+
+'==================================================================
+' Procesa UNA sola area tipo 'Hoja'!$A$1:$B$1 o 'Hoja'!$A$1
+'   - Si crece por FILA (misma fila, o celda unica) -> extiende
+'     la columna final +1 (nuevo mes/periodo a la derecha).
+'   - Si crece por COLUMNA (misma columna, varias filas, patron
+'     serie-por-columna) -> NO se toca, se deja igual.
+' Ante cualquier formato no reconocido, retorna el area sin cambios.
+'==================================================================
+Private Function ProcessArea(ByVal areaStr As String) As String
+
+    On Error GoTo Fallback
+
+    Dim bangPos As Long
+    Dim sheetPart As String
+    Dim rangePart As String
+    Dim startCell As String
+    Dim endCell As String
+    Dim startCol As String, endCol As String
+    Dim startRow As Long, endRow As Long
+    Dim newEndCol As String
+
+    bangPos = InStr(areaStr, "!")
+    If bangPos = 0 Then GoTo Fallback
+
+    sheetPart = Left$(areaStr, bangPos)
+    rangePart = Mid$(areaStr, bangPos + 1)
+
+    If InStr(rangePart, ":") > 0 Then
+        startCell = Split(rangePart, ":")(0)
+        endCell = Split(rangePart, ":")(1)
+    Else
+        startCell = rangePart
+        endCell = rangePart
+    End If
+
+    ParseCellRef startCell, startCol, startRow
+    ParseCellRef endCell, endCol, endRow
+
+    If Len(startCol) = 0 Or Len(endCol) = 0 Then GoTo Fallback
+
+    ' Crece por columna (serie-por-columna) -> no tocar
+    If endRow > startRow And UCase$(endCol) = UCase$(startCol) Then
+        ProcessArea = areaStr
+        Exit Function
+    End If
+
+    newEndCol = ColLettersFromNumber(ColNumberFromLetters(endCol) + 1)
+
+    If startCell = endCell Then
+        ProcessArea = sheetPart & "$" & newEndCol & "$" & endRow
+    Else
+        ProcessArea = sheetPart & "$" & startCol & "$" & startRow & ":$" & newEndCol & "$" & endRow
+    End If
+
+    Exit Function
+
+Fallback:
+    ProcessArea = areaStr
+
+End Function
+
+Private Sub ParseCellRef(ByVal cellRef As String, ByRef colLetters As String, ByRef rowNum As Long)
+
+    Dim clean As String
+    Dim i As Long
+
+    colLetters = ""
+    rowNum = 0
+
+    clean = Replace(cellRef, "$", "")
+
+    i = 1
+    Do While i <= Len(clean)
+        If Not (Mid$(clean, i, 1) Like "[A-Za-z]") Then Exit Do
+        i = i + 1
+    Loop
+
+    If i = 1 Then Exit Sub
+
+    colLetters = UCase$(Left$(clean, i - 1))
+
+    If i <= Len(clean) Then
+        If IsNumeric(Mid$(clean, i)) Then
+            rowNum = CLng(Mid$(clean, i))
+        End If
+    End If
+
+End Sub
+
+Private Function ColNumberFromLetters(ByVal letters As String) As Long
+    Dim i As Long, n As Long
+    n = 0
+    For i = 1 To Len(letters)
+        n = n * 26 + (Asc(UCase$(Mid$(letters, i, 1))) - 64)
+    Next i
+    ColNumberFromLetters = n
+End Function
+
+Private Function ColLettersFromNumber(ByVal colNum As Long) As String
+    Dim n As Long
+    Dim r As Long
+    Dim s As String
+    n = colNum
+    s = ""
+    Do While n > 0
+        r = (n - 1) Mod 26
+        s = Chr$(65 + r) & s
+        n = (n - r - 1) \ 26
+    Loop
+    ColLettersFromNumber = s
+End Function
