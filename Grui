@@ -1,0 +1,214 @@
+# DEEP DIVE: THEMATIC INVESTING
+## Mapa Completo de Literatura, Gaps Verificados y Preguntas de Investigación
+
+---
+
+## I. EL LANDSCAPE REAL — MUCHO MÁS DESARROLLADO DE LO QUE ASUMÍ
+
+Mi búsqueda inicial subestimó severamente la literatura existente. Aquí está lo que realmente existe en agosto 2026:
+
+### Papers Clave que DEBEN Conocerse
+
+**1. Bai, Tang, Wan & Yüksel (2026, *Review of Financial Studies* — forthcoming)**
+"Thematic Concentration and Mutual Fund Performance"
+- Usan textual analysis de 10-K filings para identificar exposición temática a nivel acción.
+- Construyen un "Thematic Concentration Index" (TCI) a nivel fondo basado en holdings.
+- Resultado: High-TCI funds outperform por **4.26% annualized four-factor alpha** (decil top vs bottom).
+- Hallazgo clave: el alpha proviene de **stock selection DENTRO de temas**, NO de theme timing.
+- La expertise temática de los managers se relaciona con su campo de estudio undergraduate.
+- Publicado en un Top-3 journal. Los datos del TCI son públicos en la web de los autores.
+
+**2. Lee & Liu (Enero 2026, SSRN)**
+"Thematic Investing as Missing Factors"
+- Reconceptualiza themes como **"missing or under-represented factors in conventional risk models, often due to their emerging, transient, or localized nature."**
+- Propone un framework que **aísla thematic exposures de market, industry y style factors.**
+- Incorpora "narrative information" para capturar la evolución del tema.
+- Compara con thematic ETFs y muestra "economically significant differences in portfolio composition and risk characteristics."
+
+**3. Candes, Hastie, Hogan, Kahn, Luo & Spector (2025, *Financial Analysts Journal*)**
+"Thematic Investing: A Risk-Based Perspective"
+- Autores de Stanford + BlackRock/Barclays.
+- Usa 145 Goldman Sachs thematic baskets (desde 2010) para definir themes rigurosamente.
+- Define themes como **"significant transient correlations of residuals"** después de strip de factores e industria.
+- Propone risk-based portfolio construction para single y multi-thematic portfolios.
+
+**4. Somefun, Perchet, Yin & Leote de Carvalho (2023, *Financial Analysts Journal*)**
+"Allocating to Thematic Investments"
+- BNP Paribas Asset Management.
+- Introduce themes como **dimensión adicional** a asset class, región, sector y estilo en SAA.
+- Propone framework de robust optimization para multi-asset portfolios con satellite temáticos.
+
+**5. Braga (2026, *European Financial Management*)**
+"Measuring Thematic Funds Performance via an Approach Based on Observable and Latent Factors"
+- Primer paper que usa latent factors para performance attribution de fondos temáticos europeos.
+- Periodo: Jan 2018 – Dec 2025. Fondos UCITS europeos.
+
+**6. Evidencia Morningstar/ETF.com (2024-2026)**
+- En Europa, **68% de los fondos temáticos que existían en 2009 habían cerrado para 2024.**
+- **Solo 5% sobrevivieron Y superaron al equity global.**
+- "Thematic ETFs debut near a peak, they often face a difficult future from day one."
+- En mayo 2026: **388 de 393 thematic ETFs en EE.UU. underperform al S&P 500.**
+- EUR 1.1bn en outflows de thematic ETFs en Europa en 2024 — primer año negativo en una década.
+
+---
+
+## II. LA PARADOJA CENTRAL
+
+Los datos revelan una **paradoja fundamental** que ningún paper ha resuelto:
+
+| Evidencia | Fuente | Implicación |
+|---|---|---|
+| Active thematic funds generan 4.26% alpha | Bai et al. (2026, RFS) | Thematic investing funciona |
+| 388/393 thematic ETFs underperform al S&P 500 | ETF.com (mayo 2026) | Thematic investing NO funciona |
+| Los themes son "missing factors" legítimos | Lee & Liu (2026) | El premium existe teóricamente |
+| 68% de thematic funds cierran en 15 años | Morningstar (2024) | El premium no es capturado |
+| ETFs lanzan near a peak | Morningstar (2026) | El TIMING destruye valor |
+
+**La resolución de esta paradoja requiere entender el CICLO DE VIDA del tema:** hay un momento en que invertir en un tema genera alpha (cuando la adopción estructural está acelerando y el pricing aún no lo refleja) y un momento en que destruye valor (cuando la narrativa ha inflado los precios más allá de los fundamentales). Bai et al. muestran que el alpha viene de stock selection, no de timing — pero eso es para FONDOS ACTIVOS. Para un allocator INSTITUCIONAL que decide cuánto asignar al "sleeve temático," la pregunta de CUÁNDO y CUÁNTO es la que importa.
+
+---
+
+## III. GAPS VERIFICADOS QUE SOBREVIVEN A LA LITERATURA
+
+Después de mapear los 6+ papers principales + evidencia practitioner, estos son los gaps GENUINOS:
+
+### GAP 1: El Ciclo de Vida del Theme Premium — ¿Cuándo Aparece, Culmina y Decae?
+
+**Qué se sabe**: Candes et al. (2025) definen themes como "transient." Lee & Liu (2026) los llaman "emerging, transient, or localized." Morningstar muestra que ETFs lanzan "near a peak." Pero **nadie ha modelado formalmente la dinámica temporal del premium temático** — cómo evoluciona a lo largo del ciclo de vida de un tema desde su emergencia hasta su maduración.
+
+**Qué falta**: Un framework que identifique en qué fase del ciclo se encuentra cada tema (emergencia → crecimiento → peak → decadencia) usando indicadores observables, y que conecte esa fase con el expected return del tema. Esto es esencialmente un "S-curve pricing model" para temas.
+
+**Por qué importa para TAA**: Un allocator institucional podría usar este framework para timing de entrada/salida en sleeves temáticos.
+
+### GAP 2: Descomposición de Returns Temáticos en Adopción Estructural vs Flujos/Narrativa
+
+**Qué se sabe**: Bai et al. (2026) muestran que el alpha viene de stock selection, no timing. Lee & Liu (2026) separan exposición temática de factores estándar. Pero **nadie ha descompuesto el return de un tema en: (a) componente fundamental (correlacionado con adopción real de la tendencia) y (b) componente de flujo/narrativa (correlacionado con hype mediático y fund flows).**
+
+**Qué falta**: Evidencia empírica de si el "thematic residual" (después de strip de factores + sectores, como lo hace Lee & Liu) está correlacionado con proxies de adopción real (patent filings, capex en el sector, penetración tecnológica, cambios regulatorios) vs proxies de narrativa (Google Trends, menciones en medios, fund flows, ETF launches). Y crucialmente: ¿el componente de adopción predice retornos positivos futuros, mientras el componente de narrativa predice mean reversion?
+
+**Por qué importa**: Si el componente fundamental es persistente y predecible, hay un genuine thematic risk premium. Si el componente de narrativa mean-reverts, hay una oportunidad de contrarian TAA.
+
+### GAP 3: Estructura de Correlación Cross-Theme y Construcción de Multi-Theme Portfolios
+
+**Qué se sabe**: Somefun et al. (2023, FAJ) proponen un framework de SAA con themes pero asumen una correlación dada. Candes et al. (2025) construyen single y multi-thematic portfolios pero con un set fijo de baskets de Goldman Sachs.
+
+**Qué falta**: ¿Cuál es la estructura de correlación ENTRE temas después de strip de factor/sector exposures? ¿Son los temas genuinamente independientes (diversificadores) o comparten factores comunes latentes? ¿Cuál es el número óptimo de temas en un satellite portfolio, y cómo debería seleccionarse?
+
+**Por qué importa para SAA**: Un CIO que decide cuánto asignar al "satellite temático" necesita saber si 5 temas diversifican mejor que 2, o si todos comparten el mismo riesgo disfrazado.
+
+### GAP 4: La Perspectiva Institucional — ¿Cómo Deberían Institutional Investors Asignar a Themes?
+
+**Qué se sabe**: Bai et al. estudian mutual funds (retail). Somefun et al. proponen un framework teórico. Pero **nadie ha estudiado cómo pension funds, SWFs o endowments asignan a themes en la práctica, ni si esta asignación genera valor vs un benchmark con las mismas exposiciones factoriales/sectoriales.**
+
+**Qué falta**: Evidencia empírica sobre el value-add de la asignación temática institucional, sujeta a constraints reales (tracking error budget, líquidez, benchmarks regulados, reporting requirements).
+
+---
+
+## IV. LAS PREGUNTAS DE INVESTIGACIÓN MÁS POTENTES
+
+Ordeno por [originalidad × potencial de contribución a alpha/TAA/SAA × factibilidad]:
+
+### PREGUNTA ESTRELLA: "El Theme Lifecycle y Tactical Thematic Allocation"
+
+**Formulación precisa**: *¿Pueden los retornos de estrategias temáticas descomponerse en un componente de adopción estructural (persistente, predecible por proxies fundamentales) y un componente de narrativa/flujo (transitorio, mean-reverting), y puede esta descomposición usarse para construir una estrategia de tactical thematic allocation que supere a la asignación temática estática?*
+
+**Cadena completa**:
+Fenómeno → Mecanismo → Asset Pricing → TAA
+- **Fenómeno**: Los temas tienen ciclos de vida. AI, clean energy, genomics, cybersecurity están en diferentes puntos de su S-curve.
+- **Mecanismo**: En la fase temprana, la adopción estructural supera las expectativas del mercado → las acciones temáticas están subvaloradas → positive alpha. En la fase de pico, los flujos narrativos inflan los precios → overvaluation → negative future returns. En la fase de decadencia, la atención se retira → los precios se normalizan.
+- **Asset pricing**: El "thematic premium" es time-varying y depende de la fase del ciclo. En promedio es close to zero (lo cual explica por qué 388/393 ETFs underperform). Pero condicionalmente es grande y positivo (fase temprana) o negativo (fase de pico).
+- **TAA**: Un allocator que identifica correctamente la fase del ciclo puede generar alpha entrando en temas emergentes y saliendo de temas saturados.
+
+**Por qué reconcilia la paradoja**: Bai et al. muestran que active managers generan alpha dentro de temas porque son buenos seleccionando acciones con informational advantage. Los ETFs fallan porque lanzan en fase de pico (timing destruction). Un tactical allocator que entrara en temas en fase temprana y saliera en fase de pico capturaría el premium que los ETFs pasivos destruyen.
+
+**Datos necesarios**:
+- **Returns temáticos**: MSCI thematic indices (Robotics, Digital Economy, Cybersecurity, Future Mobility, Autonomous Tech, etc.) y/o ETF returns — Bloomberg.
+- **Factores estándar**: Fama-French 5 + momentum — Kenneth French data library.
+- **Sector exposure**: MSCI GICS sector indices — Bloomberg.
+- **Proxies de adopción estructural**: 
+  - Patent filings temáticos (USPTO/Google Patents — clasificados por tecnología).
+  - Capex sectoral relevante (S&P Capital IQ).
+  - Penetración tecnológica (IEA para energy, Gartner para IT, WHO para biotech).
+  - Cambios regulatorios (EU ETS phases, IRA dates, CHIPS Act, etc. — event dates).
+- **Proxies de narrativa/flujo**:
+  - Google Trends por keyword temático.
+  - Fund flows a thematic ETFs (Bloomberg).
+  - ETF launches por tema (Morningstar — número de nuevos ETFs en cada tema por trimestre).
+  - Media mentions (GDELT, news APIs, o manualmente).
+- **Controles**: VIX, policy rates, GDP growth, broad market returns.
+
+**Metodología potencial**:
+
+*Paso 1: Construcción del "Thematic Residual"*
+Para cada tema t en cada período m, regresionar los retornos del índice temático contra factores + sectores (siguiendo Lee & Liu 2026). El residual es el "pure thematic return."
+
+*Paso 2: Descomposición del Residual*
+Regresionar el thematic residual contra:
+- Proxies de adopción (ΔPatents, ΔCapex, ΔPenetración)
+- Proxies de narrativa (ΔGoogle Trends, ΔFlows, ΔMedia mentions)
+Identificar qué fracción del residual es explicada por cada componente.
+
+*Paso 3: Test de predictibilidad*
+- ¿El componente de adopción en t predice retornos temáticos positivos en t+1, t+2, ... t+k?
+- ¿El componente de narrativa en t predice retornos negativos (mean reversion) en t+1, t+2, ... t+k?
+
+*Paso 4: Tactical Thematic Allocation*
+- Construir un "Theme Momentum Signal" basado en adopción (buy signal) y un "Theme Hype Signal" basado en narrativa (sell signal).
+- Backtest de un portfolio que entra en temas con alta adopción / baja narrativa y sale de temas con baja adopción / alta narrativa.
+- Comparar con: (a) equal-weight multi-theme buy-and-hold, (b) flow-chasing strategy, (c) broad market.
+
+**Robustness checks**:
+- Distintas ventanas de rolling para los proxies.
+- Alternativas a Google Trends (media articles via GDELT).
+- Out-of-sample testing con split temporal.
+- Controlling for market-wide momentum.
+- Excluding themes with <3 years of data.
+
+---
+
+### PREGUNTA SECUNDARIA A: "Cross-Theme Diversification and Optimal Multi-Theme Portfolio Size"
+
+**Formulación**: *Después de aislar la exposición temática pura de factor/sector tilts, ¿cuánta diversificación genuina proveen múltiples temas? ¿Cuál es el número óptimo de temas para un satellite portfolio institucional?*
+
+**Datos**: Mismos que la pregunta estrella + DCC-GARCH o rolling correlations entre thematic residuals.
+
+**Contribución**: Responde la pregunta de SAA: "¿Cuánto debería asignar mi pension fund al satellite temático, y a cuántos temas?"
+
+---
+
+### PREGUNTA SECUNDARIA B: "Thematic Crowding — ¿Los Flujos Causan Returns o Los Returns Causan Flujos?"
+
+**Formulación**: *¿Cuál es la relación causal entre los flows a thematic ETFs y los retornos a nivel tema? ¿Los flujos generan demand pressure (price impact) que mean-reverts, o los flows siguen a retornos pasados (return chasing)?*
+
+**Metodología**: Granger causality tests, lead-lag regressions, VAR impulse responses entre fund flows y thematic index returns.
+
+**Contribución**: Si flows causan returns que luego mean-revert, hay un "thematic crowding premium" que puede explotarse con una estrategia contrarian.
+
+---
+
+## V. EVALUACIÓN DE FACTIBILIDAD PARA FRANCO
+
+| Dimensión | Evaluación |
+|---|---|
+| **Acceso a datos** | ★★★★★ — Bloomberg tiene todos los ETF/index returns, flows, Google Trends API es gratuito, patent data es pública, MSCI ESG/thematic indices disponibles |
+| **Metodología** | ★★★★☆ — Fama-MacBeth, time-series predictive regressions, rolling correlations, portfolio backtesting — todo es estándar en Python (statsmodels, scikit-learn) |
+| **Conexión con su trabajo** | ★★★★★ — Franco trabaja con thematic investing, dashboards temáticos, y flashcards de papers temáticos en AFP Integra |
+| **Novedad en 2026** | ★★★★★ — La pregunta del theme lifecycle NO ha sido respondida por ninguno de los papers existentes |
+| **Potencial de publicación** | ★★★★☆ — JPM, FAJ, o Journal of Asset Management. Con la RFS de Bai et al. y la FAJ de Candes et al. como foundation, el campo está "caliente" |
+| **Riesgo de resultado nulo** | ★★★☆☆ — Si resulta que los proxies de adopción no predicen retornos, el paper pierde fuerza. Pero la evidencia de Morningstar (ETFs lanzan at peak) sugiere que SÍ hay un efecto de timing |
+
+---
+
+## VI. MI RECOMENDACIÓN FINAL PARA FRANCO
+
+**La pregunta del Theme Lifecycle es la mejor opción** por cuatro razones:
+
+1. **Resuelve una paradoja documentada**: Activos thematic funds outperform (RFS) mientras ETFs pasivos underperform (Morningstar). Ningún paper explica POR QUÉ.
+
+2. **Genera una herramienta de TAA genuina**: Un CIO puede usar los signals de adopción vs narrativa para timing de asignación temática. Esto es directamente accionable.
+
+3. **Construye sobre papers de top journals**: Bai et al. (2026, RFS), Lee & Liu (2026, SSRN), Candes et al. (2025, FAJ) son el foundation. La contribución NO es repetir su trabajo sino añadir la DIMENSIÓN TEMPORAL que todos omiten.
+
+4. **Es factible con los datos y skills de Franco**: Bloomberg + APIs públicas + Python. La metodología es demanding pero estándar.
+
+**Si Franco quiere una tesis MÁS SIMPLE que también sea valiosa**, la Pregunta B (Thematic Crowding — flows → returns) es una versión más reducida que usa menos datos y una metodología más simple (VAR/Granger causality), pero con menos potencial de impacto.
