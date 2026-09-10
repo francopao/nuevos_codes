@@ -1,0 +1,530 @@
+# -*- coding: utf-8 -*-
+"""
+Motor de Calculo - Impacto Financiero de Riesgo Fisico CENEPRED sobre Minsur
+==============================================================================
+Alcance (Opcion A): segmento Individual de Minsur -> San Rafael, Funsur,
+Pucamarca. Excluye Mina Justa/Marcobre (Marcona) y Taboca (Brasil), decision
+explicita.
+
+Fuentes de datos (las dos unicas autorizadas):
+  1) "Minsur 261Q.xlsx"               -> datos financieros
+  2) "Riesgos Climaticos - #S##.xlsx" -> scores CENEPRED por activo
+
+Arquitectura del framework (acordada, sin calibracion local, sin funcion de
+mapeo inventada):
+  - El score CENEPRED (1-5) no genera magnitud por si mismo: selecciona un
+    punto de un rango de elasticidad ya citado de literatura.
+  - Score 5 = extremo severo del rango citado. Score 3 = extremo
+    conservador. Score 4 = punto medio (UNICA convencion propia, declarada,
+    sin respaldo directo de literatura). Score 1-2 = no material (0).
+    Score "N/D" = el escenario NO se considera para ese activo.
+  - Los 3 escenarios de riesgo (Inundacion, Movimiento de Masa, Sequia) se
+    reportan POR SEPARADO, nunca se suman entre si: cada elasticidad viene
+    de un estudio distinto, con muestra y estrategia de identificacion
+    distintas.
+  - Esto es una PRUEBA DE ESTRES CONDICIONAL, no una perdida esperada: no
+    hay frecuencia ni probabilidad de ocurrencia en este calculo.
+"""
+
+import os
+import re
+import unicodedata
+from datetime import datetime
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+
+# ============================================================================
+# 0. LOCALIZACION DE ARCHIVOS EN RED
+# ============================================================================
+
+RUTA_VALORIZACIONES = r"Z:\Mesa de Inversiones\Bottom-Up\4 Cobertura de Sectores - Empresas"
+
+RUTA_RIESGOS_CLIMATICOS = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD"
+    r"\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos"
+    r"\Python\Output"
+)
+
+ARCHIVO_VALORIZACION = "Minsur 261Q.xlsx"
+PERIODO_RIESGOS = None  # None = usar el mas reciente disponible; ej. "2S26"
+ANIO_BASE = 2025
+
+RUTA_SALIDA_EXCEL = os.path.join(os.getcwd(), "Minsur_Impacto_Fisico_CENEPRED.xlsx")
+
+
+def _archivo_valido(nombre):
+    return not nombre.startswith("~$") and not nombre.startswith(".")
+
+
+def _buscar_recursivo(carpeta_raiz, patron_regex, extensiones=(".xlsx", ".xlsm")):
+    if not os.path.isdir(carpeta_raiz):
+        raise FileNotFoundError(
+            f"No existe o no es accesible: {carpeta_raiz}\n"
+            f"Verifica que la unidad de red (Z:) este conectada."
+        )
+    regex = re.compile(patron_regex, re.IGNORECASE)
+    encontrados = []
+    for dirpath, _sub, filenames in os.walk(carpeta_raiz):
+        for f in filenames:
+            if not _archivo_valido(f):
+                continue
+            base, ext = os.path.splitext(f)
+            if ext.lower() not in extensiones:
+                continue
+            if regex.search(base):
+                ruta = os.path.join(dirpath, f)
+                try:
+                    mod = datetime.fromtimestamp(os.path.getmtime(ruta))
+                except OSError:
+                    mod = None
+                encontrados.append({"ruta": ruta, "nombre": f, "modificado": mod})
+    return encontrados
+
+
+def encontrar_valorizacion(nombre_exacto, carpeta_raiz=RUTA_VALORIZACIONES):
+    base = os.path.splitext(nombre_exacto)[0]
+    patron = rf"^{re.escape(base)}$"
+    candidatos = _buscar_recursivo(carpeta_raiz, patron)
+    if not candidatos:
+        raise FileNotFoundError(f"No se encontro '{nombre_exacto}' bajo {carpeta_raiz}")
+    if len(candidatos) > 1:
+        candidatos.sort(key=lambda r: r["modificado"] or datetime.min, reverse=True)
+        print(f"[AVISO] Multiples coincidencias para '{nombre_exacto}', se usa la mas reciente:")
+        for cnd in candidatos:
+            print(f"   - {cnd['ruta']}")
+    print(f"[OK] Valorizacion: {candidatos[0]['ruta']}")
+    return candidatos[0]["ruta"]
+
+
+_PATRON_PERIODO = re.compile(r"riesgos\s*clim[aá]ticos\s*-\s*([12])s(\d{2})", re.IGNORECASE)
+
+
+def encontrar_riesgos_climaticos(periodo=None, carpeta_raiz=RUTA_RIESGOS_CLIMATICOS):
+    candidatos = _buscar_recursivo(carpeta_raiz, r"riesgos\s*clim[aá]ticos")
+    con_periodo = []
+    for c in candidatos:
+        m = _PATRON_PERIODO.search(c["nombre"].replace("_", " "))
+        if m:
+            c["anio"] = 2000 + int(m.group(2))
+            c["semestre"] = int(m.group(1))
+            con_periodo.append(c)
+    if not con_periodo:
+        raise FileNotFoundError(f"No se hallo ningun 'Riesgos Climaticos - XSYY' bajo {carpeta_raiz}")
+    con_periodo.sort(key=lambda r: (r["anio"], r["semestre"]), reverse=True)
+    if periodo is None:
+        seleccionado = con_periodo[0]
+        print(f"[OK] Riesgos Climaticos (mas reciente): {seleccionado['ruta']}")
+        return seleccionado["ruta"]
+    m = re.match(r"^([12])S(\d{2})$", periodo.strip().upper())
+    if not m:
+        raise ValueError(f"Formato de periodo invalido: '{periodo}'. Usa 'XSYY', ej. '2S26'.")
+    sem, anio = int(m.group(1)), 2000 + int(m.group(2))
+    for c in con_periodo:
+        if c["anio"] == anio and c["semestre"] == sem:
+            print(f"[OK] Riesgos Climaticos ({periodo}): {c['ruta']}")
+            return c["ruta"]
+    disponibles = [f"{c['semestre']}S{str(c['anio'])[-2:]}" for c in con_periodo]
+    raise FileNotFoundError(f"Periodo '{periodo}' no encontrado. Disponibles: {disponibles}")
+
+
+# ============================================================================
+# 1. PARAMETROS DEL FRAMEWORK (literatura citada + convencion declarada)
+# ============================================================================
+
+ELASTICIDADES_LITERATURA = {
+    # Inundacion y Movimiento de Masa comparten fuente: Clo et al., eventos
+    # hidrogeologicos (inundaciones y deslizamientos) en municipios
+    # italianos. Impacto sobre ingresos de la empresa, evento severo vs. no
+    # severo.
+    "Inundación": {5: -0.049, 4: -0.032, 3: -0.015},
+    "Movimiento de Masa": {5: -0.049, 4: -0.032, 3: -0.015},
+    # Sequia en mineria: reduccion de capacidad/utilizacion documentada en
+    # la literatura de exposicion hidrica minera (Bonnafous, Lall & Siegel),
+    # trasladada a % de ingresos bajo el supuesto theta=0 (tomador de
+    # precio) ya establecido para el sector.
+    "Sequía": {5: -0.25, 4: -0.15, 3: -0.05},
+}
+
+
+def elasticidad_por_score(hazard, score):
+    if score is None or (isinstance(score, str) and score.strip().upper() == "N/D"):
+        return None
+    try:
+        score_num = int(round(float(score)))
+    except (TypeError, ValueError):
+        return None
+    if score_num <= 2:
+        return 0.0
+    score_num = min(score_num, 5)
+    return ELASTICIDADES_LITERATURA[hazard][score_num]
+
+
+# ============================================================================
+# 2. CARGA DE DATOS
+# ============================================================================
+
+def _norm(s):
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.strip().upper()
+
+
+ACTIVOS_ALCANCE = {
+    "PLANTA DE CONC.SAN RAFAEL": "Cadena Estaño (San Rafael + Funsur)",
+    "FUNSUR": "Cadena Estaño (San Rafael + Funsur)",
+    "CONCESION DE BENEFICIO PUCAMARCA": "Pucamarca (Oro)",
+    # "PLANTA DE OXIDOS Y PLANTA DE SULFUROS" (Marcona) = Mina Justa /
+    # Marcobre: EXCLUIDO del alcance (Opcion A), decision explicita.
+}
+
+
+def cargar_scores_minsur(ruta_riesgos, empresa="Minsur"):
+    wb = openpyxl.load_workbook(ruta_riesgos, data_only=True)
+    ws = wb["Activos por Empresa"]
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    idx = {h: i + 1 for i, h in enumerate(headers) if h}
+
+    activos = []
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(r, idx["Empresa"]).value != empresa:
+            continue
+        nombre_activo = ws.cell(r, idx["Activo Físico"]).value
+        clave = _norm(nombre_activo)
+        unidad = None
+        for k, v in ACTIVOS_ALCANCE.items():
+            if _norm(k) == clave:
+                unidad = v
+                break
+        if unidad is None:
+            continue  # fuera de alcance (Opcion A)
+        activos.append({
+            "activo": nombre_activo,
+            "unidad_economica": unidad,
+            "score_mm": ws.cell(r, idx["Score MM"]).value,
+            "score_inund": ws.cell(r, idx["Score Inund."]).value,
+            "score_sequia": ws.cell(r, idx["Score Sequía"]).value,
+        })
+    if not activos:
+        raise ValueError("No se encontraron activos de Minsur dentro del alcance definido (Opcion A).")
+    return activos
+
+
+def _buscar_valor_por_etiqueta(ws, etiqueta, col_etiqueta, col_valor,
+                                fila_inicio=1, fila_fin=None, ocurrencia=1):
+    fila_fin = fila_fin or ws.max_row
+    vistos = 0
+    for r in range(fila_inicio, fila_fin + 1):
+        if ws.cell(r, col_etiqueta).value == etiqueta:
+            vistos += 1
+            if vistos == ocurrencia:
+                return ws.cell(r, col_valor).value
+    return None
+
+
+def _col_del_anio(ws, fila_encabezado, anio, col_inicio=1, col_fin=None):
+    col_fin = col_fin or ws.max_column
+    for c in range(col_inicio, col_fin + 1):
+        if ws.cell(fila_encabezado, c).value == anio:
+            return c
+    raise ValueError(f"No se encontro la columna del anio {anio} en fila {fila_encabezado}.")
+
+
+def cargar_financieros_minsur(ruta_valorizacion, anio_base=ANIO_BASE):
+    wb = openpyxl.load_workbook(ruta_valorizacion, data_only=True)
+
+    # --- Segmento Individual (IS_Ind.): base del alcance (Opcion A) ---
+    ws_ind = wb["IS_Ind."]
+    col_ind = _col_del_anio(ws_ind, 2, anio_base)
+    ventas_ind = _buscar_valor_por_etiqueta(ws_ind, "Ventas netas", 2, col_ind)
+    ebitda_ind = _buscar_valor_por_etiqueta(ws_ind, "EBITDA", 2, col_ind)
+
+    # --- Op: ingresos por producto (Estaño = San Rafael+Funsur, Oro =
+    # Pucamarca), bajo "Consolidated sales" ---
+    ws_op = wb["Op"]
+    col_op = _col_del_anio(ws_op, 2, anio_base)
+    revenue_estano = _buscar_valor_por_etiqueta(ws_op, "Estaño", 2, col_op, ocurrencia=1)
+    revenue_oro = _buscar_valor_por_etiqueta(ws_op, "Oro", 2, col_op, ocurrencia=1)
+
+    # --- COGS: costo de produccion por mina, bajo "Production cost
+    # consolidated" ---
+    ws_cogs = wb["COGS"]
+    col_cogs = _col_del_anio(ws_cogs, 2, anio_base)
+    costo_san_rafael = _buscar_valor_por_etiqueta(ws_cogs, "San Rafael", 2, col_cogs, ocurrencia=1)
+    costo_pucamarca = _buscar_valor_por_etiqueta(ws_cogs, "Pucamarca", 2, col_cogs, ocurrencia=1)
+
+    # --- Ratios_Minsur: metricas de credito CONSOLIDADAS (la deuda vive a
+    # nivel de la compania, no del segmento) ---
+    ws_rat = wb["Ratios_Minsur"]
+    col_rat = _col_del_anio(ws_rat, 2, anio_base)
+    ebitda_cons = _buscar_valor_por_etiqueta(ws_rat, "EBITDA", 1, col_rat)
+    revenue_cons = _buscar_valor_por_etiqueta(ws_rat, "Revenue", 1, col_rat)
+    net_debt_ebitda_cons = _buscar_valor_por_etiqueta(ws_rat, "Net debt / EBITDA (x)", 1, col_rat)
+
+    faltantes = [n for n, v in [
+        ("Ventas netas (IS_Ind.)", ventas_ind), ("EBITDA (IS_Ind.)", ebitda_ind),
+        ("Estaño (Op)", revenue_estano), ("Oro (Op)", revenue_oro),
+        ("San Rafael (COGS)", costo_san_rafael), ("Pucamarca (COGS)", costo_pucamarca),
+        ("EBITDA consolidado (Ratios_Minsur)", ebitda_cons),
+        ("Net debt / EBITDA consolidado (Ratios_Minsur)", net_debt_ebitda_cons),
+    ] if v is None]
+    if faltantes:
+        raise ValueError(f"No se pudieron leer los siguientes datos: {faltantes}")
+
+    return {
+        "anio_base": anio_base,
+        "ventas_individual": ventas_ind,
+        "ebitda_individual": ebitda_ind,
+        "revenue_estano": revenue_estano,
+        "revenue_oro": revenue_oro,
+        "costo_produccion_san_rafael": costo_san_rafael,
+        "costo_produccion_pucamarca": costo_pucamarca,
+        "ebitda_consolidado": ebitda_cons,
+        "revenue_consolidado": revenue_cons,
+        "net_debt_ebitda_consolidado_x": net_debt_ebitda_cons,
+    }
+
+
+# ============================================================================
+# 3. UNIDADES ECONOMICAS (San Rafael+Funsur en cadena; Pucamarca aparte)
+# ============================================================================
+
+def construir_unidades_economicas(fin):
+    revenue_total_unidades = fin["revenue_estano"] + fin["revenue_oro"]
+
+    unidades = {
+        "Cadena Estaño (San Rafael + Funsur)": {
+            "revenue": fin["revenue_estano"],
+            "costo_produccion": fin["costo_produccion_san_rafael"],
+        },
+        "Pucamarca (Oro)": {
+            "revenue": fin["revenue_oro"],
+            "costo_produccion": fin["costo_produccion_pucamarca"],
+        },
+    }
+
+    for u in unidades.values():
+        u["margen_contribucion"] = 1 - (u["costo_produccion"] / u["revenue"])
+        u["ebitda_asignado"] = fin["ebitda_individual"] * (u["revenue"] / revenue_total_unidades)
+
+    return unidades
+
+
+# ============================================================================
+# 4. MOTOR DE ESTRES (por activo x por escenario, SIN agregar entre si)
+# ============================================================================
+
+def correr_pruebas_de_estres(activos, unidades, fin):
+    filas = []
+    for activo in activos:
+        unidad = unidades[activo["unidad_economica"]]
+        scores_por_hazard = {
+            "Movimiento de Masa": activo["score_mm"],
+            "Inundación": activo["score_inund"],
+            "Sequía": activo["score_sequia"],
+        }
+        for hazard, score in scores_por_hazard.items():
+            elasticidad = elasticidad_por_score(hazard, score)
+            if elasticidad is None:
+                continue  # score = N/D: el escenario no se considera
+
+            delta_revenue_usd = elasticidad * unidad["revenue"]
+            delta_ebitda_usd = delta_revenue_usd * unidad["margen_contribucion"]
+            delta_ebitda_pct_unidad = (
+                delta_ebitda_usd / unidad["ebitda_asignado"] if unidad["ebitda_asignado"] else None
+            )
+
+            ebitda_cons_ajustado = fin["ebitda_consolidado"] + delta_ebitda_usd
+            net_debt_usd = fin["net_debt_ebitda_consolidado_x"] * fin["ebitda_consolidado"]
+            net_debt_ebitda_ajustado = (
+                net_debt_usd / ebitda_cons_ajustado if ebitda_cons_ajustado else None
+            )
+
+            filas.append({
+                "activo": activo["activo"],
+                "unidad_economica": activo["unidad_economica"],
+                "escenario_riesgo": hazard,
+                "score_cenepred": score,
+                "elasticidad_aplicada_pct": elasticidad,
+                "revenue_base_unidad_usd_mm": unidad["revenue"],
+                "delta_revenue_usd_mm": delta_revenue_usd,
+                "margen_contribucion_unidad": unidad["margen_contribucion"],
+                "delta_ebitda_usd_mm": delta_ebitda_usd,
+                "delta_ebitda_pct_sobre_unidad": delta_ebitda_pct_unidad,
+                "delta_ebitda_pct_sobre_consolidado": delta_ebitda_usd / fin["ebitda_consolidado"],
+                "net_debt_ebitda_base_x": fin["net_debt_ebitda_consolidado_x"],
+                "net_debt_ebitda_ajustado_x": net_debt_ebitda_ajustado,
+            })
+    return filas
+
+
+# ============================================================================
+# 5. ESCRITOR DE EXCEL
+# ============================================================================
+
+_FUENTE = "Arial"
+_TITULO_FONT = Font(name=_FUENTE, size=14, bold=True, color="FFFFFF")
+_TITULO_FILL = PatternFill("solid", fgColor="1A5276")
+_HEADER_FONT = Font(name=_FUENTE, size=10, bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="2980B9")
+_NOTA_FONT = Font(name=_FUENTE, size=9, italic=True, color="666666")
+_BASE_FONT = Font(name=_FUENTE, size=10)
+
+
+def _autoancho(ws, min_ancho=10, max_ancho=60):
+    for col_cells in ws.columns:
+        longitud = max((len(str(c.value)) for c in col_cells if c.value is not None), default=0)
+        letra = get_column_letter(col_cells[0].column)
+        ws.column_dimensions[letra].width = min(max(longitud + 2, min_ancho), max_ancho)
+
+
+COLUMNAS_SALIDA = [
+    ("activo", "Activo Físico"),
+    ("unidad_economica", "Unidad Económica"),
+    ("escenario_riesgo", "Escenario de Riesgo"),
+    ("score_cenepred", "Score CENEPRED"),
+    ("elasticidad_aplicada_pct", "Elasticidad Aplicada (%)"),
+    ("revenue_base_unidad_usd_mm", "Revenue Base Unidad (US$ mm)"),
+    ("delta_revenue_usd_mm", "Δ Revenue (US$ mm)"),
+    ("margen_contribucion_unidad", "Margen de Contribución"),
+    ("delta_ebitda_usd_mm", "Δ EBITDA (US$ mm)"),
+    ("delta_ebitda_pct_sobre_unidad", "Δ EBITDA % (s/ unidad)"),
+    ("delta_ebitda_pct_sobre_consolidado", "Δ EBITDA % (s/ consolidado)"),
+    ("net_debt_ebitda_base_x", "Deuda Neta/EBITDA Base (x)"),
+    ("net_debt_ebitda_ajustado_x", "Deuda Neta/EBITDA Ajustado (x)"),
+]
+
+
+def escribir_excel(filas, fin, ruta_salida):
+    wb = openpyxl.Workbook()
+
+    ws = wb.active
+    ws.title = "Resultados"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(COLUMNAS_SALIDA))
+    c = ws.cell(1, 1, "Impacto Financiero de Riesgo Físico CENEPRED — Minsur (Segmento Individual)")
+    c.font = _TITULO_FONT
+    c.fill = _TITULO_FILL
+    ws.row_dimensions[1].height = 26
+
+    fila_header = 3
+    for i, (_, etiqueta) in enumerate(COLUMNAS_SALIDA, start=1):
+        cc = ws.cell(fila_header, i, etiqueta)
+        cc.font = _HEADER_FONT
+        cc.fill = _HEADER_FILL
+
+    for r, fila in enumerate(filas, start=fila_header + 1):
+        for cidx, (clave, _) in enumerate(COLUMNAS_SALIDA, start=1):
+            valor = fila[clave]
+            cc = ws.cell(r, cidx, valor)
+            cc.font = _BASE_FONT
+            if clave in ("elasticidad_aplicada_pct", "margen_contribucion_unidad",
+                         "delta_ebitda_pct_sobre_unidad", "delta_ebitda_pct_sobre_consolidado"):
+                cc.number_format = "0.0%"
+            elif clave in ("net_debt_ebitda_base_x", "net_debt_ebitda_ajustado_x"):
+                cc.number_format = '0.00"x"'
+            elif "usd_mm" in clave:
+                cc.number_format = "#,##0.0"
+
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Supuestos y Alcance")
+    notas = [
+        "ALCANCE (Opción A): segmento Individual de Minsur — San Rafael, Funsur, Pucamarca.",
+        "Excluye Mina Justa / Marcobre (Marcona) y Taboca (Brasil), decisión explícita.",
+        f"Cobertura: {fin['ventas_individual']:,.1f} de {fin['revenue_consolidado']:,.1f} US$ mm "
+        f"de ingresos consolidados ({fin['ventas_individual']/fin['revenue_consolidado']:.1%}).",
+        "",
+        "ARQUITECTURA DEL FRAMEWORK:",
+        "- El score CENEPRED (1-5) no genera magnitud por sí mismo: selecciona un punto",
+        "  de un rango de elasticidad ya citado de literatura (score 5=severo, 3=conservador).",
+        "- Score 4 = punto medio del rango citado. ÚNICO parámetro sin respaldo directo de",
+        "  literatura; es una convención declarada, no un hallazgo.",
+        "- Score 1-2 = impacto no material (0). Score 'N/D' = el escenario NO se considera",
+        "  para ese activo (no se inventa un valor).",
+        "- Los 3 escenarios de riesgo (Inundación, Movimiento de Masa, Sequía) se reportan",
+        "  POR SEPARADO, nunca se suman: cada elasticidad viene de un estudio distinto, con",
+        "  muestra y estrategia de identificación distintas.",
+        "- Esto es una PRUEBA DE ESTRÉS CONDICIONAL, no una pérdida esperada: no hay",
+        "  frecuencia ni probabilidad de ocurrencia en este cálculo.",
+        "",
+        "FUENTES DE LAS ELASTICIDADES:",
+        "- Inundación y Movimiento de Masa: eventos hidrogeológicos (inundaciones y",
+        "  deslizamientos) en municipios italianos. Ingresos -4.9% (evento severo) a",
+        "  -1.5% (evento no severo).",
+        "- Sequía (minería): literatura de exposición hídrica minera y el canal de",
+        "  reducción de capacidad/utilización documentado para el sector, bajo el",
+        "  supuesto de que la empresa es tomadora de precio (θ≈0). Rango: -25%",
+        "  (severo) a -5% (conservador).",
+        "",
+        "SIMPLIFICACIONES DECLARADAS:",
+        "- San Rafael y Funsur se tratan como una sola unidad económica ('Cadena Estaño'):",
+        "  operan en serie, una interrupción en cualquiera detiene el negocio completo.",
+        "- El margen de contribución de la Cadena Estaño usa el costo de producción de",
+        "  San Rafael; el costo incremental propio de Funsur no está desagregado en el",
+        "  archivo y se omite (sesga el margen levemente al alza).",
+        "- El impacto en dólares de cada escenario se aplica sobre el EBITDA CONSOLIDADO",
+        "  para el ratio de crédito (Deuda Neta/EBITDA), porque la deuda vive a nivel de",
+        "  la compañía, no del segmento.",
+    ]
+    for i, texto in enumerate(notas, start=1):
+        ws2.cell(i, 1, texto).font = _NOTA_FONT
+    ws2.column_dimensions["A"].width = 100
+
+    wb.save(ruta_salida)
+    print(f"[OK] Resultados escritos en: {ruta_salida}")
+
+
+# ============================================================================
+# 6. ORQUESTADOR
+# ============================================================================
+
+def main():
+    print("=" * 78)
+    print("MOTOR DE CALCULO - IMPACTO FINANCIERO RIESGO FISICO CENEPRED - MINSUR")
+    print("=" * 78)
+
+    ruta_valorizacion = encontrar_valorizacion(ARCHIVO_VALORIZACION)
+    ruta_riesgos = encontrar_riesgos_climaticos(PERIODO_RIESGOS)
+
+    print("\nCargando scores CENEPRED (Opcion A: San Rafael, Funsur, Pucamarca)...")
+    activos = cargar_scores_minsur(ruta_riesgos)
+    for a in activos:
+        print(f"   - {a['activo']} ({a['unidad_economica']}): "
+              f"MM={a['score_mm']}  Inund={a['score_inund']}  Sequia={a['score_sequia']}")
+
+    print("\nCargando datos financieros (Minsur 261Q)...")
+    fin = cargar_financieros_minsur(ruta_valorizacion)
+    print(f"   Segmento Individual: Ventas={fin['ventas_individual']:.1f}  "
+          f"EBITDA={fin['ebitda_individual']:.1f}  US$ mm")
+    print(f"   Consolidado: Ventas={fin['revenue_consolidado']:.1f}  "
+          f"EBITDA={fin['ebitda_consolidado']:.1f}  US$ mm  "
+          f"Deuda Neta/EBITDA={fin['net_debt_ebitda_consolidado_x']:.2f}x")
+
+    unidades = construir_unidades_economicas(fin)
+    print("\nUnidades economicas construidas:")
+    for nombre, u in unidades.items():
+        print(f"   - {nombre}: Revenue={u['revenue']:.1f}  "
+              f"Margen contrib.={u['margen_contribucion']:.1%}  "
+              f"EBITDA asignado={u['ebitda_asignado']:.1f}")
+
+    print("\nCorriendo pruebas de estres por activo x escenario (sin agregar)...")
+    filas = correr_pruebas_de_estres(activos, unidades, fin)
+    print(f"   {len(filas)} escenarios calculados.")
+
+    escribir_excel(filas, fin, RUTA_SALIDA_EXCEL)
+
+    print("\n" + "=" * 78)
+    print("RESUMEN")
+    print("=" * 78)
+    for f in filas:
+        print(f"{f['activo']:38s} | {f['escenario_riesgo']:20s} | score={f['score_cenepred']} | "
+              f"DeltaEBITDA={f['delta_ebitda_usd_mm']:+7.2f} US$mm "
+              f"({f['delta_ebitda_pct_sobre_consolidado']:+.2%} s/consolidado) | "
+              f"DN/EBITDA {f['net_debt_ebitda_base_x']:.2f}x -> {f['net_debt_ebitda_ajustado_x']:.2f}x")
+
+
+if __name__ == "__main__":
+    main()
