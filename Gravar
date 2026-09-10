@@ -1,0 +1,321 @@
+# -*- coding: utf-8 -*-
+"""
+Resolver de rutas - Framework Riesgo Fisico Climatico
+Localiza: (1) modelo de valorizacion por empresa, (2) Riesgos Climaticos - {S}{YY},
+(3) Riesgos Fisicos (Mapa Distrital) - {YYYY}, (4) BDs sectoriales.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+# --------------------------------------------------------------------------- #
+# Rutas base
+# --------------------------------------------------------------------------- #
+
+ROOT_COBERTURA = Path(r"Z:\Mesa de Inversiones\Bottom-Up\4 Cobertura de Sectores - Empresas")
+
+ROOT_RIESGOS = Path(
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones"
+    r"\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD\Reporte TCFD"
+    r"\Mapeo de Distribución de Distritos - Riesgos Fisicos\Python\Output"
+)
+
+ROOT_INPUTS_MACRO = Path(
+    r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro"
+)
+
+EXTENSIONES = (".xlsx", ".xlsm", ".xlsb")
+
+# --------------------------------------------------------------------------- #
+# Normalizacion
+# --------------------------------------------------------------------------- #
+
+
+def norm(texto: str) -> str:
+    """Minusculas, sin tildes, separadores colapsados a un espacio."""
+    t = unicodedata.normalize("NFKD", str(texto))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = t.lower().replace("_", " ").replace("-", " ")
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def es_temporal(nombre: str) -> bool:
+    return nombre.startswith("~$") or nombre.startswith(".")
+
+
+# --------------------------------------------------------------------------- #
+# Recorrido recursivo
+# --------------------------------------------------------------------------- #
+
+
+def walk_excels(root: Path, max_depth: int | None = None, verbose: bool = False) -> Iterable[Path]:
+    """Recorre recursivamente y devuelve solo archivos Excel no temporales."""
+    if not root.exists():
+        raise FileNotFoundError(f"No existe o no es accesible: {root}")
+
+    root_depth = len(root.parts)
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, onerror=None):
+        p = Path(dirpath)
+        if max_depth is not None and len(p.parts) - root_depth >= max_depth:
+            dirnames[:] = []
+        dirnames[:] = [d for d in dirnames if not es_temporal(d)]
+        if verbose:
+            print(f"  ... {p}", file=sys.stderr)
+        for f in filenames:
+            if es_temporal(f):
+                continue
+            if os.path.splitext(f)[1].lower() in EXTENSIONES:
+                yield p / f
+
+
+@dataclass
+class Match:
+    path: Path
+    clave: tuple = field(default_factory=tuple)
+
+    @property
+    def mtime(self) -> float:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+
+def _reportar(nombre: str, matches: list[Match]) -> Path | None:
+    if not matches:
+        print(f"[NO ENCONTRADO] {nombre}")
+        return None
+    if len(matches) > 1:
+        print(f"[MULTIPLES] {nombre} -> {len(matches)} coincidencias:")
+        for m in matches:
+            print(f"    - {m.path}")
+        print(f"  Se usa la mas reciente por fecha de modificacion:")
+    elegido = matches[0]
+    print(f"[OK] {nombre}: {elegido.path}")
+    return elegido.path
+
+
+# --------------------------------------------------------------------------- #
+# 1. Modelo de valorizacion
+# --------------------------------------------------------------------------- #
+
+RE_PERIODO_VAL = re.compile(r"^(?P<emp>.+?)\s+(?P<yy>\d{2})(?P<q>[1-4])q$")
+
+
+def buscar_valorizacion(
+    empresa: str,
+    periodo: str | None = None,
+    root: Path = ROOT_COBERTURA,
+    verbose: bool = False,
+) -> list[Match]:
+    """
+    periodo='261Q' -> match exacto '<empresa> 261Q'.
+    periodo=None   -> cualquier '<empresa> YYQ', se prioriza el mas reciente.
+    """
+    emp_n = norm(empresa)
+    per_n = norm(periodo) if periodo else None
+    out: list[Match] = []
+
+    for f in walk_excels(root, verbose=verbose):
+        stem = norm(f.stem)
+        m = RE_PERIODO_VAL.match(stem)
+        if not m or m.group("emp") != emp_n:
+            continue
+        yy, q = int(m.group("yy")), int(m.group("q"))
+        if per_n is not None and f"{yy:02d}{q}q" != per_n:
+            continue
+        out.append(Match(f, (yy, q)))
+
+    out.sort(key=lambda m: (m.clave, m.mtime), reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 2. Riesgos Climaticos - {1S|2S}{YY}
+# --------------------------------------------------------------------------- #
+
+RE_RIESGOS_CLIM = re.compile(r"^riesgos climaticos\s+(?P<sem>[12])s(?P<yy>\d{2})$")
+
+
+def buscar_riesgos_climaticos(
+    periodo: str | None = None,
+    root: Path = ROOT_RIESGOS,
+    verbose: bool = False,
+) -> list[Match]:
+    """periodo='2S26' fuerza esa version; None toma la mas reciente (anio, semestre)."""
+    per_n = norm(periodo).replace(" ", "") if periodo else None
+    out: list[Match] = []
+
+    for f in walk_excels(root, verbose=verbose):
+        m = RE_RIESGOS_CLIM.match(norm(f.stem))
+        if not m:
+            continue
+        sem, yy = int(m.group("sem")), int(m.group("yy"))
+        if per_n is not None and f"{sem}s{yy:02d}" != per_n:
+            continue
+        out.append(Match(f, (yy, sem)))
+
+    out.sort(key=lambda m: (m.clave, m.mtime), reverse=True)
+    return out
+
+
+def listar_periodos_disponibles(root: Path = ROOT_RIESGOS) -> list[str]:
+    return [f"{m.clave[1]}S{m.clave[0]:02d}" for m in buscar_riesgos_climaticos(root=root)]
+
+
+# --------------------------------------------------------------------------- #
+# 3. Riesgos Fisicos (Mapa Distrital) - {YYYY}
+# --------------------------------------------------------------------------- #
+
+RE_MAPA_DIST = re.compile(r"^riesgos fisicos\s*\(mapa distrital\)\s*(?P<yyyy>\d{4})$")
+
+
+def buscar_mapa_distrital(
+    anio: int | None = None,
+    root: Path = ROOT_RIESGOS,
+    verbose: bool = False,
+) -> list[Match]:
+    out: list[Match] = []
+    for f in walk_excels(root, verbose=verbose):
+        m = RE_MAPA_DIST.match(norm(f.stem))
+        if not m:
+            continue
+        yyyy = int(m.group("yyyy"))
+        if anio is not None and yyyy != anio:
+            continue
+        out.append(Match(f, (yyyy,)))
+    out.sort(key=lambda m: (m.clave, m.mtime), reverse=True)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 4. BDs sectoriales
+# --------------------------------------------------------------------------- #
+
+RE_BD = re.compile(r"^bd\s+(?P<sector>.+)$")
+
+SECTOR_ALIAS = {
+    "mineria": "mineria",
+    "minera": "mineria",
+    "utilities": "utilities",
+    "financieras": "financieras",
+    "financiero": "financieras",
+    "consumo": "consumo",
+    "construccion": "construccion",
+    "cemento": "construccion",
+}
+
+
+def buscar_bds_sectoriales(
+    root: Path = ROOT_INPUTS_MACRO,
+    verbose: bool = False,
+) -> dict[str, Path]:
+    encontrados: dict[str, Match] = {}
+    for f in walk_excels(root, verbose=verbose):
+        m = RE_BD.match(norm(f.stem))
+        if not m:
+            continue
+        raw = m.group("sector").strip()
+        clave = SECTOR_ALIAS.get(raw, raw)
+        cand = Match(f, (clave,))
+        if clave not in encontrados or cand.mtime > encontrados[clave].mtime:
+            encontrados[clave] = cand
+    return {k: v.path for k, v in sorted(encontrados.items())}
+
+
+# --------------------------------------------------------------------------- #
+# Orquestador
+# --------------------------------------------------------------------------- #
+
+
+def resolver(
+    empresa: str,
+    periodo_val: str | None = None,
+    periodo_riesgos: str | None = None,
+    anio_mapa: int | None = None,
+    incluir_bds: bool = True,
+    verbose: bool = False,
+) -> dict:
+    res: dict = {}
+
+    print(f"\n=== Modelo de valorizacion: {empresa} {periodo_val or '(ultimo disponible)'} ===")
+    res["valorizacion"] = _reportar(
+        f"{empresa} {periodo_val or 'YYQ'}",
+        buscar_valorizacion(empresa, periodo_val, verbose=verbose),
+    )
+
+    print(f"\n=== Riesgos Climaticos {periodo_riesgos or '(mas reciente)'} ===")
+    mc = buscar_riesgos_climaticos(periodo_riesgos, verbose=verbose)
+    if not mc and periodo_riesgos:
+        disp = listar_periodos_disponibles()
+        print(f"  Periodos disponibles: {', '.join(disp) if disp else 'ninguno'}")
+    res["riesgos_climaticos"] = _reportar(f"Riesgos Climaticos - {periodo_riesgos or 'auto'}", mc)
+
+    print(f"\n=== Riesgos Fisicos (Mapa Distrital) {anio_mapa or '(mas reciente)'} ===")
+    res["mapa_distrital"] = _reportar(
+        "Riesgos Fisicos (Mapa Distrital)",
+        buscar_mapa_distrital(anio_mapa, verbose=verbose),
+    )
+
+    if incluir_bds:
+        print("\n=== BDs sectoriales ===")
+        bds = buscar_bds_sectoriales(verbose=verbose)
+        if not bds:
+            print("[NO ENCONTRADO] BDs sectoriales")
+        for k, v in bds.items():
+            print(f"[OK] BD {k}: {v}")
+        res["bds"] = bds
+
+    faltantes = [k for k in ("valorizacion", "riesgos_climaticos", "mapa_distrital") if not res.get(k)]
+    print("\n" + "-" * 70)
+    if faltantes:
+        print(f"INCOMPLETO. Falta resolver: {', '.join(faltantes)}")
+    else:
+        print("COMPLETO. Todos los insumos obligatorios fueron localizados.")
+    return res
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Resolver de rutas - Riesgo Fisico Climatico")
+    ap.add_argument("--empresa", default="Minsur")
+    ap.add_argument("--periodo-val", default="261Q", help="Ej. 261Q. Vacio = ultimo disponible")
+    ap.add_argument("--periodo-riesgos", default=None, help="Ej. 2S26. Vacio = mas reciente")
+    ap.add_argument("--anio-mapa", type=int, default=None, help="Ej. 2026. Vacio = mas reciente")
+    ap.add_argument("--sin-bds", action="store_true")
+    ap.add_argument("--listar-periodos", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    if args.listar_periodos:
+        for p in listar_periodos_disponibles():
+            print(p)
+        return 0
+
+    try:
+        res = resolver(
+            empresa=args.empresa,
+            periodo_val=args.periodo_val or None,
+            periodo_riesgos=args.periodo_riesgos,
+            anio_mapa=args.anio_mapa,
+            incluir_bds=not args.sin_bds,
+            verbose=args.verbose,
+        )
+    except FileNotFoundError as e:
+        print(f"ERROR DE RUTA: {e}")
+        return 2
+
+    obligatorios = ("valorizacion", "riesgos_climaticos", "mapa_distrital")
+    return 0 if all(res.get(k) for k in obligatorios) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
