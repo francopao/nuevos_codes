@@ -1,0 +1,270 @@
+Perfecto, tenés razón. El problema está en que `ProcessArea` siempre hace `endCol + 1` a ciegas. La solución correcta es: calcular el avance real (`extendBy`) revisando la fila de **valores** contra la hoja "Data Graf" (no nulo, no error), y aplicar ese mismo avance a categorías y valores para que no se desalineen. Esto toca 4 puntos puntuales del código que ya pegaste. Abajo el detalle quirúrgico.
+
+## Cambio 1 — Variable nueva para la hoja "Data Graf"
+
+**Ctrl+F, buscar:**
+```
+    Dim ws As Worksheet
+    Dim co As ChartObject
+```
+**Reemplazar por:**
+```
+    Dim ws As Worksheet
+    Dim dataWs As Worksheet
+    Dim co As ChartObject
+```
+
+**Ctrl+F, buscar:**
+```
+    Set ws = ThisWorkbook.Worksheets("OP")
+```
+**Reemplazar por:**
+```
+    Set ws = ThisWorkbook.Worksheets("OP")
+    Set dataWs = ThisWorkbook.Worksheets("Data Graf")
+```
+
+**Ctrl+F, buscar:**
+```
+                newF = BuildUpdatedSeriesFormula(origF)
+```
+**Reemplazar por:**
+```
+                newF = BuildUpdatedSeriesFormula(origF, dataWs)
+```
+
+## Cambio 2 — Función `BuildUpdatedSeriesFormula` completa
+
+**Ctrl+F, buscar el inicio:** `Private Function BuildUpdatedSeriesFormula` y seleccionar hasta el `End Function` que le sigue. Reemplazar todo ese bloque por:
+
+```vba
+Private Function BuildUpdatedSeriesFormula(ByVal originalFormula As String, ByVal dataWs As Worksheet) As String
+
+    On Error GoTo Fallback
+
+    Dim firstParen As Long
+    Dim innerContent As String
+    Dim args As Variant
+    Dim ub As Long
+    Dim extendBy As Long
+
+    If Left$(originalFormula, 1) <> "=" Then GoTo Fallback
+    If Right$(originalFormula, 1) <> ")" Then GoTo Fallback
+
+    firstParen = InStr(originalFormula, "(")
+    If firstParen = 0 Then GoTo Fallback
+
+    innerContent = Mid$(originalFormula, firstParen + 1, Len(originalFormula) - firstParen - 1)
+
+    args = SplitTopLevelArgs(innerContent)
+    ub = UBound(args)
+
+    If ub < 3 Then GoTo Fallback
+
+    ' El avance se calcula UNA sola vez en base a los VALORES reales
+    ' (no nulos, no error) y se aplica igual a categorias y valores
+    ' para que ambos rangos queden alineados en la misma columna final.
+    extendBy = DetermineExtendBy(CStr(args(2)), dataWs)
+
+    If extendBy <= 0 Then GoTo Fallback
+
+    args(1) = ProcessCatValArg(CStr(args(1)), extendBy)
+    args(2) = ProcessCatValArg(CStr(args(2)), extendBy)
+    If ub >= 4 Then
+        args(4) = ProcessCatValArg(CStr(args(4)), extendBy)
+    End If
+
+    BuildUpdatedSeriesFormula = "=SERIES(" & JoinVariant(args) & ")"
+    Exit Function
+
+Fallback:
+    BuildUpdatedSeriesFormula = originalFormula
+
+End Function
+```
+
+## Cambio 3 — Función `ProcessCatValArg` completa
+
+**Ctrl+F, buscar:** `Private Function ProcessCatValArg` hasta su `End Function`. Reemplazar por:
+
+```vba
+Private Function ProcessCatValArg(ByVal argStr As String, ByVal extendBy As Long) As String
+
+    Dim trimmed As String
+    trimmed = Trim$(argStr)
+
+    If Len(trimmed) = 0 Then
+        ProcessCatValArg = argStr
+        Exit Function
+    End If
+
+    If Left$(trimmed, 1) = "(" And Right$(trimmed, 1) = ")" Then
+        Dim inner As String
+        Dim parts() As String
+        Dim i As Long
+        inner = Mid$(trimmed, 2, Len(trimmed) - 2)
+        parts = Split(inner, ",")
+        For i = LBound(parts) To UBound(parts)
+            parts(i) = ProcessArea(Trim$(parts(i)), extendBy)
+        Next i
+        ProcessCatValArg = "(" & Join(parts, ",") & ")"
+    Else
+        ProcessCatValArg = ProcessArea(trimmed, extendBy)
+    End If
+
+End Function
+```
+
+## Cambio 4 — Función `ProcessArea` completa
+
+**Ctrl+F, buscar:** `Private Function ProcessArea` hasta su `End Function`. Reemplazar por (único cambio real: firma con `extendBy` y la línea `newEndCol =`):
+
+```vba
+Private Function ProcessArea(ByVal areaStr As String, ByVal extendBy As Long) As String
+
+    On Error GoTo Fallback
+
+    Dim bangPos As Long
+    Dim sheetPart As String
+    Dim rangePart As String
+    Dim startCell As String
+    Dim endCell As String
+    Dim startCol As String, endCol As String
+    Dim startRow As Long, endRow As Long
+    Dim newEndCol As String
+
+    bangPos = InStr(areaStr, "!")
+    If bangPos = 0 Then GoTo Fallback
+
+    sheetPart = Left$(areaStr, bangPos)
+    rangePart = Mid$(areaStr, bangPos + 1)
+
+    If InStr(rangePart, ":") > 0 Then
+        startCell = Split(rangePart, ":")(0)
+        endCell = Split(rangePart, ":")(1)
+    Else
+        startCell = rangePart
+        endCell = rangePart
+    End If
+
+    ParseCellRef startCell, startCol, startRow
+    ParseCellRef endCell, endCol, endRow
+
+    If Len(startCol) = 0 Or Len(endCol) = 0 Then GoTo Fallback
+
+    If endRow > startRow And UCase$(endCol) = UCase$(startCol) Then
+        ProcessArea = areaStr
+        Exit Function
+    End If
+
+    newEndCol = ColLettersFromNumber(ColNumberFromLetters(endCol) + extendBy)
+
+    If startCell = endCell Then
+        ProcessArea = sheetPart & "$" & newEndCol & "$" & endRow
+    Else
+        ProcessArea = sheetPart & "$" & startCol & "$" & startRow & ":$" & newEndCol & "$" & endRow
+    End If
+
+    Exit Function
+
+Fallback:
+    ProcessArea = areaStr
+
+End Function
+```
+
+## Cambio 5 — Función nueva `DetermineExtendBy` (agregar, no reemplaza nada)
+
+**Ctrl+F, buscar:**
+```
+'==================================================================
+' Separa los argumentos de nivel superior de SERIES(...) respetando
+```
+Ese es el comentario justo **antes** de `SplitTopLevelArgs`. Colocá el cursor al **inicio de esa línea** y pegá este bloque completo delante (antes) de ella:
+
+```vba
+'==================================================================
+' Calcula cuantas columnas hacia la derecha se puede avanzar,
+' revisando la fila de VALORES real contra "Data Graf": se detiene
+' en la primera celda vacia o con error (#N/A, #DIV/0!, etc).
+' Si la primera columna siguiente ya es invalida, retorna 0.
+'==================================================================
+Private Function DetermineExtendBy(ByVal valArgStr As String, ByVal dataWs As Worksheet) As Long
+
+    On Error GoTo Fallback
+
+    Dim trimmed As String
+    Dim lastArea As String
+    Dim parts() As String
+
+    trimmed = Trim$(valArgStr)
+
+    If Left$(trimmed, 1) = "(" And Right$(trimmed, 1) = ")" Then
+        Dim inner As String
+        inner = Mid$(trimmed, 2, Len(trimmed) - 2)
+        parts = Split(inner, ",")
+        lastArea = Trim$(parts(UBound(parts)))
+    Else
+        lastArea = trimmed
+    End If
+
+    Dim bangPos As Long
+    Dim rangePart As String
+    Dim endCell As String
+    Dim endCol As String
+    Dim endRow As Long
+
+    bangPos = InStr(lastArea, "!")
+    If bangPos = 0 Then GoTo Fallback
+    rangePart = Mid$(lastArea, bangPos + 1)
+
+    If InStr(rangePart, ":") > 0 Then
+        endCell = Split(rangePart, ":")(1)
+    Else
+        endCell = rangePart
+    End If
+
+    ParseCellRef endCell, endCol, endRow
+    If Len(endCol) = 0 Then GoTo Fallback
+
+    ' No avanzar sobre el patron serie-por-columna (categorias en filas)
+    If InStr(rangePart, ":") > 0 Then
+        Dim startCell As String, startCol As String, startRow As Long
+        startCell = Split(rangePart, ":")(0)
+        ParseCellRef startCell, startCol, startRow
+        If endRow > startRow And UCase$(endCol) = UCase$(startCol) Then
+            DetermineExtendBy = 0
+            Exit Function
+        End If
+    End If
+
+    Dim colNum As Long
+    Dim cnt As Long
+    Dim v As Variant
+
+    colNum = ColNumberFromLetters(endCol) + 1
+    cnt = 0
+
+    Do While colNum <= dataWs.Columns.Count
+        v = dataWs.Cells(endRow, colNum).Value
+        If IsError(v) Then Exit Do
+        If IsEmpty(v) Then Exit Do
+        If VarType(v) = vbString Then
+            If Len(v) = 0 Then Exit Do
+        End If
+        cnt = cnt + 1
+        colNum = colNum + 1
+    Loop
+
+    DetermineExtendBy = cnt
+    Exit Function
+
+Fallback:
+    DetermineExtendBy = 0
+
+End Function
+
+</parameter>
+```
+
+Con esto: si la próxima columna ya es inválida, `extendBy=0` y la serie no se toca; si hay varias columnas válidas seguidas, avanza hasta la última válida en una sola corrida (ya no hace falta ejecutar el macro varias veces). Todo lo demás (rollback, log en Inmediato, charts 15/16/17 sin tocar) sigue igual.
