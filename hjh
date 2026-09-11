@@ -1,0 +1,147 @@
+import openpyxl
+from openpyxl.utils import column_index_from_string
+from datetime import datetime, timedelta
+import os
+
+# ============================ CONFIGURACIÓN ============================
+RUTA_ARCHIVO = r"Z:\Benchmarking\Quest.xlsm"
+HOJA_DQ_IN = "DQ_IN"
+HOJA_GYP = "G&P"
+RUTA_SALIDA = "Reporte_Caja_CxC_CxP_DPZ_Coverage.xlsx"
+
+# Fondos a procesar -> columna de inicio de su bloque en G&P (columna "IN_GAP")
+# X = bloque F1, AI = bloque F2, AT = bloque F3 (bloques de 11 columnas por fondo)
+FONDOS = {
+    "IN-FONDO1": "X",
+    "IN-FONDO2": "AI",
+    "IN-FONDO3": "AT",
+}
+
+DATO_OBJETIVO = "PxQ"     # filtro de la columna B en DQ_IN
+DIAS_A_CALCULAR = 60      # últimas N fechas distintas por fondo
+FILA_INICIO_GYP = 11      # primera fila de instrumentos en G&P (SUM empieza en fila 11)
+
+# Posición de columnas en DQ_IN (según fila 11 de "Sheet1", que es el encabezado de referencia)
+COL_FONDO = "A"
+COL_DATO = "B"
+COL_FECHA = "C"
+COL_CAJA_INI = "H"    # CAJ_BRL
+COL_CAJA_FIN = "V"    # CAJ_CHF
+COL_CAJ_NSOL = "Z"    # se suma aparte, igual que en la fórmula original (+Z18)
+COL_CTACOB = "X"
+COL_CTAPAG = "Y"
+COL_DPZ_INI = "AA"
+COL_DPZ_FIN = "AH"
+# =========================================================================
+
+
+def idx(letra):
+    """Letra de columna -> índice 0-based."""
+    return column_index_from_string(letra) - 1
+
+
+def num(v):
+    return v if isinstance(v, (int, float)) else 0
+
+
+def suma_rango(fila, col_ini, col_fin):
+    """Replica SUM(col_ini:col_fin) de una fila de Excel."""
+    i0, i1 = idx(col_ini), idx(col_fin)
+    total = 0
+    for i in range(i0, i1 + 1):
+        total += num(fila[i]) if i < len(fila) else 0
+    return total
+
+
+def excel_serial_a_fecha(valor):
+    if isinstance(valor, datetime):
+        return valor
+    return datetime(1899, 12, 30) + timedelta(days=float(valor))
+
+
+def calcular_coverage_por_fondo():
+    """
+    Replica: =SUM('G&P'!<col>11:<col><ultima_fila>)
+    Un único valor por fondo (no depende de la fecha).
+    """
+    wb = openpyxl.load_workbook(RUTA_ARCHIVO, read_only=True, data_only=True)
+    ws = wb[HOJA_GYP]
+    ultima_fila = ws.max_row  # dinámico (en el ejemplo original estaba fijo en 2703)
+
+    idx_por_fondo = {fondo: idx(col) for fondo, col in FONDOS.items()}
+    coverage = {fondo: 0.0 for fondo in FONDOS}
+
+    for fila in ws.iter_rows(min_row=FILA_INICIO_GYP, max_row=ultima_fila, values_only=True):
+        for fondo, i in idx_por_fondo.items():
+            coverage[fondo] += num(fila[i] if i < len(fila) else None)
+
+    wb.close()
+    return coverage
+
+
+def procesar_y_exportar(coverage):
+    wb_in = openpyxl.load_workbook(RUTA_ARCHIVO, read_only=True, data_only=True)
+    ws_in = wb_in[HOJA_DQ_IN]
+
+    wb_out = openpyxl.Workbook(write_only=True)
+    ws_bd = wb_out.create_sheet("DQ_IN")
+
+    i_fondo, i_dato, i_fecha = idx(COL_FONDO), idx(COL_DATO), idx(COL_FECHA)
+
+    # {fondo: {fecha_serial: {Caja, Cuenta por Cobrar, Cuenta por Pagar, DPZ}}}
+    calculos = {fondo: {} for fondo in FONDOS}
+
+    for fila in ws_in.iter_rows(values_only=True):
+        ws_bd.append(fila)  # copia exacta de la BD hacia la hoja de salida "DQ_IN"
+
+        fondo = fila[i_fondo] if i_fondo < len(fila) else None
+        dato = fila[i_dato] if i_dato < len(fila) else None
+
+        if dato == DATO_OBJETIVO and fondo in FONDOS:
+            fecha_serial = fila[i_fecha]
+
+            caja = suma_rango(fila, COL_CAJA_INI, COL_CAJA_FIN) + num(fila[idx(COL_CAJ_NSOL)])
+            cta_cobrar = num(fila[idx(COL_CTACOB)])
+            cta_pagar = num(fila[idx(COL_CTAPAG)])
+            dpz = suma_rango(fila, COL_DPZ_INI, COL_DPZ_FIN)
+
+            calculos[fondo][fecha_serial] = {
+                "Caja": caja,
+                "Cuenta por Cobrar": cta_cobrar,
+                "Cuenta por Pagar": cta_pagar,
+                "DPZ": dpz,
+            }
+
+    wb_in.close()
+
+    # ---- Hoja de cálculo: por fondo, últimos N días ----
+    ws_calc = wb_out.create_sheet("Calculo")
+    ws_calc.append(["Fondo", "Fecha", "Coverage", "Caja",
+                     "Cuenta por Cobrar", "Cuenta por Pagar", "DPZ"])
+
+    for fondo in FONDOS:
+        por_fecha = calculos.get(fondo, {})
+        ultimas_fechas = sorted(por_fecha.keys(), reverse=True)[:DIAS_A_CALCULAR]
+        for fecha_serial in sorted(ultimas_fechas):
+            d = por_fecha[fecha_serial]
+            ws_calc.append([
+                fondo,
+                excel_serial_a_fecha(fecha_serial),
+                coverage.get(fondo, 0),
+                d["Caja"],
+                d["Cuenta por Cobrar"],
+                d["Cuenta por Pagar"],
+                d["DPZ"],
+            ])
+
+    wb_out.save(RUTA_SALIDA)
+
+
+def main():
+    coverage = calcular_coverage_por_fondo()
+    procesar_y_exportar(coverage)
+    print(f"Listo -> {os.path.abspath(RUTA_SALIDA)}")
+
+
+if __name__ == "__main__":
+    main()
