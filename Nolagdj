@@ -1,0 +1,187 @@
+Ahora voy a ubicar exactamente dónde en este template se construyen las tablas por emisor (con el header "Score") y las pestañas Resumen/RV/RF, para entender la estructura de datos JS disponible (el payload ya trae `exp_clase` por emisor).
+
+## Diagnóstico rápido
+
+Ubiqué las piezas:
+
+- El dashboard con el mapa coroplético + las tablas por peligro (con el header **"Score"**) es la función `generar_dashboard_activos` (~línea 5605), que arma el HTML a partir del **segundo** `_HTML_TEMPLATE` (el que empieza en la línea **6485** — ese es el que efectivamente se usa en runtime, porque Python ejecuta top-to-bottom y esa asignación pisa a la primera del 3690).
+- Dentro de ese template, la tabla con columna "Score" es `buildTbl3()` (~línea 7446).
+- Tu pista de la línea ~6117 (`ERR_OBJETIVO`) vive en `generar_excel_tabla_resumen` (hoja "Cobertura" del Excel) — **no** está conectada al HTML. El HTML hoy solo tiene `exp_clase` (clasifica por `TIPO_RENTA`, columna Q), que es un criterio distinto al que pediste (`Clasificación ERR`, columna AA, filtrado a `EQUITY DIRECTO - LOCAL` / `DEUDA CORPORATIVA DIRECTA - LOCAL`).
+
+Por eso no podemos "reutilizar" `exp_clase` tal cual: hay que calcular la posición con la lógica de `Clasificación ERR` (igual criterio que tu hoja Cobertura) y **agregarla al payload** para que el HTML la reciba. Son 6 ediciones: 3 en Python, 3 en el JS embebido.
+
+---
+
+### EDIT 1 (Python) — nueva función de carga
+
+**Ctrl+F:** `def load_enfen():`  → esto está en la línea **3222**. Pega el siguiente bloque **justo antes**, dejando 2 líneas en blanco como separador (mismo estilo que el resto del archivo):
+
+```python
+def load_posicion_directa_local(risk_path, sheet, equiv_canonico=None):
+    """Lee 'Valorización de Instrumentos' y calcula, por emisor canónico, la
+    POSICIÓN (S/) en instrumentos 'directo - Local' según la columna
+    'Clasificación ERR' (buscada dinámicamente, mismo criterio que
+    ERR_OBJETIVO en la hoja 'Cobertura' de generar_excel_tabla_resumen):
+      - 'EQUITY DIRECTO - LOCAL'            -> clase RENTA VARIABLE
+      - 'DEUDA CORPORATIVA DIRECTA - LOCAL' -> clase RENTA FIJA
+    Devuelve {emisor_canónico: {'RENTA VARIABLE': x, 'RENTA FIJA': y,
+    'TOTAL': x+y}}. A diferencia de exp_clase (que clasifica por TIPO_RENTA
+    y agrupa TODA la cartera del emisor), aquí solo se suman esas dos
+    clasificaciones ERR puntuales; alimenta la columna 'Posición' del
+    dashboard HTML."""
+    ERR_A_CLASE = {"EQUITY DIRECTO - LOCAL": "RENTA VARIABLE",
+                   "DEUDA CORPORATIVA DIRECTA - LOCAL": "RENTA FIJA"}
+    equiv_canonico = equiv_canonico or _equiv_exposicion_all()
+
+    raw = pd.read_excel(risk_path, sheet_name=sheet, header=None)
+    hdr_row, _ = detect_header_row(raw, ["Nombre (G&P)", "VALOR_VECTOR_LOCAL"],
+                                   max_scan=10)
+    df = pd.read_excel(risk_path, sheet_name=sheet, header=hdr_row).dropna(how="all")
+    spec = {"nombre": (["Nombre (G&P)", "Nombre G P", "Nombre"], "AE"),
+            "valor":  (["VALOR_VECTOR_LOCAL", "VALOR VECTOR LOCAL"], "K"),
+            "err":    (["Clasificación ERR", "Clasificacion ERR", "ERR"], "AA")}
+    cols = resolve_columns(df.columns, spec)
+    df = df.rename(columns={cols["nombre"]: "nombre", cols["valor"]: "valor",
+                            cols["err"]: "err"})
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0.0)
+    df["_errn"] = df["err"].astype(str).str.strip().apply(norm)
+
+    err_norm_a_clase = {norm(k): v for k, v in ERR_A_CLASE.items()}
+    eq_norm = {norm(k): v for k, v in equiv_canonico.items()}
+    df["emisor"] = df["nombre"].apply(lambda n: eq_norm.get(norm(n)))
+
+    posicion = {}
+    for _, r in df.dropna(subset=["emisor"]).iterrows():
+        clase = err_norm_a_clase.get(r["_errn"])
+        if clase is None:
+            continue
+        d = posicion.setdefault(r["emisor"], {"RENTA VARIABLE": 0.0,
+                                              "RENTA FIJA": 0.0, "TOTAL": 0.0})
+        d[clase] += r["valor"]
+        d["TOTAL"] += r["valor"]
+    for k in posicion:
+        for kk in posicion[k]:
+            posicion[k][kk] = round(posicion[k][kk], 2)
+    return posicion
+
+
+```
+
+---
+
+### EDIT 2 (Python) — calcular la posición dentro de `generar_dashboard_activos`
+
+**Ctrl+F:** `payload = {` → aparece **una sola vez**, en la línea **5647**. Justo **arriba** de esa línea (después del bloque `aum_mapeado = {...}` que termina en la línea 5645) pega:
+
+```python
+    # NUEVO: posición (S/) por emisor en instrumentos "directo - Local" (Equity /
+    # Deuda corporativa), según "Clasificación ERR" (mismo criterio que
+    # ERR_OBJETIVO en la hoja "Cobertura"). Independiente de exp_clase
+    # (que clasifica por TIPO_RENTA); alimenta la columna "Posición" del HTML.
+    try:
+        sheet_val = pick_sheet(risk_path, SHEET_VALORIZ_HINTS, "Valorización de Instrumentos")
+        posicion_emisor = load_posicion_directa_local(risk_path, sheet_val)
+    except Exception as e:
+        logfn(f"[Activos] No se pudo calcular 'Posición' por emisor (Clasificación ERR): {e}")
+        posicion_emisor = {}
+
+```
+
+---
+
+### EDIT 3 (Python) — meter la posición al payload
+
+**Ctrl+F:** `"exp_clase": exp_clase or {},` → línea **5650**. Reemplázala por:
+
+```python
+        "exp_clase": exp_clase or {},
+        "posicion_emisor": posicion_emisor or {},
+```
+
+---
+
+### EDIT 4 (JS embebido) — declarar `POSICION` y helpers
+
+**Ctrl+F:** `const EXP_CLASE = PAYLOAD.exp_clase || {};` → línea **6734**. Reemplázala por:
+
+```javascript
+const EXP_CLASE = PAYLOAD.exp_clase || {};
+const POSICION = PAYLOAD.posicion_emisor || {};
+```
+
+Luego, **Ctrl+F:** `function classFrac(emisor){` (línea **6790**) y busca el cierre de esa función, 6 líneas más abajo, la que dice `return (e[ck]||0)/e.TOTAL;` seguida de `}`. Justo **después** de esa función (línea 6796), agrega:
+
+```javascript
+
+// ---- posición (S/) del emisor en instrumentos "directo - Local", según la
+// pestaña activa (Resumen = TOTAL; RV = Equity directo; RF = Deuda directa).
+// Fuente: Clasificación ERR — independiente de EXP_CLASE/TIPO_RENTA.
+function posKey(){ return TAB==='rv' ? 'RENTA VARIABLE' : TAB==='rf' ? 'RENTA FIJA' : 'TOTAL'; }
+function posicionEmisor(emisor){
+  const p = POSICION[emisor];
+  return p ? (p[posKey()]||0) : 0;
+}
+function posicionEmisores(lista){
+  return lista.reduce((s,e)=>s+posicionEmisor(e), 0);
+}
+const celPos = v => '<td class="num" style="text-align:right">'+fmtMonto(v)+'</td>';
+```
+
+---
+
+### EDIT 5 y 6 (JS embebido) — columna dentro de `buildTbl3`
+
+**Ctrl+F:** `html+='<th>Score</th>';` → aparece **una sola vez**, línea **7520**, dentro de `buildTbl3`. Reemplaza **todo el bloque** desde `sectoresDisp.forEach(sec=>{` (línea 7513) hasta el `});` de cierre (línea 7547) por esta versión:
+
+```javascript
+  sectoresDisp.forEach(sec=>{
+    const sc=secCat[sec]; if(!sc) return;
+    const secTot=niveles.reduce((s,L)=>s+(sc[L]||0),0);
+    if(secTot<=0) return;
+    html+='<div class="tbl3-titulo">'+sec+'</div>';scoreSector
+    html+='<table class="tbl3"><thead><tr><th class="idx">Riesgo</th>';
+    niveles.forEach(L=>{ html+='<th>'+L+'</th>'; });
+    html+='<th>Score</th>';                                   // NUEVO
+    html+='<th>Posición</th>';                                // NUEVO: monto invertido
+    if(MOSTRAR_MITIG_TBL3) html+='<th>Mitigantes</th>';       // NUEVO
+    html+='</tr></thead><tbody>';
+    if(!desglosar){
+      html+='<tr><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+
+            celPos(posicionEmisores(Object.keys(compCat[sec]||{})))+
+            celMitVacia()+'</tr>';
+    } else {
+      const comps=compCat[sec]||{};
+      Object.keys(comps).sort().forEach(emp=>{
+        const cc=comps[emp];
+        const compTot=niveles.reduce((s,L)=>s+(cc[L]||0),0);
+        if(compTot<=0) return;
+        html+='<tr><td class="idx">'+emp+'</td>';
+        niveles.forEach(L=>{ html+='<td>'+pc(cc[L]||0, compTot)+'</td>'; });
+        html+=celScore(scoreEmp(emp))+celPos(posicionEmisor(emp))+celMit(emp)+'</tr>';
+      });
+      html+='<tr class="tbl3-sector"><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+
+            celPos(posicionEmisores(Object.keys(compCat[sec]||{})))+
+            celMitVacia()+'</tr>';
+    }
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    const sp=scorePromedioSector(sec);
+    html+='<td>'+(sp===null?'':sp.toFixed(2))+'</td>';
+    html+=celPos(posicionEmisores(Object.keys(compCat[sec]||{})));
+    if(MOSTRAR_MITIG_TBL3) html+='<td></td>';
+    html+='</tr></tbody></table>';
+  });
+```
+
+---
+
+## Dos decisiones que tomé (avísame si no era lo que querías)
+
+1. **Filas agregadas** ("AUM sector" y "AUM Total"): como esas filas no representan un solo emisor, "Posición" ahí es la **suma** de las posiciones de todos los emisores que componen esa fila — mismo criterio que ya usa la columna Score con su promedio ponderado.
+2. **Efecto colateral cosmético menor**: hay una regla CSS (`table.tbl3 tbody td:last-child`) que pone en negrita+negro la última celda de cada fila. Con Mitigantes oculto, "Posición" pasa a ser esa última celda y heredará ese negrita — visualmente inofensivo, pero avísame si prefieres que te dé el ajuste de CSS para que ese estilo se quede fijo en "Score".
+
+No toqué nada de los exports a Excel (`generar_excel_riesgos`, `generar_excel_tabla_resumen`) — el pedido era solo sobre el HTML.
