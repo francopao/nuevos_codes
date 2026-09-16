@@ -1,0 +1,68 @@
+Bien, EDIT 1 se aplicó. Verifiquemos el resto de los bloques.
+
+Ya encontré la causa exacta: es un error mecánico, no de lógica. Confirmé con un parser de JS que el script se rompe justo ahí.
+
+## El problema
+
+En el EDIT 6 (bloque `sectoresDisp.forEach`), al pegar el reemplazo se dejó el bloque **viejo duplicado** debajo del nuevo, en vez de reemplazarlo. Quedó así (líneas **7624-7652** de tu draft):
+
+```javascript
+    html+='</tr></tbody></table>';
+  });                                    // ← cierre del forEach NUEVO (correcto)
+    html+='<th>Score</th>';              // ← desde aquí es el bloque VIEJO que sobró
+    if(MOSTRAR_MITIG_TBL3) html+='<th>Mitigantes</th>';
+    html+='</tr></thead><tbody>';
+    ... (todo el bloque viejo, sin "Posición") ...
+    html+='</tr></tbody></table>';
+  });                                    // ← este '});' ya no tiene forEach que cerrar
+```
+
+Ese segundo `});` (línea 7652) quedó "huérfano" — no tiene un `forEach(` que lo abra, porque su forEach original ya fue reemplazado. Eso es un error de sintaxis JS que rompe **todo el `<script>`**, por eso el dashboard sale en blanco (ni mapa ni tablas: nada del JS llega a ejecutarse).
+
+## La corrección
+
+**Ctrl+F:** `html+='</tr></tbody></table>';` → tiene 2 coincidencias muy cercanas; ubícate en la **segunda**, seguida de `});` y luego `html+='<th>Score</th>';` repetido. Es decir, busca este bloque completo y **bórralo entero** (línea ~7625 a ~7652 en tu draft):
+
+```javascript
+    html+='<th>Score</th>';                                   // NUEVO
+    if(MOSTRAR_MITIG_TBL3) html+='<th>Mitigantes</th>';       // NUEVO
+    html+='</tr></thead><tbody>';
+    if(!desglosar){
+      html+='<tr><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+celMitVacia()+'</tr>';
+    } else {
+      const comps=compCat[sec]||{};
+      Object.keys(comps).sort().forEach(emp=>{
+        const cc=comps[emp];
+        const compTot=niveles.reduce((s,L)=>s+(cc[L]||0),0);
+        if(compTot<=0) return;
+        html+='<tr><td class="idx">'+emp+'</td>';
+        niveles.forEach(L=>{ html+='<td>'+pc(cc[L]||0, compTot)+'</td>'; });
+        html+=celScore(scoreEmp(emp))+celMit(emp)+'</tr>';
+      });
+      html+='<tr class="tbl3-sector"><td class="idx">AUM '+sec+'</td>';
+      niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, secTot)+'</td>'; });
+      html+=celScore(scoreSector(sec))+celMitVacia()+'</tr>';
+    }
+    html+='<tr class="tbl3-total"><td class="idx">AUM Total</td>';
+    niveles.forEach(L=>{ html+='<td>'+pc(sc[L]||0, portCat[L]||0)+'</td>'; });
+    const sp=scorePromedioSector(sec);
+    html+='<td>'+(sp===null?'':sp.toFixed(2))+'</td>';
+    if(MOSTRAR_MITIG_TBL3) html+='<td></td>';
+    html+='</tr></tbody></table>';
+  });
+
+```
+
+Después de borrarlo, el archivo debe quedar así en ese punto (sin nada intermedio):
+
+```javascript
+    html+='</tr></tbody></table>';
+  });
+
+  wrap.innerHTML = html || '<p style="font-size:11px;color:var(--plomo)">Sin exposición para este filtro.</p>';
+}
+```
+
+Ya validé esto con un parser de JS (`node --check`): con el bloque duplicado presente falla con `SyntaxError: Unexpected token ')'` exactamente en ese `});` huérfano; al borrarlo, el script pasa el chequeo de sintaxis limpio. El resto de tus ediciones (función Python `load_posicion_directa_local`, el cálculo de `posicion_emisor`, su entrada al `payload`, y la declaración de `POSICION`/`posKey`/`posicionEmisor`/`celPos` en el JS) están bien aplicadas — no las toques.
