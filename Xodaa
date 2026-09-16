@@ -1,0 +1,87 @@
+**Bloque 1 — corrige el ancla fija en 29/03/2024**
+
+`Ctrl+F` → `for f in fechas_qest:`
+
+Reemplaza este bloque completo (líneas ~144-149):
+
+```python
+    fechas_norm = []
+    for f in fechas_qest:
+        try:
+            fechas_norm.append(pd.Timestamp(f).normalize() if f is not None and not isinstance(f, str) else None)
+        except Exception:
+            fechas_norm.append(None)
+```
+
+por:
+
+```python
+    fechas_norm = []
+    for f in fechas_qest:
+        if f is None:
+            fechas_norm.append(None)
+        elif isinstance(f, str):
+            ts = pd.to_datetime(f, dayfirst=True, errors="coerce")
+            fechas_norm.append(ts.normalize() if pd.notna(ts) else None)
+        else:
+            try:
+                fechas_norm.append(pd.Timestamp(f).normalize())
+            except Exception:
+                fechas_norm.append(None)
+```
+
+---
+
+**Bloque 2 — corrige la ruptura de formato en los gráficos de "BD"**
+
+`Ctrl+F` → `def escribir_df_en_excel`
+
+Reemplaza la función completa (líneas ~74-101) por:
+
+```python
+def escribir_df_en_excel(ruta: str, hoja: str,
+                          df: pd.DataFrame,
+                          incluir_indice: bool = True) -> None:
+    """Sobreescribe el contenido de una hoja Excel preservando macros y gráficos."""
+    wb = load_workbook(ruta, keep_vba=True)
+    if hoja in wb.sheetnames:
+        ws = wb[hoja]
+        filas_previas = ws.max_row
+        cols_previas  = ws.max_column
+    else:
+        ws = wb.create_sheet(hoja)
+        filas_previas = 0
+        cols_previas  = 0
+
+    df_exp = df.reset_index() if incluir_indice else df.reset_index(drop=True)
+
+    for col_i, col_name in enumerate(df_exp.columns, start=1):
+        ws.cell(row=1, column=col_i, value=str(col_name))
+
+    ultima_fila = 1
+    for row_i, row in enumerate(df_exp.itertuples(index=False), start=2):
+        ultima_fila = row_i
+        for col_i, valor in enumerate(row, start=1):
+            if isinstance(valor, (pd.Timestamp, datetime.datetime)):
+                valor = valor.to_pydatetime() if isinstance(valor, pd.Timestamp) else valor
+            elif isinstance(valor, (pd.Period,)):
+                valor = str(valor)
+            elif isinstance(valor, float) and np.isnan(valor):
+                valor = None
+            ws.cell(row=row_i, column=col_i, value=valor)
+
+    n_cols_nuevas = len(df_exp.columns)
+    if filas_previas > ultima_fila:
+        for row_i in range(ultima_fila + 1, filas_previas + 1):
+            for col_i in range(1, max(cols_previas, n_cols_nuevas) + 1):
+                ws.cell(row=row_i, column=col_i, value=None)
+    if cols_previas > n_cols_nuevas:
+        for row_i in range(1, max(filas_previas, ultima_fila) + 1):
+            for col_i in range(n_cols_nuevas + 1, cols_previas + 1):
+                ws.cell(row=row_i, column=col_i, value=None)
+
+    wb.save(ruta)
+    print(f"  ✓ Escrito: {os.path.basename(ruta)} → hoja '{hoja}'")
+```
+
+Diferencia clave: ya no se llama `ws.delete_rows(1, ws.max_row)` (openpyxl no reajusta gráficos/formatos ligados a filas eliminadas); ahora solo se sobrescribe el *valor* de las celdas, y las sobrantes se vacían sin borrar filas/columnas.
