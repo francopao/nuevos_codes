@@ -1,0 +1,39 @@
+El warning de DQ_IN ahora sí es correcto: el 29/03/2024 fue Viernes Santo (mercado cerrado), y el 27/03/2024 es el último día hábil antes de Semana Santa — el fallback ya está funcionando bien, no es bug.
+
+El error real es el `PermissionError`: Windows no dejó guardar `ZODA.xlsm` porque el archivo está abierto en Excel (o bloqueado por OneDrive/antivirus/sincronización) en ese momento. Cierra el archivo antes de correr el script. Además, añade un reintento automático por si el bloqueo es momentáneo:
+
+**Paso A** — `Ctrl+F` → `from time import strftime`
+
+Reemplaza:
+```python
+from time import strftime
+```
+por:
+```python
+from time import strftime, sleep
+```
+
+**Paso B** — `Ctrl+F` → `wb.save(ruta)` (línea única dentro de `escribir_df_en_excel`, no confundir con `wb.save(ruta_salida)`)
+
+Reemplaza:
+```python
+    wb.save(ruta)
+    print(f"  ✓ Escrito: {os.path.basename(ruta)} → hoja '{hoja}'")
+```
+por:
+```python
+    for intento in range(5):
+        try:
+            wb.save(ruta)
+            break
+        except PermissionError:
+            if intento == 4:
+                raise PermissionError(
+                    f"No se pudo guardar '{os.path.basename(ruta)}': el archivo está "
+                    "abierto en Excel u otro proceso, o bloqueado por OneDrive/antivirus. "
+                    "Ciérralo y vuelve a ejecutar."
+                )
+            print(f"  ⚠ Archivo bloqueado, reintentando en 5s... ({intento + 1}/5)")
+            sleep(5)
+    print(f"  ✓ Escrito: {os.path.basename(ruta)} → hoja '{hoja}'")
+```
