@@ -1,0 +1,47 @@
+**Bloque 1 (agregar):** `Ctrl+F` → `def actualizar_DQ_SIS(`. Pega esto justo **encima** de esa línea, con dos líneas en blanco de separación:
+
+```python
+def _clave_sis(fondo_fecha: pd.Series) -> pd.Series:
+    """Clave única por fila: 'HA-FONDO1|20260616' (AFP-Fondo + fecha de reporte)."""
+    p = fondo_fecha.astype(str).str.strip().str.split("_", n=1, expand=True)
+    if p.shape[1] < 2:
+        return pd.Series(np.nan, index=fondo_fecha.index, dtype="object")
+    f = pd.to_datetime(p[1], format="mixed", dayfirst=True, errors="coerce")
+    return p[0] + "|" + f.dt.strftime("%Y%m%d")
+```
+
+**Bloque 2 (reemplazar):** `Ctrl+F` → `base = DQ_SIS_BD.copy()`. Solo hay una coincidencia, dentro de `actualizar_DQ_SIS`. Borra desde esa línea hasta `return pd.concat([final_hist, nuevos], ignore_index=True)` (esa línea incluida) y pega esto, con la misma indentación de 4 espacios:
+
+```python
+    base = DQ_SIS_BD.copy()
+    base.columns = base.iloc[0].to_list()
+    base_h = base.drop(base.index[0])
+    base_h = base_h.loc[:, ~base_h.columns.duplicated()]
+    hist = base_h.iloc[2:]          # las 2 primeras filas son TEST (Nombre/Tick)
+
+    if "Fondo_Fecha" not in hist.columns or "Fondo_Fecha" not in filtrada.columns:
+        fallar("DQ_SIS: falta la columna 'Fondo_Fecha' en el Monitor o en el QEST.")
+
+    claves_mon = _clave_sis(hist["Fondo_Fecha"]).dropna()
+    if claves_mon.empty:
+        fallar("DQ_SIS: no hay ninguna 'Fondo_Fecha' válida en el Monitor.")
+    ult = pd.to_datetime(claves_mon.str.split("|").str[1].max())
+    print(f"DQ SIS — última fecha de reporte en Monitor: {ult:%d-%m-%Y}")
+
+    claves_qest = _clave_sis(filtrada["Fondo_Fecha"])
+    es_nuevo = (claves_qest.notna()
+                & ~claves_qest.isin(set(claves_mon))
+                & ~claves_qest.duplicated(keep="first"))
+    nuevos = filtrada.loc[es_nuevo].reset_index(drop=True).dropna(how="all")
+    nuevos = nuevos.loc[:, ~nuevos.columns.duplicated()]
+
+    if nuevos.empty:
+        print("DQ SIS — sin registros nuevos (Monitor ya al día).")
+    else:
+        print(f"DQ SIS — {len(nuevos)} registros nuevos anexados.")
+    return pd.concat([base_h, nuevos], ignore_index=True)
+```
+
+No borres `buscar_fecha`, porque `actualizar_DQ_IN` la sigue usando.
+
+Lo probé con los archivos del proyecto. El código original reproduce tu mismo error y con el parche corre. Una segunda corrida no duplica filas y un último día incompleto se completa. No pude probarlo con tu QEST y Monitor actuales de septiembre.
