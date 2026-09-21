@@ -1,0 +1,28 @@
+Encontré la causa y es una sola línea. Al abrir tu `Dashboard_Huella.html` sale `Unexpected token ')'` dentro de `render()`, y comparé `Huella_355` con mi versión verificada.
+
+En el paso 3, el reemplazo de `gAUM` eran 2 líneas y en tu script quedó solo la segunda. Sobra un `)` suelto, el `<script>` completo no compila y por eso todo sale vacío.
+
+**Arreglo:**
+Ctrl+F: `getElementById('selAfpAUM') ?`. Cae en `render()`, en una línea que empieza con `    document.getElementById('selAfpAUM') ? ...`, justo debajo del bloque de `gSoberanosInt`. Pon el cursor al inicio de esa línea y pega arriba, en una línea nueva:
+
+```js
+  safe('gAUM',          () => sunburstCobertura('gAUM', cAct, cCmp,
+```
+
+Debe quedar así:
+
+```js
+  safe('gSoberanosInt', () => soberanosEjecutivo('gSoberanosInt','Intensidad', cAct, cCmp,
+    document.getElementById('selAfpSoberanosInt') ? document.getElementById('selAfpSoberanosInt').value : 'Integra'));
+  safe('gAUM',          () => sunburstCobertura('gAUM', cAct, cCmp,
+    document.getElementById('selAfpAUM') ? document.getElementById('selAfpAUM').value : 'Integra'));
+  safe('gSector52',     () => sectorEjecutivo('gSector52','Huella', cAct, cCmp,
+```
+
+Opcional: Ctrl+F `pie del corte actual` y borra esa línea de comentario, que es un resto de la función vieja e inofensivo.
+
+Apliqué esa línea a tu HTML real y cargan los 18 charts, con datos reales. La dona de Jun26 (Integra) se ve bien.
+
+Para ver el resultado, vuelve a generar el HTML. No hace falta recalcular: el histórico ya quedó completo con las 5 AFP. Puedes llamar `construir_dashboard(ruta_historico, ruta_salida)` con las rutas de "Histórico" y "Dashboard" que imprime tu log, o simplemente volver a correr el script.
+
+La dona de Dic25 seguirá diciendo "Sin datos de cobertura" hasta que corras `PERIODO = "202512"`, como comentamos.
