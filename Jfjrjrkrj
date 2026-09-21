@@ -1,0 +1,38 @@
+Mi parche sí corrió. El log muestra **24 objetos** por AFP (antes eran 23) y el dashboard y `Datos_Graficos` se generaron. El único error real del log no viene de mis cambios.
+
+**1. Error real: Prima no se exportó**
+`PermissionError` al escribir `Huella_Historico.xlsx`. Cada AFP relee y reescribe ese archivo completo en la Z:, y en ese instante algo lo tenía tomado (Excel, vista previa, antivirus o sincronización). Fallaron solo Prima; Ex_Integra, Habitat, Integra y Profuturo se exportaron bien. Por eso salió "Generando con 4 AFP(s)" y Prima no está en el dashboard.
+
+Cierra cualquier programa que tenga abierto ese archivo y vuelve a correr todo con `AFPS = None`. No lo corras solo para Prima, porque el peer group de benchmarks se arma con las AFP que corren en esa ejecución.
+
+**2. Donde me quedé corto: la dona de comparación**
+Cada corrida procesa un solo corte (aquí 202606). Cuando dije "corre el pipeline una vez" me equivoqué. El corte de comparación (Dic25) no tiene el objeto nuevo, así que esa dona mostrará "Sin datos de cobertura para Dic25" hasta que corras también `PERIODO = "202512"`, con `BD1S_ANIO = "2025"` y `BD1S_MES = "12"`. Puedes hacerlo en cualquier orden; el dashboard sigue tomando el corte más reciente como actual.
+
+**3. Avisos que no vienen de mi parche**
+- El `SyntaxWarning "\s"` viene de `_wrapName`, una función que ya existía. Es solo un aviso y el JS funciona igual.
+- El `[FALTA] hoja T-1 '202605'` sale del blindaje de `Config`, que no toqué. No detuvo la corrida.
+
+**Opcional: reintento automático para que un bloqueo no vuelva a tumbar una AFP**
+Ctrl+F: `with pd.ExcelWriter(exp.ruta, engine="openpyxl") as xw:`. Selecciona ese `with` y sus 5 líneas de cuerpo (la última es `df.to_excel(xw, sheet_name=str(nombre)[:31], index=False)`) y reemplázalo por:
+
+```python
+    import time
+    for _intento in range(1, 6):
+        try:
+            with pd.ExcelWriter(exp.ruta, engine="openpyxl") as xw:
+                historico.to_excel(xw, sheet_name=exp.HOJA_HISTORICO, index=False)
+                meta.to_excel(xw, sheet_name=exp.HOJA_META, index=False)
+                largo.to_excel(xw, sheet_name=nombre_hoja, index=False)
+                for nombre, df in sorted(otros.items(), reverse=True):
+                    df.to_excel(xw, sheet_name=str(nombre)[:31], index=False)
+            break
+        except PermissionError:
+            if _intento == 5:
+                raise
+            print(f"  [{afp}] [AVISO] Huella_Historico.xlsx bloqueado; reintento {_intento}/5 en 5 s...")
+            time.sleep(5)
+```
+
+Para confirmar que el parche escribió bien, abre `Huella_Historico.xlsx`, hoja `HISTORICO`, y filtra `OBJETO = AUM_Rank_x_Cobertura`. Debe haber filas de 202606 para las AFP que sí se exportaron.
+
+Si no quieres correr 202512, puedo dejar el chart con una sola dona (corte actual). Y si además ves algo raro en el dashboard mismo, mándame una captura.
