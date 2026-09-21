@@ -1,0 +1,214 @@
+Ahora armo un banco de pruebas con datos reales del workbook para validar el JS antes de entregarlo.
+
+Son 6 cambios: 2 en la capa de datos (Python), 2 en el JS del dashboard y 2 en la generación del HTML (Python). Probé el chart renderizado con la data real de tu `Reporte ... 202606`.
+
+---
+
+**1) Python — método nuevo en `PresentacionBuilder`**
+
+Ctrl+F: `def aum_rank_x_plus1(self) -> pd.DataFrame:`. Son 5 líneas y la última es `        return out`. Pega el bloque debajo de ese `return out`, dejando una línea en blanco y con la misma indentación de 4 espacios.
+
+```python
+    # --------------------------------------------------------------------------
+    # AUM por Rank_rt x Tipo de cobertura (Cobertura MSCI vs Proxies)
+    #   -> chart sunburst gAUM ("Composición de cobertura por asset class")
+    # Regla: Plus == 'Proxies' -> "Proxies"; cualquier otro Plus -> "Cobertura".
+    # --------------------------------------------------------------------------
+    def aum_rank_x_cobertura(self) -> pd.DataFrame:
+        d = self.df.copy()
+        # d = d[d[COL["rank_rt"]] != "Cash"]   # descomentar para excluir Cash del círculo
+        if COL["plus"] in d.columns:
+            es_proxy = d[COL["plus"]] == "Proxies"
+        else:
+            es_proxy = pd.Series(False, index=d.index)
+        d["Tipo_Cobertura"] = np.where(es_proxy, "Proxies", "Cobertura")
+        out = _agg(d, [COL["rank_rt"], "Tipo_Cobertura"], [COL["inv"]])
+        total = out[COL["inv"]].sum()
+        out["% AUM"] = np.where(total, out[COL["inv"]] / total, 0.0)
+        return out
+```
+
+---
+
+**2) Python — registrar el objeto en `build_all`**
+
+Ctrl+F: `"AUM_Rank_x_Plus1": self.aum_rank_x_plus1(),`. Deja esa línea y agrega debajo, con la misma indentación:
+
+```python
+            "AUM_Rank_x_Cobertura": self.aum_rank_x_cobertura(),
+```
+
+---
+
+**3) JS — `render()`: quitar 3 charts y cambiar la llamada de `gAUM`**
+
+- Ctrl+F `safe('gHuellaBloque'` y borra esa línea completa.
+- Ctrl+F `safe('gIntBloque'` y borra esa línea completa.
+- Ctrl+F `safe('gEstrategia'` y borra esa línea completa. No toques `safe('gIntEstrategia'`, que se queda.
+- Ctrl+F `pieAUM('gAUM', cAct, cCmp)`. Reemplaza toda esa línea `safe('gAUM', ...)` por:
+
+```js
+  safe('gAUM',          () => sunburstCobertura('gAUM', cAct, cCmp,
+    document.getElementById('selAfpAUM') ? document.getElementById('selAfpAUM').value : 'Integra'));
+```
+
+---
+
+**4) JS — reemplazar la función `pieAUM` por el sunburst**
+
+Ctrl+F: `function pieAUM(`. Selecciona desde el comentario de la línea anterior (`// --- composición del AUM: pie del corte actual...`) hasta el `}` que cierra la función. Ese `}` está justo debajo de la línea `], Object.assign(lay,{grid:{rows:1,columns:2}}), OPTS);`. Borra todo eso y pega en su lugar:
+
+```js
+// --- Cobertura por asset class (Rank_rt): sunburst / donut de 2 anillos ------
+// Anillo interno = asset class (Rank_rt): ángulo proporcional a su peso sobre el
+// 100% del portafolio. Anillo externo = Cobertura (relleno sólido, MSCI) y
+// Proxies (fondo blanco + líneas horizontales) dentro del MISMO rango angular
+// de su asset class. Se arma con 2 pies concéntricos de radios distintos (así el
+// anillo interno es más ancho) y un sector blanco entre asset classes con el
+// mismo valor en ambos anillos, para que los ángulos coincidan exactamente.
+const PALETA_ASSET = ['#5BA4D8','#70B2E0','#84C0E6','#96CBEB','#A6D5EF',
+                      '#B4DCF2','#C1E3F5','#68ABDC','#8DC5E9','#AED8F0'];
+
+function _cobPorRank(corte, afp){
+  const m = new Map();
+  for(const r of HIST){
+    if(r.OBJETO!=='AUM_Rank_x_Cobertura' || r.METRICA!=='Inv MM$') continue;
+    if(String(r.FECHA_CORTE)!==String(corte) || (r.AFP||'Integra')!==afp) continue;
+    const k = r.DIM_1;
+    if(!k || k==='nan' || k==='None') continue;
+    const o = m.get(k) || {Cobertura:0, Proxies:0};
+    if(r.DIM_2==='Proxies') o.Proxies += (+r.VALOR||0); else o.Cobertura += (+r.VALOR||0);
+    m.set(k, o);
+  }
+  for(const [k,o] of [...m.entries()]){
+    o.Cobertura = Math.max(0, o.Cobertura); o.Proxies = Math.max(0, o.Proxies);
+    if(o.Cobertura + o.Proxies <= 1e-9) m.delete(k);
+  }
+  return m;
+}
+
+function sunburstCobertura(div, cAct, cCmp, afp){
+  afp = afp || 'Integra';
+  const UMBRAL_INT = 0.035;   // mín. % del portafolio para rotular un asset class
+  const UMBRAL_EXT = 0.025;   // mín. % del portafolio para rotular Cobertura/Proxies
+  const GAP_REL    = 0.006;   // sector blanco entre asset classes (% del total)
+  const ESC_INT    = 0.66;    // radio anillo interno / radio anillo externo
+  const HOLE_EXT   = 0.70;    // hueco del anillo externo (fracción de su radio)
+  const HOLE_INT   = 0.30 / ESC_INT;   // hueco del anillo interno (fracción de su radio)
+  const COL_TXT = '#0B3C5D', BLANCO = '#FFFFFF';
+
+  const pct = v => v <= 0 ? '0%' : (v < 0.0005 ? '<0.1%' :
+    (v*100).toLocaleString('es-PE', {maximumFractionDigits:1}) + '%');
+  const wDe = (d,k) => d.has(k) ? d.get(k).Cobertura + d.get(k).Proxies : 0;
+  const totDe = d => [...d.values()].reduce((s,o) => s + o.Cobertura + o.Proxies, 0);
+
+  const dA = _cobPorRank(cAct, afp), dB = _cobPorRank(cCmp, afp);
+  // Orden y color fijos por asset class (peso desc. en el corte actual) para
+  // que la comparación entre cortes sea directa.
+  const orden = [...new Set([...dA.keys(), ...dB.keys()])]
+    .sort((x,y) => (wDe(dA,y)-wDe(dA,x)) || (wDe(dB,y)-wDe(dB,x)));
+  const colorDe = k => PALETA_ASSET[orden.indexOf(k) % PALETA_ASSET.length];
+  const dominio = (x0, x1, esc) => {
+    const cx = (x0+x1)/2, mx = (x1-x0)/2*esc;
+    return {x:[cx-mx, cx+mx], y:[0.5-0.5*esc, 0.5+0.5*esc]};
+  };
+
+  const donut = (d, x0, x1) => {
+    const clases = orden.filter(k => d.has(k));
+    const total = totDe(d);
+    if(!clases.length || !total) return [];
+    const gap = total * GAP_REL;
+    const iV=[], iC=[], iT=[], iH=[];
+    const oV=[], oC=[], oT=[], oH=[], oLn=[], oLw=[], oSh=[], oBg=[], oFg=[];
+    clases.forEach(k => {
+      const c = d.get(k).Cobertura, p = d.get(k).Proxies, w = c + p, col = colorDe(k);
+      iV.push(w); iC.push(col);
+      iT.push(w/total >= UMBRAL_INT ? '<b>'+k+'</b><br>'+pct(w/total) : '');
+      iH.push('<b>'+k+'</b><br>'+fmt(w)+' MM$ — '+pct(w/total)+' del portafolio'
+              +'<br>Cobertura '+pct(c/w)+' · Proxies '+pct(p/w));
+      [['Cobertura', c], ['Proxies', p]].forEach(par => {
+        const tipo = par[0], v = par[1];
+        if(v <= 0) return;
+        oV.push(v); oLn.push(col); oLw.push(v/total < 0.0005 ? 0 : 1.5);
+        oT.push(v/total >= UMBRAL_EXT ? pct(v/total) : '');
+        oH.push('<b>'+k+' — '+tipo+'</b><br>'+fmt(v)+' MM$ — '+pct(v/total)+' del portafolio'
+                +'<br>'+pct(v/w)+' del asset class');
+        if(tipo==='Cobertura'){ oC.push(col); oSh.push(''); oBg.push(col); oFg.push(col); }
+        else { oC.push(BLANCO); oSh.push('-'); oBg.push(BLANCO); oFg.push(col); }
+      });
+      // sector blanco de separación (mismo valor en ambos anillos)
+      iV.push(gap); iC.push(BLANCO); iT.push(''); iH.push('');
+      oV.push(gap); oC.push(BLANCO); oT.push(''); oH.push(''); oLn.push(BLANCO); oLw.push(0);
+      oSh.push(''); oBg.push(BLANCO); oFg.push(BLANCO);
+    });
+    const base = {type:'pie', sort:false, direction:'clockwise', rotation:0,
+                  textinfo:'text', textposition:'inside', hoverinfo:'text', showlegend:false};
+    const trExt = Object.assign({}, base, {
+      values:oV, text:oT, hovertext:oH, hole:HOLE_EXT, domain:dominio(x0, x1, 1),
+      insidetextfont:{size:11, color:COL_TXT, family:CFG.fuente},
+      marker:{colors:oC, line:{color:oLn, width:oLw},
+              pattern:{shape:oSh, bgcolor:oBg, fgcolor:oFg, size:7, solidity:0.3}}});
+    const trInt = Object.assign({}, base, {
+      values:iV, text:iT, hovertext:iH, hole:HOLE_INT, domain:dominio(x0, x1, ESC_INT),
+      insidetextfont:{size:11.5, color:COL_TXT, family:CFG.fuente},
+      insidetextorientation:'horizontal',
+      marker:{colors:iC, line:{color:BLANCO, width:1}}});
+    return [trExt, trInt];
+  };
+
+  const ann = [
+    {text:'<b>'+etiquetaCorte(cAct)+'</b>', x:0.25, y:1.03, xref:'paper', yref:'paper',
+     xanchor:'center', yanchor:'bottom', showarrow:false, font:{size:13}},
+    {text:'<b>'+etiquetaCorte(cCmp)+'</b>', x:0.75, y:1.03, xref:'paper', yref:'paper',
+     xanchor:'center', yanchor:'bottom', showarrow:false, font:{size:13}},
+    {text:'<span style="color:#5BA4D8">■</span> Relleno sólido: Cobertura (MSCI)'
+         +' &nbsp;&nbsp;&nbsp;&nbsp; <span style="color:#5BA4D8">▤</span> Relleno hachurado: Proxies',
+     x:0.5, y:-0.03, xref:'paper', yref:'paper', xanchor:'center', yanchor:'top',
+     showarrow:false, font:{size:11, color:CFG.color_texto}}
+  ];
+  [[dA, cAct, 0.25], [dB, cCmp, 0.75]].forEach(t => {
+    if(!t[0].size) ann.push({text:'Sin datos de cobertura para '+etiquetaCorte(t[1])
+      +'<br>(re-ejecutar el pipeline de ese corte)', x:t[2], y:0.5, xref:'paper',
+      yref:'paper', xanchor:'center', showarrow:false, font:{size:11, color:'#8A99A8'}});
+  });
+
+  const lay = LAYOUT();
+  lay.height = 660;
+  lay.margin = {l:20, r:20, t:60, b:70};
+  lay.showlegend = false;
+  lay.xaxis = {visible:false};
+  lay.yaxis = {visible:false};
+  lay.annotations = ann;
+  Plotly.react(div, [...donut(dA, 0.02, 0.48), ...donut(dB, 0.52, 0.98)], lay, OPTS);
+}
+```
+
+---
+
+**5) Python — `tarjetas`: quitar 3 cards y retitular `gAUM`**
+
+Ctrl+F: `("gHuellaBloque", "Huella por bloque`. Ahí hay 4 líneas seguidas (`gHuellaBloque`, `gIntBloque`, `gEstrategia`, `gAUM`). Reemplaza las 4 por esta sola línea:
+
+```python
+        ("gAUM", "Composición de cobertura por asset class (Rank_rt) — Cobertura MSCI vs Proxies", True),
+```
+
+---
+
+**6) Python — habilitar el selector de AFP para `gAUM`**
+
+Ctrl+F: `"gContribVarInt": "selAfpContribVarInt"}`. Reemplázalo por:
+
+```python
+"gContribVarInt": "selAfpContribVarInt",
+                        "gAUM": "selAfpAUM"}
+```
+
+---
+
+Notas:
+- **Clasificación:** Proxies es `Plus == "Proxies"`; todo lo demás cuenta como Cobertura, incluidos Cash y Cuestionario Integra, para que el círculo sea el 100% del AUM. En el método hay una línea comentada para excluir Cash.
+- **Re-ejecución:** corre el pipeline completo una vez. El objeto nuevo solo existe en los cortes generados con este patch; los demás mostrarán "Sin datos de cobertura".
+- **Selector de AFP:** el pie anterior sumaba todas las AFP, así que el chart ahora filtra por AFP (Integra por defecto).
+- **Etiquetas omitidas:** los segmentos externos menores a 2.5% y los asset classes menores a 3.5% no llevan etiqueta (se ven en el hover). Ambos umbrales están al inicio de `sunburstCobertura`.
+- **Control "Bloques":** el selector del header queda sin efecto; no lo quité porque no lo pediste.
