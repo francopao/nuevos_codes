@@ -1,0 +1,85 @@
+**1) Excluir la línea "Fuente: Anexo N° 10..."**
+Busca:
+```python
+            if s.startswith("*"):
+                continue
+```
+Reemplaza por:
+```python
+            if s.startswith("*"):
+                continue
+            if low.startswith("fuente"):
+                continue
+```
+
+**2) Tabla de equivalencias + función de normalización**
+Busca:
+```python
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+```
+Agrega justo debajo:
+```python
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+EQUIVALENCIAS_BANCOS = {
+    "BANCO DE CREDITO*": "BANCO DE CREDITO",
+    "MIBANCO*": "MIBANCO",
+    "BANCOM2": "BANCOM",
+    "ICBC PERU BANK S,A,": "ICBC PERU BANK S.A.",
+}
+
+
+def normalizar_banco(nombre):
+    return EQUIVALENCIAS_BANCOS.get(nombre, nombre)
+```
+(Cuando aparezcan variantes nuevas en el print final, agrégalas a este diccionario: `"VARIANTE": "NOMBRE CANONICO"`.)
+
+**3) Función que edita el Excel (solo columna A, nada más)**
+Busca:
+```python
+def main():
+```
+Agrega justo antes:
+```python
+def uniformizar_nombres_excel(path):
+    with open(path, "rb") as f:
+        wb = openpyxl.load_workbook(f, data_only=False)
+    ws = wb[wb.sheetnames[0]]
+    cambios = 0
+    for row in ws.iter_rows(min_row=7, min_col=1, max_col=1):
+        cell = row[0]
+        v = cell.value
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        nuevo = normalizar_banco(s)
+        if nuevo != s:
+            cell.value = nuevo
+            cambios += 1
+    wb.save(path)
+    return cambios
+
+
+def main():
+```
+
+**4) Llamar la normalización antes de leer los nombres**
+Busca:
+```python
+            try:
+                all_names.update(read_bank_names(path))
+            except Exception as e:
+```
+Reemplaza por:
+```python
+            try:
+                cambios = uniformizar_nombres_excel(path)
+                if cambios:
+                    print(f"{MONTH_FOLDER[m]} {y}: {cambios} nombre(s) uniformizado(s)")
+                all_names.update(read_bank_names(path))
+            except Exception as e:
+```
+
+Con esto, cada corrida deja los excels con nombres uniformes en columna A y el print final solo mostrará variantes que aún no estén en `EQUIVALENCIAS_BANCOS`.
