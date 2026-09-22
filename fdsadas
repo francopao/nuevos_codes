@@ -1,0 +1,137 @@
+import os
+import requests
+import openpyxl
+from datetime import datetime
+
+# ============ INPUTS A MANIPULAR ============
+START_DATE = datetime(2024, 1, 1)   # mes/año de inicio (dia siempre 1)
+END_DATE   = None                   # None -> usa el mes actual por defecto. Si se desea otro, ej: datetime(2026, 5, 1)
+# =============================================
+
+BASE_URL   = "https://intranet2.sbs.gob.pe/estadistica/financiera"
+OUTPUT_DIR = r"Z:\Mesa de Inversiones\Bottom-Up\Franco\Créditos por Oficinas SBS"
+VERIFY_SSL = True
+REZAGO_NORMAL_MESES = 4   # SBS suele publicar con 4 meses de rezago
+UMBRAL_ALERTA_MESES = 5   # si el archivo mas reciente esta a >=5 meses de hoy, se alerta
+
+MONTH_ABBR = {1:"en", 2:"fe", 3:"ma", 4:"ab", 5:"my", 6:"jn",
+              7:"jl", 8:"ag", 9:"se", 10:"oc", 11:"no", 12:"di"}
+
+MONTH_FOLDER = {1:"Enero", 2:"Febrero", 3:"Marzo", 4:"Abril", 5:"Mayo", 6:"Junio",
+                7:"Julio", 8:"Agosto", 9:"Setiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"}
+MONTH_FOLDER_ALT = {9: "Septiembre"}  # variante ortografica de respaldo
+
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+
+def month_range(start, end):
+    y, m = start.year, start.month
+    out = []
+    while (y, m) <= (end.year, end.month):
+        out.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return out
+
+
+def download_month(year, month, session):
+    abbr = MONTH_ABBR[month]
+    filename = f"B-2358-{abbr}{year}.XLS"
+    folders_to_try = [MONTH_FOLDER[month]]
+    if month in MONTH_FOLDER_ALT:
+        folders_to_try.append(MONTH_FOLDER_ALT[month])
+
+    last_err = None
+    for folder in folders_to_try:
+        url = f"{BASE_URL}/{year}/{folder}/{filename}"
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=25, verify=VERIFY_SSL)
+        except requests.RequestException as e:
+            last_err = str(e)
+            continue
+        if resp.status_code == 200 and resp.content[:2] == b"PK":
+            path = os.path.join(OUTPUT_DIR, filename)
+            with open(path, "wb") as f:
+                f.write(resp.content)
+            return True, path, None
+        last_err = f"status={resp.status_code}"
+    return False, None, last_err
+
+
+def read_bank_names(path):
+    names = set()
+    with open(path, "rb") as f:
+        wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+        ws = wb[wb.sheetnames[0]]
+        for row in ws.iter_rows(min_row=7, min_col=1, max_col=1, values_only=True):
+            v = row[0]
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            low = s.lower()
+            if "empresa" in low:
+                continue
+            if low.startswith("total"):
+                continue
+            if s.startswith("*"):
+                continue
+            names.add(s)
+    return names
+
+
+def main():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    today = datetime.today()
+    end_date = END_DATE if END_DATE is not None else datetime(today.year, today.month, 1)
+
+    session = requests.Session()
+    results = {}
+
+    for (y, m) in month_range(START_DATE, end_date):
+        ok, path, err = download_month(y, m, session)
+        results[(y, m)] = (ok, path)
+        status = "OK" if ok else f"NO DISPONIBLE ({err})"
+        print(f"{MONTH_FOLDER[m]} {y}: {status}")
+
+    # --- Alerta de rezago del regulador ---
+    if (end_date.year, end_date.month) >= (today.year, today.month):
+        exitosos = [ym for ym, (ok, _) in results.items() if ok]
+        if exitosos:
+            latest = max(exitosos)
+            gap = (today.year - latest[0]) * 12 + (today.month - latest[1])
+        else:
+            latest = None
+            gap = 999
+
+        if gap >= UMBRAL_ALERTA_MESES:
+            print("\n" + "!" * 60)
+            if latest:
+                print(f"ALERTA: el archivo mas reciente disponible es {MONTH_FOLDER[latest[1]]} {latest[0]} "
+                      f"({gap} meses de rezago respecto a hoy).")
+            else:
+                print("ALERTA: no se encontro ningun archivo valido en el rango solicitado.")
+            print(f"El rezago normal de la SBS es de {REZAGO_NORMAL_MESES} meses. Revisar si hay un problema con el regulador.")
+            print("!" * 60)
+
+    # --- Lectura rapida de nombres de bancos (columna A) ---
+    all_names = set()
+    for (y, m), (ok, path) in sorted(results.items()):
+        if ok and path:
+            try:
+                all_names.update(read_bank_names(path))
+            except Exception as e:
+                print(f"Error leyendo {path}: {e}")
+
+    print("\n" + "=" * 60)
+    print(f"Nombres unicos encontrados en columna A ({len(all_names)}):")
+    for n in sorted(all_names):
+        print(n)
+
+
+if __name__ == "__main__":
+    main()
