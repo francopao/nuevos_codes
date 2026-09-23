@@ -1,0 +1,790 @@
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+EVOLUCIÓN HISTÓRICA DEL RIESGO FÍSICO (CENEPRED) — AFP INTEGRA
+================================================================================
+Qué hace este script
+---------------------
+Lee TODOS los Excel "Riesgos Climáticos - <semestre><año2>.xlsx" que encuentre
+en una carpeta (los que exporta Physical Risk 330, uno por corte semestral),
+arma una BASE PANEL (empresa/sector/portafolio × semestre) y genera un HTML
+autocontenido con 3 gráficos pensados para leer EVOLUCIÓN, no una foto:
+
+  1) Línea de dos trazos   -> % del AUM en niveles 4-5 (bruto) vs. esa misma
+                              exposición SIN mitigante Alto/Medio (no mitigada).
+  2) Puente entre 2 cortes -> descompone el cambio del AUM en 4-5 en:
+                              tamaño (Position), huella/reclasificación (score),
+                              emisores nuevos, emisores que salieron.
+  3) Heatmap emisor x corte -> % en 4-5 por emisor y semestre, con Δ, Posición
+                              y Mitigante vigente al costado.
+
+De cada archivo SOLO se leen 4 hojas: "Activos por Empresa", "Score por
+Empresa", "Score por Sector" y "Mitigantes". Cualquier otra hoja se ignora.
+
+Filosofía (igual que Physical Risk 330)
+----------------------------------------
+- Nada de "black box": cada número del HTML se puede reconstruir a mano desde
+  el panel intermedio que este script también exporta a Excel.
+- Nombres de empresa distintos entre "Activos/Score por Empresa" (universo
+  canónico) y la hoja "Mitigantes" (a veces escrita a mano, con typos o con
+  un nombre agregador como "InRetail") se resuelven vía el diccionario
+  EQUIV_MITIGANTE de abajo. Lo que NO se resuelve se reporta como WARNING
+  y punto: nunca se adivina un mitigante por parecido de nombre.
+- Todo lo editable (rutas, patrón de archivo, umbrales, colores) vive en el
+  bloque CONFIG.
+================================================================================
+"""
+
+import os
+import re
+import glob
+import json
+import unicodedata
+from datetime import datetime
+
+import pandas as pd
+import numpy as np
+import openpyxl
+
+# ==============================================================================
+# 1) CONFIG — EDITAR AQUÍ
+# ==============================================================================
+
+# Carpeta donde viven los "Riesgos Climáticos - <sem><yy>.xlsx" (la misma
+# carpeta OUT_DIR de Physical Risk 330). Cambia esta ruta por la tuya.
+INPUT_DIR = os.environ.get(
+    "RF_EVOL_INPUT",
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos\Python\Output",
+)
+
+# Carpeta de salida (HTML + Excel de auditoría).
+OUT_DIR = os.environ.get("RF_EVOL_OUT", os.path.join(INPUT_DIR, "Evolucion"))
+
+# Patrón de nombre de archivo: "Riesgos Climáticos - 1S26.xlsx", "... 2S25.xlsx", etc.
+FILE_PATTERN = re.compile(r"Riesgos\s*Clim[aá]ticos\s*-\s*([12])S(\d{2})\.xlsx$", re.IGNORECASE)
+
+# Peligros CENEPRED (mismas 3 columnas que exporta Physical Risk 330).
+HAZARDS = [
+    {"key": "mm", "col": "Score MM", "label": "Movimientos de Masa"},
+    {"key": "inu", "col": "Score Inund.", "label": "Inundación"},
+    {"key": "seq", "col": "Score Sequía", "label": "Sequías Severas"},
+]
+
+# Niveles que se consideran "alto riesgo" (mismo criterio que el dashboard).
+NIVELES_ALTOS = [4, 5]
+
+# Mitigantes que cuentan como "NO mitigada" en el chart 1 (conservador: Bajo
+# y "sin evaluar" pesan igual, sin ponderaciones inventadas).
+MITIGANTES_NO_CUBRE = {"Bajo", "\u2014", "-", "N/D", ""}
+
+# Diccionario EDITABLE de equivalencias Empresa (Activos/Score por Empresa)
+# -> nombre EXACTO como aparece en la hoja "Mitigantes". Solo agrega aquí
+# cuando el script te avise (log WARN) que no pudo resolver un mitigante;
+# nunca lo completes "a ojo" sin confirmar con la fuente.
+EQUIV_MITIGANTE = {
+    "Nexa Resources Perú": "Nexa Perú",
+    "Hochschild": "Hochshild",          # typo real en el archivo Mitigantes
+    "InRetail Consumer": "InRetail",
+    "Inretail Peru Corp": "InRetail",
+    "InRetail Shopping Malls": "InRetail",
+}
+
+# Paleta corporativa AFP Integra (idéntica a Physical Risk 330).
+AFP_AZUL = "#1E2E6E"
+AFP_CYAN = "#00AECB"
+AFP_AMAR = "#E3E829"
+AFP_GRIS = "#DCDDDE"
+AFP_PLOMO = "#7E8083"
+AFP_ROJO = "#C0392B"
+
+# ==============================================================================
+# 2) UTILIDADES
+# ==============================================================================
+
+def log(msg, level="INFO"):
+    print(f"[{level}] {msg}")
+
+
+def norm(s):
+    """Normaliza texto para comparar: sin acentos, mayúsculas, espacios simples."""
+    s = str(s or "").strip()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s).upper()
+
+
+def periodo_orden(periodo):
+    """'1S25' -> (2025,1), '2S26' -> (2026,2). Sirve para ordenar cronológicamente."""
+    m = re.match(r"([12])S(\d{2})", periodo)
+    sem, yy = int(m.group(1)), int(m.group(2))
+    return (2000 + yy, sem)
+
+
+def periodo_siguiente_nombre(periodo):
+    """Solo para etiquetas legibles: '1S25' -> 'Jun25', '2S25' -> 'Dic25'."""
+    sem, yy = periodo[0], periodo[2:]
+    return ("Jun" if sem == "1" else "Dic") + yy
+
+
+def detect_header_row(df_raw, required_tokens, max_scan=12):
+    """Busca, entre las primeras filas, la que contiene TODOS los required_tokens
+    (comparados normalizados). Devuelve el índice de fila (0-based) o None."""
+    req = [norm(t) for t in required_tokens]
+    for i in range(min(max_scan, len(df_raw))):
+        vals = {norm(v) for v in df_raw.iloc[i].tolist() if v is not None}
+        if all(r in vals for r in req):
+            return i
+    return None
+
+
+def find_input_files(input_dir):
+    """Encuentra todos los 'Riesgos Climáticos - <sem><yy>.xlsx' en la carpeta,
+    devuelve lista de (periodo, ruta) ordenada cronológicamente."""
+    if not os.path.isdir(input_dir):
+        raise SystemExit(
+            f"No existe la carpeta INPUT_DIR:\n  {input_dir}\n"
+            f"-> Edita INPUT_DIR al inicio del script (o la variable de entorno RF_EVOL_INPUT)."
+        )
+    out = []
+    for path in glob.glob(os.path.join(input_dir, "*.xlsx")):
+        m = FILE_PATTERN.search(os.path.basename(path))
+        if not m:
+            continue
+        periodo = f"{m.group(1)}S{m.group(2)}"
+        out.append((periodo, path))
+    if not out:
+        raise SystemExit(
+            f"No se encontró ningún archivo 'Riesgos Climáticos - <sem><yy>.xlsx' en:\n"
+            f"  {input_dir}\n-> Revisa INPUT_DIR y el patrón de nombre."
+        )
+    out.sort(key=lambda t: periodo_orden(t[0]))
+    return out
+
+
+# ==============================================================================
+# 3) LECTURA DE LAS 4 HOJAS POR ARCHIVO
+# ==============================================================================
+
+def load_activos_por_empresa(path):
+    raw = pd.read_excel(path, sheet_name="Activos por Empresa", header=None)
+    hdr = detect_header_row(raw, ["Empresa", "Sector", "Plata del Activo (S/)"])
+    if hdr is None:
+        raise SystemExit(f"'{path}': no se ubicó el encabezado en 'Activos por Empresa'.")
+    df = pd.read_excel(path, sheet_name="Activos por Empresa", header=hdr)
+    df.columns = [str(c).strip() for c in df.columns]
+    req = ["Empresa", "Sector", "AUM Total Empresa (S/)", "Plata del Activo (S/)"] + \
+          [h["col"] for h in HAZARDS]
+    faltan = [c for c in req if c not in df.columns]
+    if faltan:
+        raise SystemExit(f"'{path}': faltan columnas en 'Activos por Empresa': {faltan}")
+    return df
+
+
+def load_score_empresa(path):
+    raw = pd.read_excel(path, sheet_name="Score por Empresa", header=None)
+    hdr = detect_header_row(raw, ["Empresa", "Sector", "Score Global"])
+    if hdr is None:
+        raise SystemExit(f"'{path}': no se ubicó el encabezado en 'Score por Empresa'.")
+    df = pd.read_excel(path, sheet_name="Score por Empresa", header=hdr)
+    df.columns = [str(c).strip() for c in df.columns]
+    mit_cols = [c for c in df.columns if norm(c).startswith("MITIGANTE")]
+    if not mit_cols:
+        raise SystemExit(f"'{path}': no se halló una columna 'Mitigante (...)' en 'Score por Empresa'.")
+    df = df.rename(columns={mit_cols[0]: "Mitigante_ScorePorEmpresa"})
+    return df
+
+
+def load_score_sector(path):
+    raw = pd.read_excel(path, sheet_name="Score por Sector", header=None)
+    hdr = detect_header_row(raw, ["Sector", "Score Global"])
+    if hdr is None:
+        raise SystemExit(f"'{path}': no se ubicó el encabezado en 'Score por Sector'.")
+    df = pd.read_excel(path, sheet_name="Score por Sector", header=hdr)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def load_mitigantes(path):
+    raw = pd.read_excel(path, sheet_name="Mitigantes", header=None)
+    hdr = detect_header_row(raw, ["Empresa", "Mitigante"])
+    if hdr is None:
+        raise SystemExit(f"'{path}': no se ubicó el encabezado en 'Mitigantes'.")
+    df = pd.read_excel(path, sheet_name="Mitigantes", header=hdr)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df[["Empresa", "Mitigante"]].dropna(subset=["Empresa"])
+
+
+def resolver_mitigante(empresa, mitigantes_df, score_empresa_row, periodo, sin_resolver):
+    """Prioridad: hoja 'Mitigantes' (fuente canónica) -> fallback a la columna
+    Mitigante de 'Score por Empresa' -> si nada calza, "\u2014" y se reporta."""
+    buscar = EQUIV_MITIGANTE.get(empresa, empresa)
+    fila = mitigantes_df[mitigantes_df["Empresa"].apply(norm) == norm(buscar)]
+    if len(fila):
+        val = str(fila.iloc[0]["Mitigante"]).strip()
+        return val if val else "\u2014"
+    if score_empresa_row is not None and pd.notna(score_empresa_row.get("Mitigante_ScorePorEmpresa")):
+        return str(score_empresa_row["Mitigante_ScorePorEmpresa"]).strip()
+    sin_resolver.add((periodo, empresa))
+    return "\u2014"
+
+
+# ==============================================================================
+# 4) CONSTRUCCIÓN DEL PANEL (empresa / sector / portafolio) × PERIODO
+# ==============================================================================
+
+def montos_por_nivel(df_activos, group_col, hazard_col):
+    """Devuelve {clave_grupo: {nivel(1..5 o 'ND'): monto S/}}. 'ND' agrupa
+    cualquier score no interpretable como 1-5 (N/D, vacío, texto raro)."""
+    def nivel(v):
+        try:
+            iv = int(float(v))
+            return iv if iv in (1, 2, 3, 4, 5) else "ND"
+        except (TypeError, ValueError):
+            return "ND"
+    tmp = df_activos.copy()
+    tmp["_nivel"] = tmp[hazard_col].apply(nivel)
+    out = {}
+    for key, g in tmp.groupby(group_col):
+        out[key] = g.groupby("_nivel")["Plata del Activo (S/)"].sum().to_dict()
+    return out
+
+
+def build_panel(files):
+    """files: lista [(periodo, path), ...] ya ordenada cronológicamente.
+    Devuelve: panel_emisor (list of dict), panel_sector (list of dict),
+    panel_portafolio (list of dict), y advertencias acumuladas."""
+    panel_emisor, panel_sector, panel_portafolio = [], [], []
+    sin_resolver = set()
+    brecha_mapeo = []  # (periodo, empresa, aum_reportado, aum_mapeado) cuando difieren
+
+    for periodo, path in files:
+        log(f"Leyendo {periodo}: {os.path.basename(path)}")
+        act = load_activos_por_empresa(path)
+        se = load_score_empresa(path)
+        mit = load_mitigantes(path)
+
+        se_idx = se.set_index("Empresa")
+
+        # ---- por empresa: montos por nivel y por peligro ----
+        # OJO: el total por peligro (total_h, abajo) se recalcula SUMANDO los
+        # activos de "Activos por Empresa" fila por fila. Para varios emisores
+        # esto NO coincide con la columna "AUM Total Empresa (S/)"/"AUM Total
+        # (S/)" de Score por Empresa: parte de su AUM no tiene NINGÚN activo
+        # geolocalizado ese semestre (líneas de negocio sin hoja de ubicación,
+        # holdings sin distribución, etc. — mismo caso que Physical Risk 330
+        # reporta como "se omite ese renglón"). Usamos el AUM REALMENTE
+        # MAPEADO (suma de activos) como denominador de los %, para que
+        # coincida exactamente con la Posición usada en el puente (chart 2);
+        # la diferencia con el AUM reportado se registra como advertencia.
+        montos_emp = {h["key"]: montos_por_nivel(act, "Empresa", h["col"]) for h in HAZARDS}
+        aum_reportado_map = act.groupby("Empresa")["AUM Total Empresa (S/)"].first().to_dict()
+
+        empresas = sorted(set(act["Empresa"]) | set(se["Empresa"]))
+        for emp in empresas:
+            sector = None
+            if emp in act["Empresa"].values:
+                sector = act.loc[act["Empresa"] == emp, "Sector"].iloc[0]
+            elif emp in se_idx.index:
+                sector = se_idx.loc[emp, "Sector"]
+            se_row = se_idx.loc[emp].to_dict() if emp in se_idx.index else None
+            mitigante = resolver_mitigante(emp, mit, se_row, periodo, sin_resolver)
+
+            # AUM mapeado = suma de "Plata del Activo" para esta empresa (idéntico
+            # sin importar qué peligro se use para agrupar, porque son las mismas
+            # filas). Si la empresa no tiene NINGÚN activo, cae en 0.
+            totales_por_hz = {h["key"]: sum(montos_emp[h["key"]].get(emp, {}).values()) for h in HAZARDS}
+            aum_mapeado = max(totales_por_hz.values()) if totales_por_hz else 0.0
+            aum_reportado = float(aum_reportado_map.get(emp, se_row.get("AUM Total (S/)", 0.0) if se_row else 0.0))
+            if abs(aum_reportado - aum_mapeado) > max(1000.0, 0.01 * max(aum_reportado, 1.0)):
+                brecha_mapeo.append((periodo, emp, round(aum_reportado, 2), round(aum_mapeado, 2)))
+
+            row = {
+                "periodo": periodo, "empresa": emp, "sector": sector,
+                "aum_total": round(aum_mapeado, 2), "aum_reportado": round(aum_reportado, 2),
+                "mitigante": mitigante,
+                "score_global": (round(float(se_row["Score Global"]), 2)
+                                 if se_row and pd.notna(se_row.get("Score Global")) else None),
+            }
+            for h in HAZARDS:
+                niveles = montos_emp[h["key"]].get(emp, {})
+                total_h = sum(niveles.values())
+                alto_h = sum(v for k, v in niveles.items() if k in NIVELES_ALTOS)
+                row[f"aum_{h['key']}_total"] = round(total_h, 2)
+                row[f"aum_{h['key']}_alto"] = round(alto_h, 2)
+                row[f"pct_{h['key']}_alto"] = round(alto_h / total_h, 8) if total_h > 0 else None
+                for niv in (1, 2, 3, 4, 5, "ND"):
+                    row[f"{h['key']}_niv_{niv}"] = round(niveles.get(niv, 0.0), 2)
+            panel_emisor.append(row)
+
+        # ---- por sector: se agrega el mismo 'Activos por Empresa' por Sector ----
+        montos_sec = {h["key"]: montos_por_nivel(act, "Sector", h["col"]) for h in HAZARDS}
+        aum_sector_map = act.groupby("Sector")["Plata del Activo (S/)"].sum().to_dict()
+        for sector, aum_sec in aum_sector_map.items():
+            row = {"periodo": periodo, "sector": sector, "aum_total": round(float(aum_sec), 2)}
+            for h in HAZARDS:
+                niveles = montos_sec[h["key"]].get(sector, {})
+                total_h = sum(niveles.values())
+                alto_h = sum(v for k, v in niveles.items() if k in NIVELES_ALTOS)
+                row[f"aum_{h['key']}_total"] = round(total_h, 2)
+                row[f"aum_{h['key']}_alto"] = round(alto_h, 2)
+                row[f"pct_{h['key']}_alto"] = round(alto_h / total_h, 8) if total_h > 0 else None
+            panel_sector.append(row)
+
+        # ---- portafolio total (denominador único por periodo y peligro) ----
+        row = {"periodo": periodo, "aum_mapeado": round(float(act["Plata del Activo (S/)"].sum()), 2)}
+        emp_mit = {r["empresa"]: r["mitigante"] for r in panel_emisor if r["periodo"] == periodo}
+        for h in HAZARDS:
+            niveles_port = montos_por_nivel(act.assign(_all=1), "_all", h["col"]).get(1, {})
+            total_h = sum(niveles_port.values())
+            valido_h = sum(v for k, v in niveles_port.items() if k != "ND")
+            alto_h = sum(v for k, v in niveles_port.items() if k in NIVELES_ALTOS)
+            # no mitigada = AUM en 4-5 de empresas cuyo mitigante NO cubre
+            no_mit = 0.0
+            for emp, montos in montos_emp[h["key"]].items():
+                alto_emp = sum(v for k, v in montos.items() if k in NIVELES_ALTOS)
+                if emp_mit.get(emp, "\u2014") in MITIGANTES_NO_CUBRE:
+                    no_mit += alto_emp
+            row[f"{h['key']}_total"] = round(total_h, 2)
+            row[f"{h['key']}_valido"] = round(valido_h, 2)
+            row[f"{h['key']}_alto"] = round(alto_h, 2)
+            row[f"{h['key']}_no_mitigada"] = round(no_mit, 2)
+            row[f"{h['key']}_pct_alto"] = round(alto_h / total_h, 8) if total_h > 0 else 0.0
+            row[f"{h['key']}_pct_no_mitigada"] = round(no_mit / total_h, 8) if total_h > 0 else 0.0
+            row[f"{h['key']}_pct_cobertura"] = round(valido_h / total_h, 8) if total_h > 0 else 0.0
+            for niv in (1, 2, 3, 4, 5, "ND"):
+                row[f"{h['key']}_niv_{niv}"] = round(niveles_port.get(niv, 0.0), 2)
+        panel_portafolio.append(row)
+
+    if sin_resolver:
+        log(f"{len(sin_resolver)} par(es) empresa-periodo sin mitigante resuelto "
+            f"(se muestran como \u2014; revisa EQUIV_MITIGANTE o la hoja 'Mitigantes'):", "WARN")
+        for periodo, emp in sorted(sin_resolver):
+            log(f"      {periodo}: '{emp}'", "WARN")
+
+    if brecha_mapeo:
+        log(f"{len(brecha_mapeo)} caso(s) donde el AUM reportado (Score por Empresa) "
+            f"no coincide con el AUM realmente mapeado a un activo físico (Activos por "
+            f"Empresa). Este panel usa el AUM MAPEADO como denominador de los %; la "
+            f"diferencia es AUM sin geolocalizar ese semestre (revisa 'Activos sin "
+            f"Ubigeo' / Holdings en Physical Risk 330 si la brecha te preocupa):", "WARN")
+        for periodo, emp, rep, mapeado in brecha_mapeo:
+            log(f"      {periodo}: '{emp}' — reportado S/ {rep:,.0f} vs. mapeado S/ {mapeado:,.0f}", "WARN")
+
+    return panel_emisor, panel_sector, panel_portafolio
+
+
+# ==============================================================================
+# 5) EXPORTAR PANEL A EXCEL (auditoría — "no black box")
+# ==============================================================================
+
+def export_panel_excel(out_path, panel_emisor, panel_sector, panel_portafolio):
+    with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
+        pd.DataFrame(panel_emisor).to_excel(xw, sheet_name="Panel Emisor", index=False)
+        pd.DataFrame(panel_sector).to_excel(xw, sheet_name="Panel Sector", index=False)
+        pd.DataFrame(panel_portafolio).to_excel(xw, sheet_name="Panel Portafolio", index=False)
+    log(f"Panel de auditoría exportado: {out_path}")
+
+
+# ==============================================================================
+# 6) HTML — plantilla y armado del payload
+# ==============================================================================
+
+_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Evolución del Riesgo Físico — AFP Integra</title>
+<style>
+:root{
+  --azul:__AZUL__; --cyan:__CYAN__; --amar:__AMAR__; --gris:__GRIS__;
+  --plomo:__PLOMO__; --rojo:__ROJO__; --linea:#E4E6EC; --texto:#1F2533;
+}
+*{box-sizing:border-box}
+body{font-family:Calibri,Segoe UI,Arial,sans-serif;margin:0;background:#F6F7FA;color:var(--texto)}
+.topbar{background:var(--azul);color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:center}
+.topbar h1{font-size:19px;margin:0;font-weight:600}
+.topbar .sub{font-size:12px;opacity:.85;margin-top:2px}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 24px 60px}
+.blk{background:#fff;border:1px solid var(--linea);border-radius:10px;padding:18px 20px;margin-bottom:22px}
+.blk h2{font-size:16px;margin:0 0 4px;color:var(--azul)}
+.blk .hl{font-size:13px;color:var(--plomo);margin:0 0 14px}
+.ctrls{display:flex;gap:16px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.ctrls label{font-size:12px;color:var(--plomo);display:flex;align-items:center;gap:6px}
+select{font-size:12px;padding:4px 8px;border:1px solid var(--linea);border-radius:6px}
+.covstrip{display:flex;gap:2px;margin-top:6px}
+.covseg{height:8px;border-radius:2px}
+.legend{display:flex;gap:14px;font-size:11px;color:var(--plomo);margin-top:8px;flex-wrap:wrap}
+.legend span{display:flex;align-items:center;gap:5px}
+.dot{width:9px;height:9px;border-radius:2px;display:inline-block}
+table.heat{border-collapse:collapse;width:100%;font-size:12px}
+table.heat th,table.heat td{padding:6px 8px;border-bottom:1px solid var(--linea);text-align:center}
+table.heat th{color:var(--plomo);font-weight:600;font-size:11px}
+table.heat td.nom{text-align:left;font-weight:600;color:var(--texto)}
+table.heat td.mit{font-size:11px}
+.metod{font-size:12px;color:var(--plomo);margin-top:10px}
+.metod summary{cursor:pointer;color:var(--azul);font-weight:600}
+footer{text-align:center;font-size:11px;color:var(--plomo);padding:20px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div>
+    <h1>Evolución del Riesgo Físico — Activos y Cartera</h1>
+    <div class="sub">Mesa de Inversiones · Bottom-Up · Complemento histórico de Physical Risk 330</div>
+  </div>
+  <div class="sub" id="gen"></div>
+</div>
+
+<div class="wrap">
+
+  <div class="blk">
+    <h2 id="c1title"></h2>
+    <p class="hl">% del AUM mapeado en niveles 4-5 de CENEPRED, y cuánto de eso NO tiene mitigante Alto/Medio.</p>
+    <div class="ctrls">
+      <label>Peligro
+        <select id="selHazard1"></select>
+      </label>
+    </div>
+    <div style="position:relative;height:260px"><canvas id="chart1"></canvas></div>
+    <div id="cov1"></div>
+    <div class="legend">
+      <span><span class="dot" style="background:__AZUL__"></span>AUM en niveles 4-5 (bruto)</span>
+      <span><span class="dot" style="background:__ROJO__"></span>De eso, sin mitigante Alto/Medio</span>
+      <span><span class="dot" style="background:__GRIS__"></span>Cobertura de score CENEPRED (barra inferior)</span>
+    </div>
+  </div>
+
+  <div class="blk">
+    <h2 id="c2title"></h2>
+    <p class="hl">Descompone el cambio del AUM en niveles 4-5 entre dos cortes consecutivos.</p>
+    <div class="ctrls">
+      <label>Peligro
+        <select id="selHazard2"></select>
+      </label>
+      <label>Corte inicial → final
+        <select id="selPar2"></select>
+      </label>
+    </div>
+    <div style="position:relative;height:280px"><canvas id="chart2"></canvas></div>
+  </div>
+
+  <div class="blk">
+    <h2 id="c3title"></h2>
+    <p class="hl">% del AUM del emisor (o sector) en niveles 4-5, por corte. Ordenado por el valor más reciente.</p>
+    <div class="ctrls">
+      <label>Peligro
+        <select id="selHazard3"></select>
+      </label>
+      <label>Vista
+        <select id="selVista3"><option value="emisor">Por emisor</option><option value="sector">Por sector</option></select>
+      </label>
+    </div>
+    <div id="heatwrap" style="overflow-x:auto"></div>
+    <div class="legend" id="leg3"></div>
+    <details class="metod">
+      <summary>Metodología y supuestos</summary>
+      <p>El % por nivel se calcula sobre el AUM realmente MAPEADO de cada empresa/sector en ese
+      corte (suma de "Plata del Activo" en "Activos por Empresa"), no sobre el AUM total reportado
+      en "Score por Empresa": para algunos emisores una parte de su AUM no tiene ningún activo
+      geolocalizado ese semestre, y el script lo excluye del denominador en vez de mezclarlo
+      silenciosamente (revisa el log o el Excel de auditoría, columna "aum_reportado" vs
+      "aum_total"). "Sin dato" (score N/D) tampoco cuenta en el denominador de este panel; la
+      cobertura de score se muestra aparte en el gráfico 1. El "no mitigada" del gráfico 1 trata
+      Bajo y "—" como no cubierto, sin ponderaciones. Cambios de metodología entre semestres
+      (ventana de producción, factor Perú, nuevas empresas-hoja) pueden mover estas cifras sin que
+      el riesgo físico real haya cambiado; revisa siempre el Excel de auditoría del panel antes de
+      sacar conclusiones fuertes de un solo salto entre cortes.</p>
+    </details>
+  </div>
+
+</div>
+<footer>Fuentes: exportes semestrales "Riesgos Climáticos - &lt;semestre&gt;.xlsx" de Physical Risk 330 · Generado __GENERADO__</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const DATA = __PAYLOAD__;
+const AFP = {azul:"__AZUL__",cyan:"__CYAN__",amar:"__AMAR__",gris:"__GRIS__",plomo:"__PLOMO__",rojo:"__ROJO__"};
+const HAZ = DATA.hazards;               // [{key,label}]
+const PERIODOS = DATA.periodos;         // ["1S25","2S25","1S26"] cronológico
+const PLABEL = DATA.periodo_label;      // {periodo: "Jun25"}
+const PORTAFOLIO = DATA.portafolio;     // {periodo: {hazkey: {...}}}
+const EMISOR = DATA.emisor;             // {periodo: {empresa: {...}}}
+const SECTOR = DATA.sector;             // {periodo: {sector: {...}}}
+const EMP_ACTUAL = DATA.emp_actual;     // {empresa: {sector, aum_total, mitigante}} (ultimo periodo)
+
+document.getElementById("gen").textContent = "Generado " + DATA.generado;
+const fmtS = v => "S/ " + (v||0).toLocaleString("es-PE",{maximumFractionDigits:0});
+const fmtP = v => (v==null?"—":(v*100).toLocaleString("es-PE",{maximumFractionDigits:1})+"%");
+
+function fillSelect(sel, opts){ sel.innerHTML = opts.map(o=>`<option value="${o.key}">${o.label}</option>`).join(""); }
+[["selHazard1"],["selHazard2"],["selHazard3"]].forEach(([id])=>fillSelect(document.getElementById(id), HAZ));
+
+// ---------------------------------------------------------------
+// CHART 1 — dos trazos + cobertura
+// ---------------------------------------------------------------
+let CH1=null;
+function renderChart1(){
+  const hz = document.getElementById("selHazard1").value;
+  const hzLabel = HAZ.find(h=>h.key===hz).label;
+  document.getElementById("c1title").textContent = "1. Exposición alta vs. no mitigada — " + hzLabel;
+  const bruto = PERIODOS.map(p => (PORTAFOLIO[p][hz].pct_alto||0)*100);
+  const noMit = PERIODOS.map(p => (PORTAFOLIO[p][hz].pct_no_mitigada||0)*100);
+  const labels = PERIODOS.map(p=>PLABEL[p]);
+  if(CH1) CH1.destroy();
+  CH1 = new Chart(document.getElementById("chart1"), {
+    type:"line",
+    data:{labels, datasets:[
+      {label:"AUM en 4-5 (bruto)", data:bruto, borderColor:AFP.azul, backgroundColor:AFP.azul, borderWidth:2, pointRadius:4, tension:0},
+      {label:"Sin mitigante Alto/Medio", data:noMit, borderColor:AFP.rojo, backgroundColor:AFP.rojo, borderWidth:2, pointRadius:4, tension:0, borderDash:[5,3]},
+    ]},
+    options:{responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false},
+        tooltip:{callbacks:{label:c=>c.dataset.label+": "+c.parsed.y.toFixed(1)+"%"}}},
+      scales:{y:{title:{display:true,text:"% del AUM mapeado"},ticks:{callback:v=>v+"%"}}}}
+  });
+  const cov = PERIODOS.map(p => (PORTAFOLIO[p][hz].pct_cobertura||0)*100);
+  document.getElementById("cov1").innerHTML =
+    '<div style="font-size:11px;color:var(--plomo);margin-top:10px">Cobertura de score CENEPRED (AUM con score 1-5 / AUM mapeado)</div>' +
+    '<div class="covstrip">' + PERIODOS.map((p,i)=>
+      `<div class="covseg" style="flex:1;background:${AFP.gris}"><div style="width:${cov[i]}%;height:100%;background:${AFP.cyan};border-radius:2px"></div></div>`
+    ).join("") + '</div>' +
+    '<div style="display:flex;font-size:10px;color:var(--plomo);margin-top:3px">' +
+      PERIODOS.map((p,i)=>`<div style="flex:1;text-align:center">${PLABEL[p]}: ${cov[i].toFixed(0)}%</div>`).join("") + '</div>';
+}
+document.getElementById("selHazard1").onchange = renderChart1;
+
+// ---------------------------------------------------------------
+// CHART 2 — puente entre dos cortes
+// ---------------------------------------------------------------
+function pares(){
+  const out=[];
+  for(let i=0;i<PERIODOS.length-1;i++) out.push([PERIODOS[i],PERIODOS[i+1]]);
+  return out;
+}
+const PARES = pares();
+document.getElementById("selPar2").innerHTML = PARES.map((pr,i)=>
+  `<option value="${i}">${PLABEL[pr[0]]} → ${PLABEL[pr[1]]}</option>`).join("");
+document.getElementById("selPar2").selectedIndex = PARES.length-1;
+
+let CH2=null;
+function calcPuente(p0, p1, hz){
+  const e0 = EMISOR[p0]||{}, e1 = EMISOR[p1]||{};
+  const emp0 = new Set(Object.keys(e0)), emp1 = new Set(Object.keys(e1));
+  let tam=0, huella=0, altas=0, bajas=0;
+  emp1.forEach(e=>{ if(!emp0.has(e)) altas += (e1[e][hz].aum_alto||0); });
+  emp0.forEach(e=>{ if(!emp1.has(e)) bajas -= (e0[e][hz].aum_alto||0); });
+  emp0.forEach(e=>{
+    if(!emp1.has(e)) return;
+    const a0=e0[e].aum_total||0, a1=e1[e].aum_total||0;
+    const pc0=e0[e][hz].pct_alto||0, pc1=e1[e][hz].pct_alto||0;
+    tam += (a1-a0)*pc0;
+    huella += a1*(pc1-pc0);
+  });
+  const inicio = PORTAFOLIO[p0][hz].aum_alto||0;
+  const fin = PORTAFOLIO[p1][hz].aum_alto||0;
+  return {inicio, tam, huella, altas, bajas, fin};
+}
+function renderChart2(){
+  const hz = document.getElementById("selHazard2").value;
+  const hzLabel = HAZ.find(h=>h.key===hz).label;
+  const [p0,p1] = PARES[document.getElementById("selPar2").value];
+  document.getElementById("c2title").textContent =
+    `2. Puente ${PLABEL[p0]} → ${PLABEL[p1]} — ${hzLabel}`;
+  const b = calcPuente(p0,p1,hz);
+  const M = v => v/1e6;
+  const labels=["Inicio","Tamaño\n(AUM)","Huella /\nreclasif.","Emisores\nnuevos","Emisores\nque salieron","Fin"];
+  const vals=[M(b.inicio), M(b.tam), M(b.huella), M(b.altas), M(b.bajas), M(b.fin)];
+  // floating bars para que se vea como puente
+  let acc=0; const floats=[];
+  for(let i=0;i<vals.length;i++){
+    if(i===0||i===vals.length-1){ floats.push([0, vals[i]]); acc=vals[i]; }
+    else{ const from=acc; acc+=vals[i]; floats.push([Math.min(from,acc), Math.max(from,acc)]); }
+  }
+  const colors = vals.map((v,i)=> (i===0||i===vals.length-1) ? AFP.plomo : (v>=0?AFP.rojo:"#1D9E75"));
+  if(CH2) CH2.destroy();
+  CH2 = new Chart(document.getElementById("chart2"), {
+    type:"bar",
+    data:{labels, datasets:[{data:floats, backgroundColor:colors, borderRadius:4}]},
+    options:{responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false},
+        tooltip:{callbacks:{label:c=>{
+          const i=c.dataIndex;
+          if(i===0||i===labels.length-1) return "S/ "+(vals[i]).toFixed(1)+" mm";
+          const signo = vals[i]>=0?"+":"";
+          return signo+vals[i].toFixed(1)+" mm S/";
+        }}}},
+      scales:{y:{title:{display:true,text:"AUM en niveles 4-5 (S/ millones)"}}}}
+  });
+}
+document.getElementById("selHazard2").onchange = renderChart2;
+document.getElementById("selPar2").onchange = renderChart2;
+
+// ---------------------------------------------------------------
+// CHART 3 — heatmap emisor/sector x periodo
+// ---------------------------------------------------------------
+function shade(pct){ // 0..1 -> azul claro..azul oscuro (secuencial, una sola rampa)
+  if(pct==null) return "#F1EFE8";
+  const k = Math.max(0, Math.min(1, pct));
+  const c0=[230,241,251], c1=[4,44,83];
+  const rgb = c0.map((v,i)=>Math.round(v+(c1[i]-v)*k));
+  return `rgb(${rgb.join(",")})`;
+}
+function textOn(pct){ return (pct!=null && pct>0.55) ? "#fff" : "var(--texto)"; }
+
+function renderChart3(){
+  const hz = document.getElementById("selHazard3").value;
+  const hzLabel = HAZ.find(h=>h.key===hz).label;
+  const vista = document.getElementById("selVista3").value;
+  document.getElementById("c3title").textContent =
+    "3. " + (vista==="emisor"?"Emisores":"Sectores") + " por corte — " + hzLabel;
+  const SRC = vista==="emisor" ? EMISOR : SECTOR;
+  const ultimo = PERIODOS[PERIODOS.length-1];
+  const prev = PERIODOS.length>1 ? PERIODOS[PERIODOS.length-2] : null;
+  const claves = Object.keys(SRC[ultimo]||{});
+  claves.sort((a,b)=> (SRC[ultimo][b][hz].pct_alto||0) - (SRC[ultimo][a][hz].pct_alto||0));
+
+  let html = '<table class="heat"><thead><tr><th style="text-align:left">'+
+    (vista==="emisor"?"Emisor":"Sector") + '</th>';
+  PERIODOS.forEach(p=> html += `<th>${PLABEL[p]}</th>`);
+  html += '<th>Δ último</th>';
+  if(vista==="emisor"){ html += '<th>AUM mapeado (S/)</th><th>Mitigante</th>'; }
+  html += '</tr></thead><tbody>';
+
+  claves.forEach(k=>{
+    html += `<tr><td class="nom">${k}</td>`;
+    PERIODOS.forEach(p=>{
+      const rec = (SRC[p]||{})[k];
+      const pct = rec ? rec[hz].pct_alto : null;
+      const bg = shade(pct); const fg = textOn(pct);
+      html += `<td style="background:${bg};color:${fg}">${pct==null?"—":(pct*100).toFixed(0)+"%"}</td>`;
+    });
+    const rU = (SRC[ultimo]||{})[k], rP = prev ? (SRC[prev]||{})[k] : null;
+    const pu = rU ? rU[hz].pct_alto : null, pp = rP ? rP[hz].pct_alto : null;
+    let delta = "—";
+    if(pu!=null && pp!=null) delta = ((pu-pp)*100>=0?"+":"") + ((pu-pp)*100).toFixed(1)+" pp";
+    html += `<td>${delta}</td>`;
+    if(vista==="emisor"){
+      const info = EMP_ACTUAL[k] || {};
+      const mit = info.mitigante || "—";
+      const mitbg = mit==="Alto"?"#EAF3DE":mit==="Medio"?"#FAEEDA":mit==="Bajo"?"#FCEBEB":"transparent";
+      html += `<td>${fmtS(info.aum_total)}</td><td class="mit" style="background:${mitbg}">${mit}</td>`;
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById("heatwrap").innerHTML = html;
+  document.getElementById("leg3").innerHTML =
+    '<span><span class="dot" style="background:'+shade(0.05)+'"></span>Bajo % en niveles 4-5</span>'+
+    '<span><span class="dot" style="background:'+shade(0.9)+'"></span>Alto % en niveles 4-5</span>'+
+    '<span><span class="dot" style="background:#F1EFE8;border:1px solid var(--linea)"></span>Sin AUM mapeado ese corte</span>';
+}
+document.getElementById("selHazard3").onchange = renderChart3;
+document.getElementById("selVista3").onchange = renderChart3;
+
+renderChart1(); renderChart2(); renderChart3();
+</script>
+</body>
+</html>"""
+
+
+def build_payload(panel_emisor, panel_sector, panel_portafolio, periodos):
+    periodo_label = {p: periodo_siguiente_nombre(p) for p in periodos}
+
+    portafolio = {}
+    for r in panel_portafolio:
+        p = r["periodo"]
+        portafolio.setdefault(p, {})
+        for h in HAZARDS:
+            k = h["key"]
+            portafolio[p][k] = {
+                "pct_alto": r.get(f"{k}_pct_alto"),
+                "pct_no_mitigada": r.get(f"{k}_pct_no_mitigada"),
+                "pct_cobertura": r.get(f"{k}_pct_cobertura"),
+                "aum_alto": r.get(f"{k}_alto"),
+            }
+
+    emisor = {}
+    emp_actual = {}
+    ultimo = periodos[-1]
+    for r in panel_emisor:
+        p = r["periodo"]
+        emisor.setdefault(p, {})
+        emisor[p][r["empresa"]] = {
+            "aum_total": r["aum_total"],
+            **{h["key"]: {"pct_alto": r.get(f"pct_{h['key']}_alto"),
+                          "aum_alto": r.get(f"aum_{h['key']}_alto")} for h in HAZARDS}
+        }
+        if p == ultimo:
+            emp_actual[r["empresa"]] = {
+                "sector": r["sector"], "aum_total": r["aum_total"], "mitigante": r["mitigante"],
+            }
+
+    sector = {}
+    for r in panel_sector:
+        p = r["periodo"]
+        sector.setdefault(p, {})
+        sector[p][r["sector"]] = {
+            "aum_total": r["aum_total"],
+            **{h["key"]: {"pct_alto": r.get(f"pct_{h['key']}_alto"),
+                          "aum_alto": r.get(f"aum_{h['key']}_alto")} for h in HAZARDS}
+        }
+
+    return {
+        "generado": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "hazards": [{"key": h["key"], "label": h["label"]} for h in HAZARDS],
+        "periodos": periodos,
+        "periodo_label": periodo_label,
+        "portafolio": portafolio,
+        "emisor": emisor,
+        "sector": sector,
+        "emp_actual": emp_actual,
+    }
+
+
+def export_html(out_path, payload):
+    html = _HTML_TEMPLATE
+    html = html.replace("__PAYLOAD__", json.dumps(payload, ensure_ascii=False))
+    html = html.replace("__GENERADO__", payload["generado"])
+    for tag, val in [("__AZUL__", AFP_AZUL), ("__CYAN__", AFP_CYAN), ("__AMAR__", AFP_AMAR),
+                      ("__GRIS__", AFP_GRIS), ("__PLOMO__", AFP_PLOMO), ("__ROJO__", AFP_ROJO)]:
+        html = html.replace(tag, val)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    log(f"HTML generado: {out_path}")
+
+
+# ==============================================================================
+# 7) MAIN
+# ==============================================================================
+
+def main():
+    log("=" * 60)
+    log("EVOLUCIÓN HISTÓRICA DEL RIESGO FÍSICO — INICIO")
+    log("=" * 60)
+
+    files = find_input_files(INPUT_DIR)
+    log(f"{len(files)} archivo(s) encontrado(s): {[p for p, _ in files]}")
+    if len(files) < 2:
+        log("Con un solo corte los 3 gráficos no aportan (necesitas al menos 2 periodos "
+            "para el puente, y se recomiendan 3+ para la línea y el heatmap).", "WARN")
+
+    panel_emisor, panel_sector, panel_portafolio = build_panel(files)
+    periodos = [p for p, _ in files]
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+    xlsx_out = os.path.join(OUT_DIR, f"Panel_Evolucion_Riesgo_Fisico_{stamp}.xlsx")
+    export_panel_excel(xlsx_out, panel_emisor, panel_sector, panel_portafolio)
+
+    payload = build_payload(panel_emisor, panel_sector, panel_portafolio, periodos)
+    html_out = os.path.join(OUT_DIR, f"Evolucion_Riesgo_Fisico_{stamp}.html")
+    export_html(html_out, payload)
+
+    log("=" * 60)
+    log("PROCESO COMPLETADO")
+    log("=" * 60)
+    return html_out, xlsx_out
+
+
+if __name__ == "__main__":
+    main()
