@@ -1,0 +1,127 @@
+Ahora aplico y verifico las 3 correcciones en mi copia de trabajo (para probarlas), y luego te paso los bloques exactos para que los apliques tú mismo con Ctrl+F, tal como pediste.
+
+Confirmado con simulación: para `CORTE_MES = 12`, `CORTE_ANIO = 2025` ahora obtienes exactamente lo que esperabas — ventana Jul-Dic 2025 y periodo `2S25` (→ archivo `Riesgos Climáticos - 2S25.xlsx`).
+
+## Por qué pasó esto (el mecanismo)
+
+## El porqué (el mecanismo)
+
+Tu script en realidad tiene **tres relojes independientes** para decidir "qué periodo estoy corriendo", y yo solo conecté uno de ellos la vez pasada.
+
+Es como si el edificio tuviera tres relojes de pared en distintas oficinas, y tú moviste las manecillas de uno solo (el que usa `find_file` para elegir el Excel de entrada) — pero los otros dos siguieron mirando el reloj real de la calle (`datetime.now()`, es decir, hoy 23-sep-2026):
+
+1. **Reloj 1 — qué archivo de insumo leer:** `RISK_PATTERNS` (ya lo até a `CORTE_MES`/`CORTE_ANIO` la vez pasada). ✅ Funcionaba bien.
+2. **Reloj 2 — qué meses sumar de "BD ptf" y "BD Prod":** la función `_meses_semestre_anterior()` (línea ~1673) NO lee `CORTE_MES`/`CORTE_ANIO`; lee una variable **preexistente y separada**, `SEMESTRE_REF` (línea ~456 originalmente en `None`). Cuando es `None`, cae a `datetime.datetime.now()` → hoy es sept-2026 → semestre "en curso" = Jul-Ago-Sep 2026 → de ahí el warning de columnas 2026-07/08/09 que viste.
+3. **Reloj 3 — cómo se nombra el Excel de salida y qué hoja de "Mitigantes" se lee:** la función `_periodo_actual()` (línea ~5843) y `leer_mitigantes()` (línea ~5593) tampoco leen `CORTE_MES`/`CORTE_ANIO`; cada una calcula su propio `hoy = datetime.now()` por su cuenta.
+
+Ninguna de las tres funciones "sabía" que existían `CORTE_MES`/`CORTE_ANIO` porque los agregué sin conectarlos a ellas.
+
+**La solución no es crear un cuarto reloj**, sino hacer que los 3 usen el mismo: `SEMESTRE_REF` ya era, desde antes, el mecanismo que el propio script tenía pensado para esto ("fija una fecha YYYY-MM-DD para reproducir un cierre concreto sin importar cuándo se ejecute" — literalmente tu documentación original). Así que en vez de dejarlo en `None`, lo calculo automáticamente a partir de `CORTE_MES`/`CORTE_ANIO`, y hago que `_periodo_actual()` y `leer_mitigantes()` lean ese mismo `SEMESTRE_REF` en vez de `datetime.now()`.
+
+Ya probé la lógica de forma aislada con tus valores (`CORTE_MES=12`, `CORTE_ANIO=2025`) y da exactamente lo esperado: ventana `Jul-Dic 2025` y periodo `2S25`.
+
+---
+
+## Los 3 parches (find & replace)
+
+### Parche 1 — nuevos helpers de CONFIG (agregar, no reemplazan nada)
+
+**Busca (Ctrl+F) este bloque exacto** (lo agregaste tú mismo la vez pasada, cerca de la línea 91):
+```python
+# Etiqueta del corte actual, p.ej. "Dic25". Se usa para armar RISK_PATTERNS y
+# para nombrar los archivos de salida (ver OUT_DIR más abajo).
+CORTE_LABEL = _resolver_corte(CORTE_MES, CORTE_ANIO)
+
+# Carpeta base del proyecto. Si la variable de entorno RF_BASE está definida,
+```
+
+**Reemplázalo por** (le agrego 3 cosas nuevas en medio, todo lo demás igual):
+```python
+# Etiqueta del corte actual, p.ej. "Dic25". Se usa para armar RISK_PATTERNS y
+# para nombrar los archivos de salida (ver OUT_DIR más abajo).
+CORTE_LABEL = _resolver_corte(CORTE_MES, CORTE_ANIO)
+
+
+def _resolver_mes_num(mes):
+    """Convierte CORTE_MES (número 1-12 o abreviatura 'Dic'/'dic'/'DIC') a su
+    número de mes (1-12). Se usa para atar SEMESTRE_REF (más abajo en CONFIG)
+    al mismo corte."""
+    if isinstance(mes, str):
+        m = mes.strip()
+        if m.isdigit():
+            return int(m)
+        for num, abrev in _MESES_ABREV_ES.items():
+            if abrev.lower() == m.lower():
+                return num
+        raise SystemExit(f"[CONFIG] CORTE_MES={mes!r} no reconocido como abreviatura de mes.")
+    return int(mes)
+
+
+# Año en 4 dígitos y mes numérico del corte (para SEMESTRE_REF más abajo).
+_CORTE_ANIO_4D = int(CORTE_ANIO) if int(CORTE_ANIO) >= 100 else 2000 + int(CORTE_ANIO)
+_CORTE_MES_NUM = _resolver_mes_num(CORTE_MES)
+
+# Carpeta base del proyecto. Si la variable de entorno RF_BASE está definida,
+```
+
+### Parche 2 — atar `SEMESTRE_REF` al corte (ya NO a la fecha real)
+
+**Busca este bloque exacto** (tal cual está hoy en tu script, sin tocar, cerca de la línea 456):
+```python
+# --- Ventana temporal para Utilities y Construcción ---------------------------
+# Se SUMAN los valores del SEMESTRE ANTERIOR completo (6 meses). Si hoy es
+# 11/06/2026 -> se suman Jul..Dic 2025. Si hoy cae en el 2º semestre, sería el
+# 1er semestre del mismo año. SEMESTRE_REF: None = fecha de hoy; o fija una fecha
+# "YYYY-MM-DD" para reproducir un cierre concreto sin importar cuándo se ejecute.
+SEMESTRE_REF = None
+```
+
+**Reemplázalo por:**
+```python
+# --- Ventana temporal para Utilities y Construcción ---------------------------
+# Se SUMAN los valores del SEMESTRE del corte elegido arriba (CORTE_MES/
+# CORTE_ANIO), completo (6 meses): p.ej. corte Dic25 -> se suman Jul..Dic 2025.
+# SEMESTRE_REF queda atado a ese corte (ya NO a la fecha real de hoy), para que
+# la ventana de Utilities/Construcción, la hoja de Mitigantes ('2S25', '1S26',
+# ...) y el nombre del Excel "Riesgos Climáticos - X.xlsx" usen SIEMPRE el
+# mismo corte que RISK_PATTERNS.
+SEMESTRE_REF = f"{_CORTE_ANIO_4D:04d}-{_CORTE_MES_NUM:02d}-01"
+```
+
+### Parche 3 — dos funciones que calculaban "hoy" por su cuenta
+
+Hay **dos** líneas `hoy = datetime.now()` en el script (verifiqué que son solo esas dos relevantes al periodo); se distinguen por la indentación.
+
+**3a. Dentro de `leer_mitigantes` (línea ~5606, indentada con 8 espacios).**
+Busca:
+```python
+        import openpyxl
+        from datetime import datetime
+        hoy = datetime.now()
+```
+Reemplaza por:
+```python
+        import openpyxl
+        from datetime import datetime
+        # FIX: antes usaba la fecha REAL de hoy; ahora usa SEMESTRE_REF, que
+        # ya está atado a CORTE_MES/CORTE_ANIO.
+        hoy = datetime.strptime(SEMESTRE_REF, "%Y-%m-%d")
+```
+
+**3b. Dentro de `_periodo_actual` (línea ~5847, indentada con 4 espacios, justo después del docstring de la función).**
+Busca:
+```python
+    from datetime import datetime
+    hoy = datetime.now()
+```
+Reemplaza por:
+```python
+    from datetime import datetime
+    # FIX: antes usaba la fecha REAL de hoy; ahora usa SEMESTRE_REF, que ya
+    # está atado a CORTE_MES/CORTE_ANIO.
+    hoy = datetime.strptime(SEMESTRE_REF, "%Y-%m-%d")
+```
+
+---
+
+Con esto, `CORTE_MES = 12` / `CORTE_ANIO = 2025` va a producir consistentemente: ventana Jul-Dic 2025 en BD ptf/BD Prod, hoja `2S25` de Mitigantes, y el archivo `Riesgos Climáticos - 2S25.xlsx`. Ya no hace falta que toques `SEMESTRE_REF` a mano en ningún corte futuro — solo `CORTE_MES`/`CORTE_ANIO`.
