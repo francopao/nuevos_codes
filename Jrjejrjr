@@ -1,0 +1,45 @@
+## El mecanismo: "Posición" no lee VALOR_VECTOR_LOCAL directo — pasa por un filtro
+
+Piensa en `load_posicion_directa_local()` (la función que llena la columna "Posición", línea ~3306) como un **portero con una lista de exactamente 2 nombres**: solo deja pasar la plata de VALOR_VECTOR_LOCAL si la columna **"Clasificación ERR"** de esa fila dice, textual y normalizado, `"EQUITY DIRECTO - LOCAL"` o `"DEUDA CORPORATIVA DIRECTA - LOCAL"`. Todo lo demás lo descarta.
+
+Eso explica perfecto tu observación: VALOR_VECTOR_LOCAL sí tiene plata (esa columna se lee sin filtro para otros cálculos, como el AUM), pero si **ninguna fila** pasa el filtro de "Clasificación ERR", el diccionario `posicion` queda vacío → cada emisor cae al `||0` del código JS → "Posición" en cero en TODAS las tablas.
+
+Dos causas posibles (no puedo saber cuál sin ver tu Excel):
+- **(a)** el texto real en tu columna "Clasificación ERR" está redactado distinto al que el script espera (mayúsculas, guion, una palabra distinta, etc.).
+- **(b)** el script no encontró esa columna por nombre y cayó al "respaldo por letra" (columna **AA**), que en tu archivo podría no ser la columna correcta.
+
+## Chequeo rápido (sin tocar código)
+
+Abre el Excel de salida que ya generaste → hoja **"Cobertura"** → celda A2. Si dice **"Emisores esperados: 0"**, confirma que el filtro no está matcheando nada — mismo origen del problema.
+
+## Para ver el detalle exacto: log temporal
+
+**Busca (Ctrl+F) este bloque exacto** en `load_posicion_directa_local` (línea ~3333):
+```python
+    df["_errn"] = df["err"].astype(str).str.strip().apply(norm)
+
+    err_norm_a_clase = {norm(k): v for k, v in ERR_A_CLASE.items()}
+```
+
+**Reemplázalo por:**
+```python
+    df["_errn"] = df["err"].astype(str).str.strip().apply(norm)
+
+    # DIAGNÓSTICO TEMPORAL — bórralo una vez identificada la causa del "Posición"
+    # en cero. Muestra qué columna real se usó como "Clasificación ERR" y qué
+    # valores (normalizados) trae esa columna, para compararlos contra las 2
+    # cadenas que el script espera encontrar (ERR_A_CLASE, 2 líneas más arriba).
+    log(f"[DIAG Posición] Columna real usada para 'Clasificación ERR': '{cols['err']}'.")
+    log(f"[DIAG Posición] Valores únicos normalizados en esa columna (conteo): "
+        f"{df['_errn'].value_counts().to_dict()}")
+    log(f"[DIAG Posición] El script busca EXACTAMENTE (normalizado): "
+        f"{[norm(k) for k in ERR_A_CLASE]}")
+
+    err_norm_a_clase = {norm(k): v for k, v in ERR_A_CLASE.items()}
+```
+
+Corre el script una vez y busca en la consola las 3 líneas `[DIAG Posición]`. Con eso sabrás:
+- **Qué columna real** se usó (para descartar la causa b — si el nombre no tiene nada que ver con "Clasificación ERR", esa es la causa).
+- **Qué valores** trae de verdad esa columna (para descartar la causa a — comparándolos contra la tercera línea, lo que el script espera).
+
+Pásame esas 3 líneas (o compáralas tú mismo) y te doy el parche de una sola línea — ajustar el diccionario `ERR_A_CLASE` (y su gemelo `ERR_OBJETIVO` de la hoja Cobertura) al texto real de tu archivo.
