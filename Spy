@@ -1,0 +1,34 @@
+Confirmado: el .txt es el script en sí. Lo leo completo junto con la estructura del XLS demostrativo.Confirmé el bug con tu archivo demo (`B-3301-jn2026.XLS`): en ese mes el reporte tiene 23 filas reales de indicador (índice 0 a 22 dentro de "Detallada"), pero la config de `"Financieras"` usa `"truncar_en": 21`, que corta todo desde el índice 21 en adelante — ahí mismo ya elimina las dos filas de LIQUIDEZ, y en otros meses (cuando SBS agrega una fila nueva antes, como las de asterisco `**`/`***` que ya viste en otros scripts SBS) ese mismo corte fijo se desplaza y se lleva por delante indicadores como "Ingresos Financieros Anualizados / Activo Productivo Promedio".
+
+La causa raíz: `truncar_en` es un corte por **posición fija**, no por contenido. Las otras 4 instituciones (Bancos, Cajas, Estatales, Cajas Rurales) ya usan `"truncar_en": None` y no tienen este problema, porque el `dropna(subset=[...])` que corre más abajo en `procesar_institucion` ya elimina solo las filas de encabezado de categoría y las notas al pie (verifiqué con tu archivo: esas filas están 100% NaN en las columnas de dato, igual que las notas al pie). O sea, `truncar_en` es redundante para Financieras/Mypes y encima rompe con cualquier cambio de estructura.
+
+**Fix — 1 línea, búsqueda exacta con Ctrl+F:**
+
+Buscar (dentro del diccionario `INSTITUCIONES`, entrada `"Financieras"`):
+
+```python
+     "drop_rows": [0, 1, 2, 3], "truncar_en": 21, "dropna_all": False},
+```
+
+Reemplazar por:
+
+```python
+     "drop_rows": [0, 1, 2, 3], "truncar_en": None, "dropna_all": False},
+```
+
+Esto está dentro del bloque que empieza con `{"nombre": "Financieras", "carpeta": "Financieras", "prefijo": "B-3301-",`.
+
+**Mismo riesgo latente en "Mypes"** (mismo patrón, `truncar_en: 26`), aunque no lo reportaste como fallando aún. Si quieres blindarlo también:
+
+Buscar:
+```python
+     "drop_rows": [0], "truncar_en": 26, "dropna_all": True},
+```
+
+Reemplazar por:
+
+```python
+     "drop_rows": [0], "truncar_en": None, "dropna_all": True},
+```
+
+Con estos dos cambios, ambas instituciones quedan usando el mismo mecanismo de filtrado (por contenido, no por posición) que ya te funciona de forma estable en Bancos, Cajas, Estatales y Cajas Rurales.
