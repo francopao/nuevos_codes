@@ -1,0 +1,61 @@
+Ubiqué el problema: no es un bug del script, es el clásico límite de 260 caracteres de ruta en Windows. Tu carpeta ya es larga (~214 caracteres) y al escribir el resultado le sumamos `\Evolucion\Panel_Evolucion_Riesgo_Fisico_...xlsx`, que la empuja a ~273 caracteres — por eso falló justo al escribir, no al leer tus 3 Excel (esos sí entraban bajo el límite).
+
+La solución estándar en Windows es anteponer el prefijo `\\?\` a la ruta justo antes de abrir el archivo, lo cual le dice a Windows "ignora el límite clásico". No requiere permisos de administrador ni tocar el Registro.
+
+**Bloque 1 — Agregar una función nueva**
+
+Busca con Ctrl+F: `def find_input_files(input_dir):`
+
+Justo **encima** de esa línea (antes de `def find_input_files`), pega este bloque nuevo:
+
+```python
+def win_long_path(path):
+    """En Windows antepone \\\\?\\ para saltarse el límite clásico de 260
+    caracteres en rutas (tu carpeta en Z:\\Mesa de Inversiones\\... ya está
+    muy cerca del límite, y el nombre del archivo de salida la sobrepasa).
+    En Mac/Linux no hace nada, así que es seguro dejarla siempre puesta."""
+    if os.name == "nt":
+        path = os.path.abspath(path)
+        if not path.startswith("\\\\?\\"):
+            path = "\\\\?\\" + path
+    return path
+
+
+</parameter>
+```
+
+(el salto de línea extra al final es intencional, para separarla de `find_input_files`)
+
+**Bloque 2 — Envolver la creación de la carpeta de salida**
+
+Busca con Ctrl+F: `os.makedirs(OUT_DIR, exist_ok=True)`
+
+Reemplaza esa línea exacta por:
+
+```python
+    os.makedirs(win_long_path(OUT_DIR), exist_ok=True)
+```
+
+**Bloque 3 — Envolver la escritura del Excel de auditoría**
+
+Busca con Ctrl+F: `with pd.ExcelWriter(out_path, engine="openpyxl") as xw:`
+
+Reemplaza esa línea exacta por:
+
+```python
+    with pd.ExcelWriter(win_long_path(out_path), engine="openpyxl") as xw:
+```
+
+**Bloque 4 — Envolver la escritura del HTML**
+
+Busca con Ctrl+F: `with open(out_path, "w", encoding="utf-8") as fh:`
+
+Reemplaza esa línea exacta por:
+
+```python
+    with open(win_long_path(out_path), "w", encoding="utf-8") as fh:
+```
+
+**Por qué funciona así y no de otra forma:** dejé `OUT_DIR`, `xlsx_out` y `html_out` intactos como texto normal en todo el resto del script (los `log(...)` seguirán mostrando la ruta legible sin el prefijo feo `\\?\`); solo el `open()`/`ExcelWriter` real recibe la versión con el prefijo, en el instante en que Windows necesita saltarse el límite. Nada más en el script cambia.
+
+**Si el error reapareciera al leer** (no al escribir) — por ejemplo si algún semestre futuro trae un nombre de archivo más largo — la misma función sirve: solo tendrías que envolver `pd.read_excel(path, ...)` en `load_activos_por_empresa`, `load_score_empresa`, etc. con `win_long_path(path)`, pero no lo agregues ahora si no lo necesitas.
