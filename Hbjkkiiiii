@@ -1,0 +1,73 @@
+El fix de `truncar_en` ya funcionó para Mypes, pero para Financieras el problema no era ese. Corrí tu `procesar_institucion` real (con el fix ya aplicado) contra `B-3301-jn2026.XLS`: el indicador sale con datos correctos para las 7 entidades en junio. **El problema ya no está ahí — está en `guardar_en_base`, en el cruce contra el histórico.**
+
+Causa raíz: la `key` que usas para saber si una fila es "Mapeado" (actualizar) o nueva (agregar) se arma concatenando texto crudo sin separador (`Institución+Estructura+Moneda+Nombre+Tipo+Detallada`). El campo `Nombre` sale del Excel de SBS tal cual, y ahí aparecen sufijos de nota al pie inestables — en tu propio demo: `"Total Empresas Financieras1/"`, `"InFinance XP2/"`, y espacios extra como `"Financiera Qapaq "`. Si SBS renumera esas notas de un mes a otro (mismo patrón de asteriscos/notas que ya te rompió otros scripts SBS), el `key` deja de coincidir con la fila histórica y `guardar_en_base` crea una fila **nueva** en vez de actualizar la existente — la fila que tú revisas queda en blanco aunque el dato sí se guardó, solo que duplicado en otra fila.
+
+**Paso 1 — Diagnóstico (confirma esto en una sola corrida antes de aplicar el fix):**
+
+Buscar en `guardar_en_base`:
+```python
+        DF_Total2 = DF_Total.copy()
+        DF_Total2['Indicador'] = DF_Total2['key'].map(dic_Total_.get('Indicador', {}))
+        DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+```
+
+Insertar justo después de la 2ª línea (antes del `.loc[...isin...]`):
+
+```python
+        _debug_mask = DF_Total2["Detallada"].astype(str).str.contains("Ingresos Financieros Anualizados", na=False)
+        if _debug_mask.any():
+            print(f"[DEBUG {mes} {anio}] Ingresos Financieros Anualizados -> Mapeado/Nuevo:")
+            print(DF_Total2.loc[_debug_mask, ["Institución", "Nombre", "Detallada", "key", "Indicador"]].to_string())
+```
+
+Corre igual que antes (Feb-Jul). Si ves `Indicador = NaN` (en vez de `'Mapeado'`) para algún mes/empresa, confirmado: esa fila se está duplicando, no actualizando.
+
+**Paso 2 — Fix (normaliza `Nombre` antes de construir la key):**
+
+Buscar (cerca del inicio, tras los imports):
+```python
+import numpy as np
+import pandas as pd
+```
+Reemplazar por:
+```python
+import re
+
+import numpy as np
+import pandas as pd
+```
+
+Buscar (justo después de la función `renombrar_valor`):
+```python
+def renombrar_valor(row, campo, dic_ren):
+    try:
+        return dic_ren['Nombre_Nuevo'][row[campo]]
+    except Exception:
+        return row[campo]
+```
+Insertar debajo (nueva función):
+```python
+def limpiar_etiqueta_sbs(texto):
+    """Quita sufijos de nota al pie (ej. '1/', '2/') y espacios extra,
+    para que la key no cambie solo porque SBS renumera sus notas al pie."""
+    if not isinstance(texto, str):
+        return texto
+    texto = texto.strip()
+    texto = re.sub(r"\d+/\s*$", "", texto).strip()
+    return texto
+```
+
+Buscar (dentro de `procesar_institucion`, en el loop que arma `DF_Base`):
+```python
+            DF_ = DF_grupo.copy()
+            a = DF_grupo.columns[2::][i]
+```
+Reemplazar por:
+```python
+            DF_ = DF_grupo.copy()
+            a = limpiar_etiqueta_sbs(DF_grupo.columns[2::][i])
+```
+
+Validado contra tus etiquetas reales: `"Total Empresas Financieras1/"` → `"Total Empresas Financieras"`, `"InFinance XP2/"` → `"InFinance XP"`, `"Financiera Qapaq "` → `"Financiera Qapaq"`.
+
+Ojo: esto estabiliza la key **hacia adelante**, pero las filas ya duplicadas en el histórico (Marzo-Julio, generadas mientras la key traía el sufijo) van a quedar sueltas — probablemente valga la pena que revises el Excel base y elimines manualmente esas filas duplicadas una vez que confirmes el patrón con el diagnóstico del Paso 1.
