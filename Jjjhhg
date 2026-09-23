@@ -1,0 +1,39 @@
+Con esto ya no es un problema de mapeo/key — es que **"Financieras" está crasheando completo** desde febrero en adelante (`KeyError: 'Total Empresas Financieras'`), capturado por el `except` de `procesar_institucion`. Por eso la fila sale en blanco: la institución entera no genera ni una fila ese mes. En enero sí funcionó (ahí "Total Empresas Financieras1/" se renombró bien a "Total Financieras").
+
+Mismo patrón exacto en otras instituciones el mismo run: `Cajas` con `KeyError: 'CMAC Piura'` y `Cajas Rurales` (julio) con `KeyError: 'CRAC\nIncasur'` — este último con un salto de línea metido dentro del nombre, lo cual apunta a texto con wrap dentro de la celda de SBS. Mi sospecha: nombres de columna **duplicados** en `DF_grupo` (la misma empresa repetida) rompiendo `DF_grupo[a]` — pero el log actual solo imprime la última línea del traceback, no la línea exacta donde truena. Necesito eso para confirmarlo en vez de seguir adivinando.
+
+**Cambio 1 — traceback completo (para ver la línea exacta del error):**
+
+Buscar:
+```python
+    except Exception as e:
+        log_error(f"{nombre}: fallo inesperado -> {type(e).__name__}: {e}")
+        log_step(traceback.format_exc().splitlines()[-1])
+        return None
+```
+Reemplazar por:
+```python
+    except Exception as e:
+        log_error(f"{nombre}: fallo inesperado -> {type(e).__name__}: {e}")
+        print(traceback.format_exc())
+        return None
+```
+
+**Cambio 2 — chequeo de columnas duplicadas (prueba directa de mi hipótesis):**
+
+Buscar:
+```python
+        DF_Base = pd.DataFrame()
+        for i in range(0, len(DF_grupo.columns) - 2):
+```
+Reemplazar por:
+```python
+        _dups = DF_grupo.columns[DF_grupo.columns.duplicated()].tolist()
+        if _dups:
+            print(f"[DEBUG {nombre} {mes} {anio}] Columnas duplicadas en DF_grupo: {_dups}")
+
+        DF_Base = pd.DataFrame()
+        for i in range(0, len(DF_grupo.columns) - 2):
+```
+
+Corre de nuevo Febrero-Julio (puedes dejar el debug del Paso 1 activo, no estorba) y pásame la consola. Con el traceback completo + el chequeo de duplicados, esta vez sí ubicamos la línea exacta sin más rondas de prueba y error.
