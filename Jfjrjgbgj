@@ -1,0 +1,134 @@
+Confirmado: tu sospecha era correcta, y encontré el mecanismo exacto — además de "Total Financieras" ↔ "Total Empresas Financieras", el mismo patrón ya se repitió en tu base **al menos 3 veces más**:
+
+| Institución | Se corta en... | Reaparece huérfano como... |
+|---|---|---|
+| Financieras | `Total Financieras` (hasta 01/2026) | `Total Empresas Financieras` (desde 02/2026) |
+| Financieras | `Financiera Surgir**` (04–08/2024) | `Financiera Surgir` (desde 09/2024) |
+| Cajas Rurales | `CRAC Incasur` (hasta 06/2026) | `CRAC\nIncasur` — con salto de línea (07/2026) |
+| Cajas | `CMAC Sullana` (hasta 05/2024) | `CMAC Sullana1/` (solo 06/2024) |
+
+## Causa raíz (2 mecanismos distintos)
+
+1. **Marcas que tu limpiador no cubre.** `limpiar_etiqueta_sbs()` solo quita el patrón "número/" (ej. "1/"). Pero SBS también usa **asteriscos** (`*`, `**`, `****` — vi hasta "B. Efectiva\*\*\*\*" en Bancos) y a veces **parte el nombre en dos líneas** dentro de la celda ("CRAC\nIncasur"). Ninguno de los dos casos se limpia hoy, así que el nombre crudo pasa intacto a la key.
+2. **SBS cambia el texto de verdad, no solo agrega una nota.** "Total Financieras" → "Total Empresas Financieras" no es una nota al pie, es un renombre real del encabezado. Ningún limpiador automático puede adivinar eso — necesitas una tabla de equivalencias manual.
+
+⚠️ Aviso importante para que no te autosabotees: **NO** metas `"Total Cajas"` / `"Total Cajas AC"` en ninguna tabla de equivalencias — los verifiqué y son series **distintas de verdad** (valores ligeramente distintos todos los meses, ej. 15.258 vs 15.241), no un caso fragmentado.
+
+## Fix 1 — Generalizar el limpiador (asteriscos + saltos de línea)
+
+**Buscar (Ctrl+F, único en el archivo):**
+```python
+def limpiar_etiqueta_sbs(texto):
+    """Quita sufijos de nota al pie (ej. '1/', '2/') y espacios extra,
+    para que la key no cambie solo porque SBS renumera sus notas al pie."""
+    if not isinstance(texto, str):
+        return texto
+    texto = texto.strip()
+    texto = re.sub(r"\d+/\s*$", "", texto).strip()
+    return texto
+```
+
+**Reemplazar por:**
+```python
+def limpiar_etiqueta_sbs(texto):
+    """Quita sufijos de nota al pie (ej. '1/', '2/', '*', '**', '***')
+    y normaliza saltos de linea/espacios extra, para que la key no
+    cambie solo porque SBS renumera notas al pie o parte un nombre
+    en dos lineas dentro de la celda."""
+    if not isinstance(texto, str):
+        return texto
+    texto = texto.replace("\n", " ").replace("\r", " ")
+    texto = re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"(\d+/|\*+)\s*$", "", texto).strip()
+    return texto
+```
+
+## Fix 2 — Tabla de equivalencias para renombres reales
+
+**Insertar** este bloque nuevo justo **antes** del comentario `# PROCESAMIENTO POR INSTITUCION` (o sea, pégalo después del `return texto` de la función de arriba):
+
+```python
+# ============================================================
+# EQUIVALENCIAS DE NOMBRE (cuando SBS cambia el texto de verdad,
+# no solo le agrega una nota al pie). Si en el futuro ves otro
+# "Total X" o empresa que se corta y reaparece con otro nombre,
+# agrega aqui la pareja: "nombre_nuevo_de_SBS": "nombre_que_ya_usa_tu_base"
+# ============================================================
+EQUIVALENCIAS_NOMBRE = {
+    "Total Empresas Financieras": "Total Financieras",
+}
+
+def normalizar_nombre_institucion(nombre):
+    return EQUIVALENCIAS_NOMBRE.get(nombre, nombre)
+```
+
+**Buscar (Ctrl+F, único en el archivo):**
+```python
+            a = limpiar_etiqueta_sbs(DF_grupo.columns[2::][i])
+```
+
+**Reemplazar por:**
+```python
+            a = normalizar_nombre_institucion(limpiar_etiqueta_sbs(DF_grupo.columns[2::][i]))
+```
+
+Con esto, de ahora en adelante cualquier variante (con asterisco, con salto de línea, o con el texto ya mapeado en el diccionario) cae siempre en la key correcta.
+
+## Fix 3 — Reparar lo que ya quedó fragmentado en tu base actual
+
+Los dos fixes de arriba evitan que el problema *siga pasando*, pero no mueven los datos que **ya** quedaron en filas huérfanas (Feb–Jul 2026 de "Total Empresas Financieras", etc.). Para eso corre este script **aparte, una sola vez**, con el Excel cerrado y después de sacar un backup manual:
+
+```python
+import pandas as pd
+
+RUTA_ARCHIVO_BASE = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\1. Emisores\1. One pagers\Complementos\Historicos\3.Indicadores Financieros.xlsx"
+
+# (Institución, Nombre que sobra, Nombre correcto que debe quedarse)
+EQUIVALENCIAS = [
+    ("Financieras",   "Total Empresas Financieras",   "Total Financieras"),
+    ("Financieras",   "Total Empresas Financieras1/", "Total Financieras"),
+    ("Financieras",   "Financiera Surgir**",          "Financiera Surgir"),
+    ("Cajas Rurales", "CRAC\nIncasur",                "CRAC Incasur"),
+    ("Cajas Rurales", "CRAC\nIncasur ",               "CRAC Incasur"),
+    ("Cajas",         "CMAC Sullana1/",                "CMAC Sullana"),
+]
+
+df = pd.read_excel(RUTA_ARCHIVO_BASE, sheet_name="Indicadores")
+cols_fecha = [c for c in df.columns if c not in
+              ["key", "Institución", "Estructura", "Moneda", "Nombre", "Tipo", "Detallada"]]
+
+for institucion, nombre_sobrante, nombre_correcto in EQUIVALENCIAS:
+    filas_sobrantes = df[(df["Institución"] == institucion) & (df["Nombre"] == nombre_sobrante)]
+
+    for _, fila in filas_sobrantes.iterrows():
+        match = (
+            (df["Institución"] == institucion) &
+            (df["Nombre"] == nombre_correcto) &
+            (df["Estructura"] == fila["Estructura"]) &
+            (df["Moneda"] == fila["Moneda"]) &
+            (df["Tipo"] == fila["Tipo"]) &
+            (df["Detallada"] == fila["Detallada"])
+        )
+        if match.any():
+            idx_correcto = df.index[match][0]
+            for c in cols_fecha:
+                if pd.isna(df.at[idx_correcto, c]) and not pd.isna(fila[c]):
+                    df.at[idx_correcto, c] = fila[c]
+        else:
+            df.loc[fila.name, "Nombre"] = nombre_correcto
+
+    df = df[~((df["Institución"] == institucion) & (df["Nombre"] == nombre_sobrante))]
+
+df["key"] = (
+    df["Institución"].astype(str) + df["Estructura"].astype(str) +
+    df["Moneda"].astype(str) + df["Nombre"].astype(str) +
+    df["Tipo"].astype(str) + df["Detallada"].astype(str)
+)
+
+with pd.ExcelWriter(RUTA_ARCHIVO_BASE, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
+    df.to_excel(writer, sheet_name="Indicadores", index=False)
+
+print("Consolidacion completa.")
+```
+
+Nota al margen (sin acción necesaria): "Efectiva" desapareció de Financieras en 06/2026 y reapareció como "B. Efectiva\*"/"B. Efectiva\*\*\*\*" en Bancos — eso es una reclasificación real (pasó de financiera a banco), no un bug; no la mezcles entre instituciones distintas.
