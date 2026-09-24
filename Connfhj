@@ -1,0 +1,64 @@
+Ahora entiendo perfectamente qué pasó. Tu script **sí tiene el fix funcionando** — la consola lo prueba: toda la data nueva entra limpia (keys correctas, sin asteriscos, sin espacios extra). El problema es diferente:
+
+**La base histórica (`3.Indicadores Financieros.xlsx`) ya tiene filas escritas con las keys sucias de antes del fix.** Cuando el script lee la base para ver si una key está "Mapeada", compara la key limpia nueva contra las keys sucias viejas → no matchean → la data nueva se inserta como fila "Nueva" en vez de caer en la fila existente. **El fix previene nuevas variantes, pero no reconcilia las viejas.**
+
+Es como si antes escribías los nombres de clientes a mano con errores de tipeo, y ahora los estás escribiendo bien — pero la libreta vieja sigue con los tipeos, así que cuando buscas "Juan Pérez" no encuentras al "Juan  Pérez" (con doble espacio) que ya existía.
+
+La solución es un **solo cambio en `guardar_en_base()`** que limpie la base cada vez que la lee, antes de hacer el chequeo de "Mapeado". Así las keys viejas y nuevas hablan el mismo idioma.
+
+---
+
+**Buscar (Ctrl+F, único en el archivo):**
+```python
+        with pd.ExcelFile(RUTA_ARCHIVO_BASE) as reader:
+            if "Indicadores" not in reader.sheet_names:
+                log_error(f"La hoja 'Indicadores' no existe en '{RUTA_ARCHIVO_BASE}'.")
+                return False
+            BD_Total = reader.parse(sheet_name='Indicadores')
+```
+
+**Reemplazar por:**
+```python
+        with pd.ExcelFile(RUTA_ARCHIVO_BASE) as reader:
+            if "Indicadores" not in reader.sheet_names:
+                log_error(f"La hoja 'Indicadores' no existe en '{RUTA_ARCHIVO_BASE}'.")
+                return False
+            BD_Total = reader.parse(sheet_name='Indicadores')
+
+        # -----------------------------------------------------------
+        # LIMPIEZA RETROACTIVA DE LA BASE HISTORICA
+        # Aplica las mismas reglas de limpieza a las filas que ya
+        # existian antes del fix, para que sus keys coincidan con
+        # las keys limpias de la data nueva. Esto:
+        #   - Unifica "( N° de veces )" con "(N° de veces)"
+        #   - Unifica "Nº" con "N°"
+        #   - Elimina asteriscos residuales de Detallada
+        #   - Normaliza nombres de institucion (ej. Total Empresas Financieras -> Total Financieras)
+        # -----------------------------------------------------------
+        BD_Total["Detallada"] = BD_Total["Detallada"].apply(limpiar_etiqueta_sbs)
+        BD_Total["Nombre"] = BD_Total["Nombre"].apply(limpiar_etiqueta_sbs)
+        BD_Total["Nombre"] = BD_Total["Nombre"].apply(normalizar_nombre_institucion)
+
+        # Regenerar keys con los valores ya limpios
+        BD_Total["key"] = (
+            BD_Total["Institución"].astype(str) + BD_Total["Estructura"].astype(str) +
+            BD_Total["Moneda"].astype(str) + BD_Total["Nombre"].astype(str) +
+            BD_Total["Tipo"].astype(str) + BD_Total["Detallada"].astype(str)
+        )
+
+        # Fusionar filas que ahora comparten key (antes eran distintas por la suciedad)
+        cols_meta = ["key", "Institución", "Estructura", "Moneda", "Nombre", "Tipo", "Detallada"]
+        cols_fecha = [c for c in BD_Total.columns if c not in cols_meta]
+        BD_Total = BD_Total.groupby(cols_meta, as_index=False, sort=False)[cols_fecha].first()
+```
+
+---
+
+**Por qué funciona cada parte:**
+
+- `limpiar_etiqueta_sbs` sobre "Detallada" y "Nombre" de la base: limpia las filas viejas que entraron sucias (asteriscos, espacios en paréntesis, saltos de línea, Nº vs N°).
+- `normalizar_nombre_institucion` sobre "Nombre": unifica "Total Empresas Financieras" → "Total Financieras".
+- Regenerar "key": la key antigua ya no sirve porque se calculó con texto sucio; la recalculamos con los valores ya limpios.
+- `groupby(...).first()`: si dos filas que antes tenían keys distintas ahora comparten la misma key limpia (ej. `"Cartera Atrasada Ajustada **"` y `"Cartera Atrasada Ajustada"` de la misma empresa), las fusiona en una sola fila tomando el primer valor no-nulo de cada columna de fecha. Esto absorbe automáticamente las filas huérfanas sin necesidad de un script de reconciliación aparte.
+
+La primera vez que corras el script con este cambio, la base se "auto-limpiará": las ~150 filas duplicadas se fusionarán en sus filas correctas, y de ahí en adelante el conteo de filas se mantendrá estable. No necesitas correr ningún script de reconciliación separado.
