@@ -1,0 +1,90 @@
+Todos los 22 casos pasan. Ahora te doy los cambios exactos para tu script:
+
+---
+
+## Cambio 1 — Mejorar `limpiar_etiqueta_sbs()` (asteriscos intermedios + espacio antes de `/`)
+
+**Buscar (Ctrl+F, único):**
+```python
+    texto = re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"(\d+/|\*+)\s*$", "", texto).strip()
+```
+
+**Reemplazar por:**
+```python
+    texto = re.sub(r"\s+", " ", texto).strip()
+    texto = re.sub(r"\*{2,}", "*", texto)
+    texto = re.sub(r"\)\*\s*/", ")* /", texto)
+    texto = re.sub(r"(\d+/|\*+)\s*$", "", texto).strip()
+```
+
+Las dos líneas nuevas hacen: primero, cualquier corrida de 2+ asteriscos se reduce a uno solo (así `"(criterio SBS)***/"` → `"(criterio SBS)*/"`). Segundo, se asegura un espacio entre `)*` y `/` (así `"(criterio SBS)*/"` → `"(criterio SBS)* /"`). Y la línea del final que ya existía se encarga de borrar el asterisco solo si quedó al final del texto (como en `"Cartera Atrasada Ajustada *"`).
+
+---
+
+## Cambio 2 — Agregar diccionario canónico de indicadores + función
+
+**Buscar (Ctrl+F, único):**
+```python
+EQUIVALENCIAS_NOMBRE = {
+```
+
+**Pegar ANTES de esa línea (justo arriba):**
+```python
+# ============================================================
+# EQUIVALENCIAS DE DETALLADA (cuando SBS usa un texto distinto
+# para el mismo indicador entre entregas o entre instituciones).
+# La key es lo que produce limpiar_etiqueta_sbs(); el value es
+# el nombre canónico que queremos en la base.
+# ============================================================
+CANONICAL_DETALLADA = {
+    "Gastos de Administración Anualizado / Activo Productivo Promedio":
+        "Gastos de Administración Anualizados / Activo Productivo Promedio",
+    "Utilidad Anualizada / Patrimonio Promedio":
+        "Utilidad Neta Anualizada / Patrimonio Promedio",
+    "Utilidad Anualizada / Activo Promedio":
+        "Utilidad Neta Anualizada / Activo Promedio",
+}
+
+def normalizar_detallada(texto):
+    return CANONICAL_DETALLADA.get(texto, texto)
+
+```
+
+---
+
+## Cambio 3 — Aplicar `normalizar_detallada` en `procesar_institucion()`
+
+**Buscar (Ctrl+F, único):**
+```python
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+```
+
+**Reemplazar por:**
+```python
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+        DF["Detallada"] = DF["Detallada"].apply(normalizar_detallada)
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+```
+
+---
+
+## Cambio 4 — Aplicar `normalizar_detallada` en `guardar_en_base()` (limpieza retroactiva)
+
+**Buscar (Ctrl+F, único):**
+```python
+        BD_Total["Detallada"] = BD_Total["Detallada"].apply(limpiar_etiqueta_sbs)
+```
+
+**Reemplazar por:**
+```python
+        BD_Total["Detallada"] = BD_Total["Detallada"].apply(limpiar_etiqueta_sbs)
+        BD_Total["Detallada"] = BD_Total["Detallada"].apply(normalizar_detallada)
+```
+
+---
+
+Con estos 4 cambios, la primera corrida va a auto-limpiar toda la base histórica: las ~150 filas huérfanas (con asteriscos, trailing spaces, "Anualizado" singular, etc.) se fusionarán automáticamente en sus filas canónicas gracias al `groupby().first()` que ya tienes. Y de ahí en adelante, cualquier variante nueva que SBS invente converge al nombre canónico antes de tocar la base.
+
+Una nota sobre tu lista canónica: decidí que las formas **sin** espacios dentro de paréntesis sean las canónicas — `"(S/ Miles)"` en vez de `"( S/ Miles )"` — porque tu base ya tiene ~6,000+ valores bajo esa forma (contra apenas ~30 de la otra). Si prefieres la forma con espacios, avísame y lo invierto, pero significaría migrar los 6,000.
