@@ -1,0 +1,511 @@
+"""
+wording_generator.py
+=====================
+Generador de wording (celda L6) para los "One Pager" de instituciones
+financieras del archivo One_pager_Model_R.xlsm.
+
+*** SIN LLAMADAS A NINGUNA API DE IA *** -- 100% reglas/templates en
+Python puro (motor NLG determinístico). No usa `requests`, no sale a
+internet, no depende de Anthropic/OpenAI/ninguna API externa.
+
+HALLAZGO FORENSE QUE MOTIVA ESTE DISEÑO:
+------------------------------------------
+- La celda L6 de cada hoja (BCP, IBK, Banorte, BBVA Mexico, Cibest,
+  Davivienda, Grupo Aval, BCI) es TEXTO ESTÁTICO, no una fórmula.
+- La tabla "Key Financials" (B23:J51) es formula-driven vía Capital IQ,
+  pero es ANUAL (FY2021-FY2024) + LTM, en USD MM.
+- El wording de L6 cita cifras TRIMESTRALES (QoQ vs 3Q25, YoY vs 4Q24)
+  en moneda local, que NO existen en ninguna celda del workbook.
+  => El dataset del Excel es insuficiente por sí solo; el input
+     trimestral (QuarterlyFacts) debe conseguirse aparte cada trimestre
+     (earnings release / press release del banco) y pasarse como JSON.
+
+USO TÍPICO:
+    python wording_generator.py --facts facts_BCP.json facts_IBK.json
+    # imprime cada wording listo para copiar y pegar en su L6
+
+    python wording_generator.py --facts-dir ./facts_4Q25/
+    # procesa todos los .json de la carpeta
+
+    python wording_generator.py --facts facts_BCP.json --workbook One_pager_Model_R.xlsm --write out.xlsm
+    # además escribe cada wording en su hoja correspondiente (copia, nunca in-place)
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import re
+import sys
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Optional
+
+FI_SHEETS = [
+    "BCP", "IBK", "Banorte", "BBVA Mexico", "Cibest",
+    "Davivienda", "Grupo Aval", "BCI",
+]
+
+PARAGRAPH_LABELS = [
+    "headline_profitability",
+    "loans_funding",
+    "asset_quality",
+    "capitalization",
+]
+
+CIQ_TABLE_RANGE = ("B23", "J51")  # confirmado uniforme para las 8 hojas FI
+
+
+# ---------------------------------------------------------------------
+# 1. Esquema de "quarterly facts" -- único input permitido para cifras
+#    trimestrales. Campo en None = DATA GAP explícito; ese fragmento de
+#    frase simplemente se omite del texto (nunca se inventa el dato).
+# ---------------------------------------------------------------------
+
+@dataclass
+class Metric:
+    value: Optional[float] = None
+    unit: Optional[str] = None          # "%", "bn", "mn", "bp", "x"
+    currency: Optional[str] = None      # "S/", "MXN", "COP", "Ch$", "USD"
+    qoq_prior: Optional[float] = None
+    yoy_prior: Optional[float] = None
+    qoq_pct: Optional[float] = None
+    yoy_pct: Optional[float] = None
+    note: Optional[str] = None
+
+    def has_level(self) -> bool:
+        return self.value is not None
+
+
+@dataclass
+class QuarterlyFacts:
+    company: str
+    period: str
+    prior_q_label: str
+    prior_y_label: str
+
+    tone: Optional[str] = None
+    net_income: Metric = field(default_factory=Metric)
+    roe: Metric = field(default_factory=Metric)
+    nii: Metric = field(default_factory=Metric)
+    nim: Metric = field(default_factory=Metric)
+    non_interest_income: Metric = field(default_factory=Metric)
+    watchpoints: list[str] = field(default_factory=list)
+
+    loan_growth_total: Metric = field(default_factory=Metric)
+    loan_growth_by_segment: dict[str, Metric] = field(default_factory=dict)
+    deposits: Metric = field(default_factory=Metric)
+    deposits_pct_of_funding: Metric = field(default_factory=Metric)
+
+    npl_ratio: Metric = field(default_factory=Metric)
+    npl_definition: Optional[str] = None
+    cost_of_risk: Metric = field(default_factory=Metric)
+    provisions: Metric = field(default_factory=Metric)
+    coverage: Metric = field(default_factory=Metric)
+
+    total_capital_ratio: Metric = field(default_factory=Metric)
+    cet1: Metric = field(default_factory=Metric)
+    tier1: Metric = field(default_factory=Metric)
+    rwa: Metric = field(default_factory=Metric)
+    capital_events: list[str] = field(default_factory=list)
+    closing_note: Optional[str] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def from_json(path: str) -> "QuarterlyFacts":
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        return _dict_to_facts(raw)
+
+
+def _dict_to_facts(raw: dict) -> QuarterlyFacts:
+    f = QuarterlyFacts(company=raw["company"], period=raw["period"],
+                        prior_q_label=raw["prior_q_label"], prior_y_label=raw["prior_y_label"])
+    valid_keys = {"value", "unit", "currency", "qoq_prior", "yoy_prior",
+                  "qoq_pct", "yoy_pct", "note"}
+    for k, v in raw.items():
+        if k in ("company", "period", "prior_q_label", "prior_y_label"):
+            continue
+        if k == "loan_growth_by_segment":
+            setattr(f, k, {seg: Metric(**{kk: vv for kk, vv in (m or {}).items() if kk in valid_keys})
+                           for seg, m in (v or {}).items()})
+        elif isinstance(v, dict):
+            setattr(f, k, Metric(**{kk: vv for kk, vv in v.items() if kk in valid_keys}))
+        else:
+            setattr(f, k, v)
+    return f
+
+
+# ---------------------------------------------------------------------
+# 2. Motor NLG determinístico -- reglas de fraseo calibradas contra el
+#    corpus real (densidad objetivo: 4 párrafos, ~4-6 oraciones c/u,
+#    ~700-950 caracteres c/u, ver diagnóstico previo).
+# ---------------------------------------------------------------------
+
+def _g(x: float) -> str:
+    """Formatea un float sin ceros decimales sobrantes."""
+    if x == int(x):
+        return str(int(x))
+    return f"{x:g}"
+
+
+def fmt_metric_value(m: Metric) -> str:
+    s = ""
+    if m.currency:
+        s += m.currency
+    if m.value is not None:
+        s += _g(m.value)
+    if m.unit == "%":
+        s += "%"
+    elif m.unit in ("bn", "mn", "x"):
+        s += m.unit
+    elif m.unit:
+        s += f" {m.unit}"
+    return s
+
+
+def _fmt_bare(v: float, unit: Optional[str]) -> str:
+    s = _g(v)
+    if unit == "%":
+        s += "%"
+    elif unit:
+        s += f" {unit}"
+    return s
+
+
+def delta_clause(qoq_pct: Optional[float], yoy_pct: Optional[float]) -> str:
+    """'up X% QoQ and Y% YoY' (misma dirección) / 'down X% QoQ but up Y% YoY'
+    (direcciones distintas) -- no repite la palabra de dirección cuando
+    ambas coinciden, igual que el corpus real."""
+    if qoq_pct is None and yoy_pct is None:
+        return ""
+    if qoq_pct is not None and yoy_pct is not None:
+        qoq_word = "up" if qoq_pct >= 0 else "down"
+        yoy_word = "up" if yoy_pct >= 0 else "down"
+        if qoq_word == yoy_word:
+            return f"{qoq_word} {_g(abs(qoq_pct))}% QoQ and {_g(abs(yoy_pct))}% YoY"
+        return f"{qoq_word} {_g(abs(qoq_pct))}% QoQ but {yoy_word} {_g(abs(yoy_pct))}% YoY"
+    if qoq_pct is not None:
+        word = "up" if qoq_pct >= 0 else "down"
+        return f"{word} {_g(abs(qoq_pct))}% QoQ"
+    word = "up" if yoy_pct >= 0 else "down"
+    return f"{word} {_g(abs(yoy_pct))}% YoY"
+
+
+def level_vs_priors_clause(m: Metric, prior_q_label: str, prior_y_label: str) -> str:
+    """'X%, up from Y% in 3Q25 and Z% in 4Q24' (misma dirección) /
+    'X%, up from Y% in 3Q25 but down from Z% in 4Q24' (direcciones
+    distintas) -- omite tramos sin dato."""
+    if not m.has_level():
+        return ""
+    s = fmt_metric_value(m)
+    comps = []
+    if m.qoq_prior is not None:
+        d = "up" if m.value > m.qoq_prior else ("down" if m.value < m.qoq_prior else "flat")
+        comps.append((d, f"{_fmt_bare(m.qoq_prior, m.unit)} in {prior_q_label}"))
+    if m.yoy_prior is not None:
+        d = "up" if m.value > m.yoy_prior else ("down" if m.value < m.yoy_prior else "flat")
+        comps.append((d, f"{_fmt_bare(m.yoy_prior, m.unit)} in {prior_y_label}"))
+    if not comps:
+        return s
+    if len(comps) == 1:
+        d, txt = comps[0]
+        return s + (f", flat at {txt}" if d == "flat" else f", {d} from {txt}")
+    (d1, t1), (d2, t2) = comps
+    if d1 == d2:
+        return s + f", {d1} from {t1} and {t2}"
+    return s + f", {d1} from {t1} but {d2} from {t2}"
+
+
+def infer_tone(facts: QuarterlyFacts) -> str:
+    if facts.tone:
+        return facts.tone
+    ni = facts.net_income
+    if ni.yoy_pct is not None and ni.qoq_pct is not None:
+        if ni.yoy_pct >= 0 and ni.qoq_pct >= 0:
+            return "solid"
+        if ni.yoy_pct < 0 and ni.qoq_pct < 0:
+            return "weak"
+        return "mixed"
+    return "mixed"
+
+
+# ---- Párrafo 1: Headline & Profitability -----------------------------
+
+def paragraph_headline(f: QuarterlyFacts) -> str:
+    tone = infer_tone(f)
+    s = [f"{f.company} reported {tone} {f.period} results."]
+
+    ni = f.net_income
+    if ni.has_level():
+        clause = delta_clause(ni.qoq_pct, ni.yoy_pct)
+        s.append(f"Net income reached {fmt_metric_value(ni)}"
+                  + (f", {clause}" if clause else "") + ".")
+
+    roe_clause = level_vs_priors_clause(f.roe, f.prior_q_label, f.prior_y_label)
+    if roe_clause:
+        s.append(f"ROE/ROAE stood at {roe_clause}.")
+
+    nii_clause = delta_clause(f.nii.qoq_pct, f.nii.yoy_pct)
+    if nii_clause:
+        s.append(f"NII was {nii_clause}"
+                  + (f", with NIM at {level_vs_priors_clause(f.nim, f.prior_q_label, f.prior_y_label)}"
+                     if f.nim.has_level() else "") + ".")
+    elif f.nim.has_level():
+        s.append(f"NIM stood at {level_vs_priors_clause(f.nim, f.prior_q_label, f.prior_y_label)}.")
+
+    nonii_clause = delta_clause(f.non_interest_income.qoq_pct, f.non_interest_income.yoy_pct)
+    if nonii_clause:
+        s.append(f"Non-interest income was {nonii_clause}.")
+
+    if f.watchpoints:
+        wp = ", ".join(f.watchpoints[:-1]) + (" and " + f.watchpoints[-1] if len(f.watchpoints) > 1 else f.watchpoints[0])
+        s.append(f"Looking ahead, the main watchpoints are {wp}.")
+
+    return " ".join(s)
+
+
+# ---- Párrafo 2: Loans & Funding ---------------------------------------
+
+def paragraph_loans(f: QuarterlyFacts) -> str:
+    s = []
+    lg = f.loan_growth_total
+    clause = delta_clause(lg.qoq_pct, lg.yoy_pct)
+    if clause:
+        note = f" ({lg.note})" if lg.note else ""
+        s.append(f"Loan growth was {clause}{note}.")
+
+    if f.loan_growth_by_segment:
+        seg_bits = []
+        for seg, m in f.loan_growth_by_segment.items():
+            c = delta_clause(m.qoq_pct, m.yoy_pct)
+            if c:
+                seg_bits.append(f"{seg.replace('_', ' ')} ({c})")
+        if seg_bits:
+            s.append("By segment: " + "; ".join(seg_bits) + ".")
+
+    dep_clause = delta_clause(f.deposits.qoq_pct, f.deposits.yoy_pct)
+    fund_pct = f.deposits_pct_of_funding
+    if dep_clause or fund_pct.has_level():
+        bits = []
+        if fund_pct.has_level():
+            bits.append(f"representing {fmt_metric_value(fund_pct)} of total funding")
+        base = "Deposits" + (f" ({', '.join(bits)})" if bits else "")
+        if dep_clause:
+            s.append(f"{base} were {dep_clause}.")
+        else:
+            s.append(f"{base}.")
+
+    return " ".join(s)
+
+
+# ---- Párrafo 3: Asset Quality ------------------------------------------
+
+def paragraph_asset_quality(f: QuarterlyFacts) -> str:
+    s = []
+    npl = f.npl_ratio
+    npl_clause = level_vs_priors_clause(npl, f.prior_q_label, f.prior_y_label)
+    if npl_clause:
+        label = f.npl_definition or "the NPL ratio"
+        trend = "improved" if (npl.qoq_prior is not None and npl.value < npl.qoq_prior) else \
+                ("deteriorated" if (npl.qoq_prior is not None and npl.value > npl.qoq_prior) else "was stable")
+        s.append(f"Asset quality {trend} in {f.period}, with {label} at {npl_clause}.")
+
+    cor_clause = level_vs_priors_clause(f.cost_of_risk, f.prior_q_label, f.prior_y_label)
+    if cor_clause:
+        s.append(f"Cost of risk stood at {cor_clause}.")
+
+    prov_clause = delta_clause(f.provisions.qoq_pct, f.provisions.yoy_pct)
+    if prov_clause:
+        s.append(f"Provisions were {prov_clause}.")
+
+    cov_clause = level_vs_priors_clause(f.coverage, f.prior_q_label, f.prior_y_label)
+    if cov_clause:
+        s.append(f"Coverage stood at {cov_clause}.")
+
+    return " ".join(s)
+
+
+# ---- Párrafo 4: Capitalization -----------------------------------------
+
+def paragraph_capitalization(f: QuarterlyFacts) -> str:
+    s = []
+    tcr = f.total_capital_ratio
+    tcr_clause = level_vs_priors_clause(tcr, f.prior_q_label, f.prior_y_label)
+    if tcr_clause:
+        trend = "strengthened" if (tcr.qoq_prior is not None and tcr.value > tcr.qoq_prior) else \
+                ("weakened" if (tcr.qoq_prior is not None and tcr.value < tcr.qoq_prior) else "was broadly stable")
+        s.append(f"Capitalization {trend} during the quarter, with the total capital ratio at {tcr_clause}.")
+
+    for label, m in (("CET1", f.cet1), ("Tier 1", f.tier1)):
+        lvl = level_vs_priors_clause(m, f.prior_q_label, f.prior_y_label)
+        if lvl:
+            s.append(f"{label} stood at {lvl}.")
+
+    rwa_clause = delta_clause(f.rwa.qoq_pct, f.rwa.yoy_pct)
+    if rwa_clause:
+        s.append(f"RWAs were {rwa_clause}.")
+
+    if f.capital_events:
+        s.append("Key drivers of the quarter included " + "; ".join(f.capital_events) + ".")
+
+    if f.closing_note:
+        s.append(f.closing_note)
+
+    return " ".join(s)
+
+
+def generate_wording(f: QuarterlyFacts) -> str:
+    paras = [
+        paragraph_headline(f),
+        paragraph_loans(f),
+        paragraph_asset_quality(f),
+        paragraph_capitalization(f),
+    ]
+    paras = [p for p in paras if p.strip()]
+    return "\n".join(paras)
+
+
+# ---------------------------------------------------------------------
+# 3. Chequeo de campos clave faltantes -- se reporta APARTE del texto
+#    (para que el bloque copiable quede limpio, sin marcas [DATA GAP]).
+# ---------------------------------------------------------------------
+
+CORE_FIELDS = [
+    ("net_income", "net_income"), ("roe", "roe"), ("loan_growth_total", "loan_growth_total"),
+    ("npl_ratio", "npl_ratio"), ("cost_of_risk", "cost_of_risk"), ("total_capital_ratio", "total_capital_ratio"),
+]
+
+
+def missing_core_fields(f: QuarterlyFacts) -> list[str]:
+    missing = []
+    for label, attr in CORE_FIELDS:
+        m: Metric = getattr(f, attr)
+        if not m.has_level() and m.qoq_pct is None and m.yoy_pct is None:
+            missing.append(label)
+    return missing
+
+
+# ---------------------------------------------------------------------
+# 4. Auditoría de grounding numérico (anti-alucinación / QA) -- ahora
+#    es una red de seguridad de sanity-check, ya que el texto se arma
+#    directamente desde los campos del input (no debería haber cifras
+#    "de más"), pero queda útil si el input se edita a mano después.
+# ---------------------------------------------------------------------
+
+NUMBER_RE = re.compile(r"-?\d+\.?\d*")
+
+
+def _collect_reference_numbers(facts: QuarterlyFacts) -> set:
+    nums = set()
+
+    def add(m: Metric):
+        for v in (m.value, m.qoq_prior, m.yoy_prior, m.qoq_pct, m.yoy_pct):
+            if isinstance(v, (int, float)):
+                nums.add(round(abs(v), 3))
+
+    for attr in ("net_income", "roe", "nii", "nim", "non_interest_income",
+                 "loan_growth_total", "deposits", "deposits_pct_of_funding",
+                 "npl_ratio", "cost_of_risk", "provisions", "coverage",
+                 "total_capital_ratio", "cet1", "tier1", "rwa"):
+        add(getattr(facts, attr))
+    for m in facts.loan_growth_by_segment.values():
+        add(m)
+    return nums
+
+
+def numeric_grounding_audit(generated_text: str, facts: QuarterlyFacts, tol: float = 0.06) -> list[str]:
+    """Nota: los free-text (watchpoints, capital_events, closing_note,
+    npl_definition) NO se verifican -- solo se auditan las cifras que el
+    propio motor insertó desde campos Metric. Las etiquetas de periodo
+    (ej. '3Q25', '4Q24') se excluyen para evitar falsos positivos."""
+    ref = _collect_reference_numbers(facts)
+    clean_text = generated_text
+    for label in (facts.period, facts.prior_q_label, facts.prior_y_label):
+        if label:
+            clean_text = clean_text.replace(label, "")
+    flags = []
+    for match in NUMBER_RE.finditer(clean_text):
+        try:
+            val = abs(float(match.group()))
+        except ValueError:
+            continue
+        if val in (2021, 2022, 2023, 2024, 2025, 2026, 1, 2, 3, 4):
+            continue
+        if not any(abs(val - r) < tol for r in ref):
+            flags.append(match.group())
+    return flags
+
+
+# ---------------------------------------------------------------------
+# 5. Impresión lista para copiar/pegar + escritura opcional a Excel
+# ---------------------------------------------------------------------
+
+def print_block(f: QuarterlyFacts, warn: bool = True) -> str:
+    text = generate_wording(f)
+    n_paras = text.count("\n") + 1
+    print("=" * 90)
+    print(f"{f.company} — {f.period}  ({n_paras} párrafos, {len(text)} caracteres)")
+    print("=" * 90)
+    print("--- INICIO: copiar desde aquí ---")
+    print(text)
+    print("--- FIN: copiar hasta aquí ---")
+    if warn:
+        missing = missing_core_fields(f)
+        flags = numeric_grounding_audit(text, f)
+        if missing:
+            print(f"[aviso] campos clave sin dato en el input -> frase omitida: {', '.join(missing)}", file=sys.stderr)
+        if flags:
+            print(f"[aviso] cifras en el texto no trazables al input (revisar): {flags}", file=sys.stderr)
+    print()
+    return text
+
+
+def write_back(wb_path: str, mapping: dict, out_path: str) -> None:
+    """mapping: {sheet_name: texto}. Requiere openpyxl. Escribe SIEMPRE
+    a una copia (out_path), nunca sobre wb_path directamente."""
+    import openpyxl
+    wb = openpyxl.load_workbook(wb_path, keep_vba=True)
+    for sheet, text in mapping.items():
+        if sheet not in wb.sheetnames:
+            print(f"[aviso] hoja '{sheet}' no existe en {wb_path}, se omite.", file=sys.stderr)
+            continue
+        wb[sheet]["L6"] = text
+    wb.save(out_path)
+    print(f"\nEscrito en {out_path}.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--facts", nargs="*", default=[], help="Uno o más archivos JSON de QuarterlyFacts")
+    ap.add_argument("--facts-dir", default=None, help="Carpeta con archivos .json de QuarterlyFacts (uno por banco)")
+    ap.add_argument("--workbook", default=None, help="Ruta al .xlsm (solo si usas --write)")
+    ap.add_argument("--write", metavar="OUT_XLSM", default=None, help="Escribe los wordings generados en una COPIA del workbook")
+    args = ap.parse_args()
+
+    paths = list(args.facts)
+    if args.facts_dir:
+        paths += sorted(glob.glob(str(Path(args.facts_dir) / "*.json")))
+    if not paths:
+        ap.error("Debes indicar --facts archivo1.json [archivo2.json ...] o --facts-dir carpeta/")
+
+    mapping = {}
+    for p in paths:
+        f = QuarterlyFacts.from_json(p)
+        text = print_block(f)
+        mapping[f.company] = text
+
+    if args.write:
+        if not args.workbook:
+            ap.error("--write requiere --workbook")
+        write_back(args.workbook, mapping, args.write)
+
+
+if __name__ == "__main__":
+    main()
