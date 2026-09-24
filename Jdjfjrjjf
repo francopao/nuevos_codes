@@ -1,0 +1,57 @@
+¡Excelente! Sí hay más margen — y tus dos ejemplos apuntan exactamente al mismo mecanismo que ya resolvimos para los nombres de institución, pero aplicado ahora a **"Detallada"** (los indicadores). Verifiqué contra tu archivo de junio: `"Cartera Atrasada Ajustada **"` es texto crudo real, y confirmé que el patrón de espacios pegados a paréntesis (`"( N° de veces )"` vs `"(N° de veces)"`) es exactamente el tipo de ruido que SBS mete y quita entre entregas.
+
+## Fix — extender `limpiar_etiqueta_sbs()` (ya la tienes desde el cambio anterior)
+
+**Buscar (Ctrl+F, único en tu archivo, tal como quedó tras mi sugerencia anterior):**
+```python
+    texto = re.sub(r"(\d+/|\*+)\s*$", "", texto).strip()
+    return texto
+```
+
+**Reemplazar por:**
+```python
+    texto = re.sub(r"(\d+/|\*+)\s*$", "", texto).strip()
+    texto = re.sub(r"\(\s+", "(", texto)
+    texto = re.sub(r"\s+\)", ")", texto)
+    return texto
+```
+
+Esto quita cualquier espacio pegado justo después de `(` o justo antes de `)`, sin tocar nada más del texto (probé "Créditos Atrasados (criterio SBS)\* / Créditos Directos" y esa asterisco interna, que sí es parte fija del nombre, queda intacta — solo se limpia lo que está al final o pegado a paréntesis).
+
+## Fix — aplicar la limpieza a "Detallada" ANTES del diccionario de renombre
+
+Hoy `limpiar_etiqueta_sbs()` solo se usa para nombres de institución (línea con `a = normalizar_nombre_institucion(...)`). Hay que aplicarla también al indicador, antes de que `renombrar_valor` lo busque en tu `Diccionario_SBS.xlsx`:
+
+**Buscar (Ctrl+F, único):**
+```python
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+```
+
+**Reemplazar por:**
+```python
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+```
+
+## Fix — lo mismo para el nombre de institución antes de SU paso por el diccionario
+
+Ojo: el nombre de institución pasa por el diccionario **dos veces** en tu script — una vez temprano (columna `"Index"`) y otra vez al final (donde ya arreglamos con `normalizar_nombre_institucion`). Para que el primer paso también reciba texto limpio (y así el diccionario necesite menos entradas con variantes de asteriscos):
+
+**Buscar (Ctrl+F, único):**
+```python
+        DF["Index"] = DF.apply(lambda r: renombrar_valor(r, "Index", dic_ren), axis=1)
+```
+
+**Reemplazar por:**
+```python
+        DF["Index"] = DF["Index"].apply(limpiar_etiqueta_sbs)
+        DF["Index"] = DF.apply(lambda r: renombrar_valor(r, "Index", dic_ren), axis=1)
+```
+
+Aplicar `limpiar_etiqueta_sbs()` dos veces sobre el mismo texto (aquí y más adelante en `a = ...`) no rompe nada — sobre texto ya limpio simplemente no cambia nada.
+
+## Un pendiente operativo importante
+
+A partir de ahora, la búsqueda en `Diccionario_SBS.xlsx` (columna `Nombre_Antiguo`) se hace sobre el texto **ya limpio** (sin asteriscos, sin "1/", sin espacios pegados a paréntesis). Si alguna fila de ese diccionario tiene su `Nombre_Antiguo` escrito **con** esa basura (ej. `"Cartera Atrasada Ajustada **"` en vez de `"Cartera Atrasada Ajustada"`), esa fila dejará de matchear y el renombre no se aplicará. Vale la pena que revises ese diccionario una vez y limpies esas entradas también, para que ambos lados hablen el mismo "texto limpio".
+
+Si quieres, en tu próxima entrega puedo revisar tu `3.Indicadores Financieros.xlsx` actualizado para detectar si "Detallada" ya tiene fragmentación histórica del mismo tipo (filas gemelas por un espacio o un asterisco de más) y armarte el script de reconciliación equivalente al de la vez pasada.
