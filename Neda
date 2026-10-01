@@ -1,0 +1,77 @@
+## Cambio 1 — Añadir `indicadores2` (Empresas Financieras)
+
+**Busca (línea 266):**
+```python
+indicadores = {"B-2201": "EGP", "B-2401": "Indicadores", "B-2309": "Creditos"}
+```
+
+**Reemplaza por:**
+```python
+indicadores = {"B-2201": "EGP", "B-2401": "Indicadores", "B-2309": "Creditos"}
+indicadores2 = {"B-3101": "EGP", "B-3301": "Indicadores", "B-3219": "Creditos"}
+```
+
+---
+
+## Cambio 2 — Procesar también `indicadores2` y guardarlo en el mismo `data_por_hoja`
+
+**Busca (líneas 300-307):**
+```python
+data_por_hoja = {}
+for indicador, nombre_hoja in indicadores.items():
+    resultado = encontrar_ultimo(indicador)
+    if resultado:
+        df_fin = pd.DataFrame([resultado])
+    else:
+        df_fin = pd.DataFrame(columns=["fecha", "Link", "descripcion", "link"])
+    data_por_hoja[nombre_hoja] = df_fin
+```
+
+**Reemplaza por:**
+```python
+data_por_hoja = {}
+for indicador, nombre_hoja in indicadores.items():
+    resultado = encontrar_ultimo(indicador)
+    if resultado:
+        df_fin = pd.DataFrame([resultado])
+    else:
+        df_fin = pd.DataFrame(columns=["fecha", "Link", "descripcion", "link"])
+    data_por_hoja[nombre_hoja] = df_fin
+
+for indicador, nombre_hoja in indicadores2.items():
+    resultado = encontrar_ultimo(indicador)
+    if resultado:
+        df_fin = pd.DataFrame([resultado])
+    else:
+        df_fin = pd.DataFrame(columns=["fecha", "Link", "descripcion", "link"])
+    data_por_hoja[f"{nombre_hoja}_Fin"] = df_fin
+```
+
+---
+
+## Cambio 3 — Etiquetas legibles para el correo (distinguir Bancarias vs Financieras)
+
+**Busca (líneas 334-338):**
+```python
+map_nombres = {
+    "EGP": "Balance y EGP",
+    "Indicadores": "Indicadores Financieros",
+    "Creditos": "Estructura de Créditos"
+}
+```
+
+**Reemplaza por:**
+```python
+map_nombres = {
+    "EGP": "Balance y EGP (Empresas Bancarias)",
+    "Indicadores": "Indicadores Financieros (Empresas Bancarias)",
+    "Creditos": "Estructura de Créditos (Empresas Bancarias)",
+    "EGP_Fin": "Balance y EGP (Empresas Financieras)",
+    "Indicadores_Fin": "Indicadores Financieros (Empresas Financieras)",
+    "Creditos_Fin": "Estructura de Créditos (Empresas Financieras)"
+}
+```
+
+---
+
+Con estos 3 cambios no hace falta tocar nada más: el bloque de `lista_alertas` (319-323), el `ExcelWriter` que sobrescribe `ruta_f2` (325-330) y el armado del correo (340-353) ya iteran genéricamente sobre `data_por_hoja`, así que recogen automáticamente las 3 hojas nuevas (`EGP_Fin`, `Indicadores_Fin`, `Creditos_Fin`) dentro del mismo `Financial Alert.xlsx`, en el mismo correo, y solo disparan el envío si `lista_alertas` no está vacía.
