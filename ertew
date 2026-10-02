@@ -1,0 +1,162 @@
+**Diagnóstico (según `output_indicadoresSBS.txt`):** no hay bug de exportación. Las 6 instituciones procesaron agosto correctamente — Bancos 462 filas, Financieras 126, Cajas 286, Cajas Rurales 132; Mypes y Estatales cayeron al fallback de julio como esperabas, sin romper nada. El fallo real está en la última línea útil del log:
+
+```
+[ERROR] Periodo Agosto 2026: archivo base abierto o sin permisos de escritura. Cierralo e intenta de nuevo.
+```
+
+`guardar_en_base` lanzó `PermissionError` al abrir `3.Indicadores Financieros.xlsx` para escribir — estaba bloqueado (abierto en Excel u otro proceso) en ese momento. Por eso el resumen dio "0 períodos con éxito": todo el procesamiento fue bien, solo falló el único paso de escritura, al final.
+
+(El bloque `[DEBUG] Ingresos Financieros Anualizados -> Mapeado/Nuevo` que sale como "Nuevo" para absolutamente todas las entidades es consistente con eso: es la primera vez que esas keys se calculan limpias gracias al fix de `limpiar_etiqueta_sbs`, así que para la base histórica son nuevas. No es un bug.)
+
+Dos mejoras, en formato find/replace:
+
+### 1) Fallar rápido si el archivo base está bloqueado (antes de procesar todo)
+
+Hoy el script invierte tiempo procesando todo y recién al final avisa que no pudo guardar. Agrega esta función **antes** del bloque `# BUSQUEDA DE ARCHIVO CON RETROCESO REAL DE MESES` (justo después de que termina `generar_backup`):
+
+```python
+# ============================================================
+# VERIFICACION DE ESCRIBIBILIDAD DEL ARCHIVO BASE
+# ============================================================
+def archivo_base_escribible(ruta):
+    """Intenta abrir el archivo en modo lectura/escritura para detectar
+    si esta bloqueado (ej. abierto en Excel) ANTES de procesar todo."""
+    if not os.path.isfile(ruta):
+        return True
+    try:
+        with open(ruta, "r+b"):
+            pass
+        return True
+    except (PermissionError, OSError):
+        return False
+```
+
+Luego en `main()`, busca:
+```python
+    if not os.path.isdir(RUTA_BASE_DIR):
+        log_error(f"No se puede acceder a la ruta de red: {RUTA_BASE_DIR}")
+        log_error("Verifica tu conexion VPN / unidad Z: antes de continuar.")
+        return
+
+    try:
+        array_rutas = generar_array_rutas(INICIO, FINAL)
+```
+reemplaza por:
+```python
+    if not os.path.isdir(RUTA_BASE_DIR):
+        log_error(f"No se puede acceder a la ruta de red: {RUTA_BASE_DIR}")
+        log_error("Verifica tu conexion VPN / unidad Z: antes de continuar.")
+        return
+
+    if not archivo_base_escribible(RUTA_ARCHIVO_BASE):
+        log_error(f"'{RUTA_ARCHIVO_BASE}' esta abierto o bloqueado.")
+        log_error("Cierralo (Excel u otro programa) y vuelve a ejecutar. Se omite la corrida.")
+        return
+
+    try:
+        array_rutas = generar_array_rutas(INICIO, FINAL)
+```
+
+### 2) Que el resumen no oculte instituciones faltantes dentro de un período "exitoso"
+
+Esto es el bug que ya habíamos identificado antes (una institución puede fallar sola dentro de un período y el período igual se marca como éxito). Busca toda la función `procesar_mes`:
+
+```python
+def procesar_mes(mes, mes_abr, anio, dic_ren):
+    log_info(f"===== Procesando periodo: {mes} {anio} =====")
+    resultados = []
+    for cfg in INSTITUCIONES:
+        try:
+            resultado = procesar_institucion(cfg, mes, mes_abr, anio, dic_ren)
+        except Exception as e:
+            log_error(f"{cfg['nombre']}: excepcion no controlada -> {e}")
+            resultado = None
+        if resultado is not None and not resultado.empty:
+            resultados.append(resultado)
+
+    if not resultados:
+        log_error(f"Periodo {mes} {anio}: ninguna institucion se pudo procesar. Se omite el periodo.")
+        return None
+
+    DF_Total = pd.concat(resultados, ignore_index=True)
+
+    mask = DF_Total["Detallada"].astype(str).str.contains("Ratio de Capital Global", na=False)
+    DF_Total.loc[mask, "Detallada"] = "Ratio de Capital Global(-1M)"
+
+    DF_Total.insert(0, "key",
+        DF_Total["Institución"].astype(str) + DF_Total["Estructura"].astype(str) +
+        DF_Total["Moneda"].astype(str) + DF_Total["Nombre"].astype(str) +
+        DF_Total["Tipo"].astype(str) + DF_Total["Detallada"].astype(str))
+
+    return DF_Total
+```
+
+y reemplázala completa por:
+
+```python
+def procesar_mes(mes, mes_abr, anio, dic_ren):
+    log_info(f"===== Procesando periodo: {mes} {anio} =====")
+    resultados = []
+    instituciones_faltantes = []
+    for cfg in INSTITUCIONES:
+        try:
+            resultado = procesar_institucion(cfg, mes, mes_abr, anio, dic_ren)
+        except Exception as e:
+            log_error(f"{cfg['nombre']}: excepcion no controlada -> {e}")
+            resultado = None
+        if resultado is not None and not resultado.empty:
+            resultados.append(resultado)
+        else:
+            instituciones_faltantes.append(cfg['nombre'])
+
+    if not resultados:
+        log_error(f"Periodo {mes} {anio}: ninguna institucion se pudo procesar. Se omite el periodo.")
+        return None, instituciones_faltantes
+
+    if instituciones_faltantes:
+        log_warn(f"Periodo {mes} {anio}: se guardara SIN datos de {instituciones_faltantes}.")
+
+    DF_Total = pd.concat(resultados, ignore_index=True)
+
+    mask = DF_Total["Detallada"].astype(str).str.contains("Ratio de Capital Global", na=False)
+    DF_Total.loc[mask, "Detallada"] = "Ratio de Capital Global(-1M)"
+
+    DF_Total.insert(0, "key",
+        DF_Total["Institución"].astype(str) + DF_Total["Estructura"].astype(str) +
+        DF_Total["Moneda"].astype(str) + DF_Total["Nombre"].astype(str) +
+        DF_Total["Tipo"].astype(str) + DF_Total["Detallada"].astype(str))
+
+    return DF_Total, instituciones_faltantes
+```
+
+Y en `main()`, busca:
+```python
+        try:
+            DF_Total = procesar_mes(mes, mes_abr, anio, dic_ren)
+            if DF_Total is None:
+                resumen_error.append(f"{mes} {anio}")
+                continue
+
+            if guardar_en_base(DF_Total, mes, mes_abr, anio):
+                resumen_ok.append(f"{mes} {anio}")
+            else:
+                resumen_error.append(f"{mes} {anio}")
+```
+reemplaza por:
+```python
+        try:
+            DF_Total, instituciones_faltantes = procesar_mes(mes, mes_abr, anio, dic_ren)
+            if DF_Total is None:
+                resumen_error.append(f"{mes} {anio}")
+                continue
+
+            if guardar_en_base(DF_Total, mes, mes_abr, anio):
+                if instituciones_faltantes:
+                    resumen_ok.append(f"{mes} {anio} (incompleto: falta {instituciones_faltantes})")
+                else:
+                    resumen_ok.append(f"{mes} {anio}")
+            else:
+                resumen_error.append(f"{mes} {anio}")
+```
+
+Con el archivo cerrado al correr, agosto debería guardarse sin problema. Al margen: el archivo que adjuntaste como "Cajas" es `C-2101-jn2026.XLS`, no `C-1301-ag2026` como mencionas en el texto — no afecta el diagnóstico (el log confirma que Cajas sí usó el archivo correcto en tu entorno), solo probablemente subiste el que no era.
