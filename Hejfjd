@@ -1,0 +1,265 @@
+Sigo revisando `Produccion.xlsx`: ahora agrupo los titulares duplicados y veo si los meses se solapan o solo se complementan, para diseñar el bloque de consolidación.
+
+Estoy armando el código final y probándolo contra tu `Produccion.xlsx` real (consolidación de duplicados y avisos de titulares nuevos) antes de pasarte los bloques.
+
+Probé todo contra tu `Produccion.xlsx` real y funciona: pasa de 3 048 a 1 993 filas, los totales mensuales no cambian, y una segunda corrida ya no modifica nada. El script parcheado compila, pero no corrí el pipeline completo porque no tengo los archivos fuente mensuales.
+
+## Qué pasaba
+
+Cada mes, el nombre largo ("COMPAÑIA DE MINAS BUENAVENTURA S.A.A.") generaba un `Key1` distinto al de "BUENAVENTURA". Por eso se creaba una fila nueva con solo ese mes, y quedaban huecos en ambas filas.
+
+Además encontré dos causas más que producían duplicados del mismo tipo:
+- **MINERAL en minúsculas:** `Oro`/`ORO`, `Cobre`/`COBRE`, etc. Es la causa más grande, unas 630 filas de las duplicadas.
+- **PROCESO con variantes:** `LIXIViACIÓN` vs `LIXIVIACIÓN`, y `(en blanco)` vs `No especifica`.
+
+También había una fila basura con el encabezado repetido (`MINERAL, ETAPA, PROCESO…`).
+
+Al fusionar, las celdas que se solapan son solo "0 vs valor" o "0 vs 0", así que tomo el máximo y no pierdo datos. Si algún día chocan dos valores distintos no nulos, el script lo avisa.
+
+## Cinco cambios (usa Ctrl+F con el texto exacto)
+
+**1. Pegar el Bloque B completo, justo ANTES de la línea:**
+`def main(mes, anio):`
+
+```python
+import unicodedata, difflib
+
+def _clave(s):
+    """Clave de comparación: sin tildes, MAYÚSCULAS, espacios simples, '*-*' -> '&'."""
+    s = unicodedata.normalize('NFKD', str(s))
+    s = ''.join(c for c in s if not unicodedata.combining(c)).upper()
+    return re.sub(r'\s+', ' ', s.replace('*-*', '&')).strip()
+
+# (1) Nombre único de titulares que SOLO cambian por tilde / mayúscula / espacio doble / "*-*".
+TITULAR_UNICO = [
+    'COMPAÑIA MINERA CARAVELI S.A.C.',
+    'COMPAÑIA MINERA SANTA LUISA S.A.',
+    'GLORE PERU S.A.C',
+    'COMPAÑIA MINERA SCORPION S.A.',
+    'COMPAÑIA MINERA RAURA S.A.',
+    'COMPAÑIA MINERA SAN VALENTIN S.A.',
+    'COMPAÑIA MINERA CONDESTABLE S.A.',
+    'COMPAÑIA MINERA MAXPALA S.A.C.',
+    'COMPAÑIA MINERA CORIRE S.A.C.',
+    'COMPAÑIA MINERA ATAHUALPA S.A.C.',
+    'AMG-AUPLATA MINING GROUP PERÚ S.A.C.',
+    'CORPORACION MINERA ANANEA S.A.',
+    'A & G CORPORACION MINERA OROSEL S.R.L.',
+    'CORPORACION MINERA SACRACANCHA S.A.C.',
+    'CORPORACION PACHAKORI E.I.R.L.',
+    'NICONSTA COMPAÑIA MINERA S.A.C.',
+    'CORPORACION & SERVICIOS MULTIPLES TUMI DE ORO SOCIEDAD ANONIMA',
+    'CORPORACION CAYETANA SOCIEDAD COMERCIAL DE RESPONSABILIDAD LIMITADA - CORPCA S.R.L.',
+    'AURIFERA SELVA DE ORO PERU S.A.C.',
+    'GRUPO MINERO H & R SOCIEDAD ANONIMA CERRADA - GRUPO MINERO H & R S.A.C.',
+    'DOS AMIGOS V&B S.A.C.',
+    'CORPORACION MINERA SANTA TERESA ITUATA E.I.R.L.',
+    'CORPORACION MINERA GAMAX S.C.R.L.',
+    'EMPRESA MINERA GRUPO GRANDE SOCIEDAD ANONIMA - MINERA G & G S.A.',
+]
+
+# (2) Alias reales: variante -> nombre único (el corto, como pediste). Agrega aquí las nuevas.
+TITULAR_ALIAS = {
+    'COMPAÑIA DE MINAS BUENAVENTURA S.A.A.': 'BUENAVENTURA',
+    'COMPAÑIA MINERA ANTAMINA S.A.': 'ANTAMINA',
+    'EMPRESA ADMINISTRADORA CERRO S.A.C.': 'EMPRESA ADMINISTRADORA CERRO',
+    'COMPAÑIA MINERA PODEROSA S.A.': 'PODEROSA',
+    'COMPAÑIA MINERA LINCUNA S.A.': 'LINCUNA',
+    'COMPAÑIA MINERA ARGENTUM S.A.C.': 'ARGENTUM',
+    'EMPRESA MINERA LOS QUENUALES S.A.C.': 'LOS QUENUALES',
+    'MINSUR S.A.': 'MINSUR',
+    'COMPAÑIA MINERA ARES S.A.C.': 'ARES',
+    'MINERA YANACOCHA S.R.L.': 'YANACOCHA',
+    'SOCIEDAD MINERA EL BROCAL S.A.A.': 'EL BROCAL',
+    'MINERA BATEAS S.A.C.': 'BATEAS',
+    'COMPAÑIA MINERA CHUNGAR S.A.C.': 'CHUNGAR',
+    'NEXA RESOURCES ATACOCHA S.A.A.': 'NEXA ATACOCHA',
+    'NEXA RESOURCES EL PORVENIR S.A.C.': 'NEXA EL PORVENIR',
+    'MINERA CHINALCO PERU S.A.': 'MINERA CHINALCO',
+    'NEXA RESOURCES CAJAMARQUILLA S.A.': 'NEXA CAJAMARQUILLA',
+    'PAN AMERICAN SILVER HUARON S.A.': 'PAN AMERICAN SILVER HUARON',
+    'COMPAÑIA MINERA ANTAPACCAY S.A.': 'ANTAPACCAY',
+    'MINERA TITAN DEL PERU S.R.L.': 'TITAN DEL PERU',
+    'MINERA COLQUISIRI S.A.': 'MINERA COLQUISIRI',
+    'SOCIEDAD MINERA CORONA S.A.': 'MINERA CORONA',
+    'MINERA SHUNTUR S.A.C.': 'SHUNTUR',
+    'MINERA LAS BAMBAS S.A.': 'MINERA LAS BAMBAS',
+    'MINERA SHOUXIN PERU S.A.': 'SHOUXIN',
+    'SHAHUINDO S.A.C.': 'SHAHUINDO',
+    'HUDBAY PERU S.A.C.': 'HUDBAY',
+    'COMPAÑIA MINERA KOLPA S.A.': 'KOLPA',
+    'NEXA RESOURCES PERU S.A.A.': 'NEXA PERU',
+    'CORI PUNO S.R.L.': 'CORI PUNO S.A.C.',
+    'COMPAÑIA MINERA COIMOLACHE S.A.': 'COIMOLACHE',
+    'LA ARENA S.A.': 'LA ARENA',
+    'MINERA VETA DORADA S.A.C.': 'MINERA VETA DORADA',
+    'MINERA BOROO MISQUICHILCA S.A.': 'BOROO MISQUICHILCA',
+    'SOCIEDAD MINERA CERRO VERDE S.A.A.': 'CERRO VERDE',
+    'MINERA OREX S.A.C.': 'MINERA OREX',
+    'MINERA COLIBRI S.A.C.': 'MINERA COLIBRI',
+    'CONSORCIO PERUANO DE MINAS S.A.C': 'CONSORCIO PERUANO DE MINAS',
+    'MARCOBRE S.A.C.': 'MARCOBRE',
+    'GOLD FIELDS LA CIMA S.A.': 'GOLD FIELDS LA CIMA',
+    'MINERA LA ZANJA S.R.L.': 'MINERA LA ZANJA',
+    'MINERA LAYTARUMA S.A.': 'MINERA LAYTARUMA',
+    'VISTA GOLD S.A.C.': 'VISTA GOLD',
+    'MINERA ESPAÑOLITA DEL SUR S.A.': 'MINERA ESPAÑOLITA DEL SUR',
+    'METALURGIA BUSINESS PERU S.A.A.': 'METALURGIA BUSINESS PERU',
+    'LOS TRES EMBLEMAS DORADOS DE ORO S.A.C.': 'LOS TRES EMBLEMAS DORADOS DE ORO',
+    'ANGLO AMERICAN QUELLAVECO S.A.': 'ANGLO AMERICAN QUELLAVECO',
+    'SHOUGANG HIERRO PERU S.A.A.': 'SHOUGANG HIERRO',
+    'PUKA MANI E.I.R.L.': 'PUKA MANI',
+    'PUYANI E.I.R.L.': 'PUYANI',
+    'UNION MINERA HIPASUR S.A.C.': 'UNION MINERA HIPASUR',
+    'AUREX S.A.C.': 'AUREX S.A.',
+    'LA JOYA MINING S.A.C.': 'LA JOYA MINING',
+    'SOUTHERN PERU COPPER CORPORATION SUCURSAL DEL PERU': 'SOUTHERN PERU COPPER',
+    'VOLCAN COMPAÑIA MINERA S.A.A.': 'VOLCAN',
+    'CONSORCIO MINERO HORIZONTE S.R.L.': 'HORIZONTE',
+    'A & M MINERIA Y MAQUINARIAS S.A.C. EN LIQUIDACION': 'A & M MINERIA Y MAQUINARIAS S.A.C.',
+    'CONSORCIO MINERO SUNEC SOCIEDAD COMERCIAL DE RESPONSABILIDAD LIMITADA - CONSORCIO MINERO SUNEC S.R.L': 'CONSORCIO MINERO SUNEC S.A.C.',
+    'CORPORACION JONGOS S.A.C. - CORJON S.A.C.': 'CORPORACION JONGOS S.A.C.',
+    'HUAMAN VIUDA DE AUQUIPATA BALBINA': 'HUAMAN VDA. DE AUQUIPATA BALBINA',
+    'S.M.R.L. HORACIO ZEVALLOS GAMES': 'SMRL HORACIO ZEVALLOS GAMES',
+    'S.M.R.L. SANTA BARBARA DE TRUJILLO': 'SMRL SANTA BARBARA DE TRUJILLO',
+    'EMPRESA MINERA LUZ NUEVA FORTUNA SOCIEDAD ANONIMA': 'LUZ NUEVA FORTUNA',
+    'SUMMA GOLD CORPORATION S.A.C.': 'SUMMA GOLD',
+    'SANTANDER PERUVIAN MINE S.A.C.': 'SANTANDER PERUVIAN MINE',
+    'S.M.R.L. PLAYA CHINO II': 'PLAYA CHINO II',
+}
+
+_MAPA_TITULAR = {}
+def _registrar(variante, unico):
+    k = _clave(variante)
+    if _MAPA_TITULAR.get(k, unico) != unico:
+        raise ValueError(f"Alias contradictorio: '{variante}' -> '{unico}' y '{_MAPA_TITULAR[k]}'")
+    _MAPA_TITULAR[k] = unico
+for _u in TITULAR_UNICO:
+    _registrar(_u, _u)
+for _v, _u in TITULAR_ALIAS.items():
+    _registrar(_u, _u)      # el destino se resuelve a sí mismo (evita cadenas A->B->C)
+    _registrar(_v, _u)
+
+def canonizar_titular(serie):
+    return serie.map(lambda x: _MAPA_TITULAR.get(_clave(x), x) if isinstance(x, str) else x)
+
+_PROCESO_FIX = {'LIXIVIACION': 'LIXIVIACIÓN', '(EN BLANCO)': 'No especifica'}
+def normalizar_dimensiones(df):
+    """MINERAL en mayúsculas ('Oro'->'ORO') y PROCESO sin variantes ('LIXIViACIÓN', '(en blanco)')."""
+    d = df.copy()
+    d['MINERAL'] = d['MINERAL'].map(lambda x: x.upper() if isinstance(x, str) else x)
+    d['PROCESO'] = d['PROCESO'].map(lambda x: _PROCESO_FIX.get(_clave(x), x) if isinstance(x, str) else x)
+    return d
+
+def consolidar_base(df):
+    """Unifica titulares/mineral/proceso en la base histórica y fusiona filas duplicadas.
+    Columnas por posición: 0=Key1, 1-5=MINERAL..UNIDAD, 6+=meses (sirve con etiquetas datetime o texto).
+    Celdas solapadas -> max (en tu base solo chocan 0 vs valor, o 0 vs 0)."""
+    cols = list(df.columns)
+    llaves, meses_c = cols[1:6], cols[6:]
+    d = df.copy()
+    basura = d['MINERAL'].astype(str).str.strip().eq('MINERAL')     # encabezado "fugado" a la base
+    if basura.any():
+        print(f"[BASE] Se elimina {int(basura.sum())} fila(s) basura (encabezado repetido).")
+        d = d[~basura]
+    d['TITULAR'] = canonizar_titular(d['TITULAR'])
+    d = normalizar_dimensiones(d)
+    d[meses_c] = d[meses_c].apply(pd.to_numeric, errors='coerce')
+    antes_filas, antes_tot = len(d), d[meses_c].sum()
+    g = d.groupby(llaves, sort=False, dropna=False)[meses_c]
+    mx, mn = g.max(), g.min()
+    conflictos = int((((mx - mn).abs() > 1e-9) & (mn != 0)).sum().sum())
+    out = mx.reset_index()
+    key1 = out['MINERAL'] + out['ETAPA'] + out['PROCESO'] + out['TITULAR'] + out['UNIDAD']
+    out = pd.concat([key1.rename('Key1'), out], axis=1)[cols]
+    dif = (out[meses_c].sum() - antes_tot).abs()
+    print(f"[BASE] Filas {antes_filas} -> {len(out)} | titulares únicos: {out['TITULAR'].nunique()}")
+    if conflictos:
+        print(f"[BASE][ALERTA] {conflictos} celda(s) con 2 valores distintos no nulos (se tomó el mayor). Revisar.")
+    if (dif > 1e-6).any():
+        print("[BASE][ALERTA] Totales mensuales cambiaron en:", [str(c)[:10] for c in dif[dif > 1e-6].index])
+    else:
+        print("[BASE] Control de totales mensuales: OK (sin cambios).")
+    return out
+
+def _nucleo(s):
+    """Nombre sin tildes/forma societaria/prefijos genéricos, solo para comparar parecidos."""
+    n = re.sub(r'[\.,\-´`]', ' ', _clave(s))
+    n = re.sub(r'\s+', ' ', n).strip()
+    for _ in range(3):
+        n = re.sub(r'\s(S A A|S A C|S R L|S C R L|E I R L|S A|SAC|SRL|SAA|LTDA|SA)$', '', n)
+    n = re.sub(r'^(COMPANIA MINERA|COMPANIA DE MINAS|SOCIEDAD MINERA|EMPRESA MINERA|MINERA|CIA MINERA|COMPANIA)\s', '', n)
+    return re.sub(r'\b(PERU|RESOURCES)\b', '', n).replace('  ', ' ').strip()
+
+def reportar_titulares_nuevos(df_nuevo, df_base, umbral=0.85, max_sin_parecido=15):
+    """Aviso preventivo: titulares del mes que no existen en la base y se parecen a uno existente."""
+    base = sorted(set(df_base['TITULAR'].dropna()))
+    nbase = {b: _nucleo(b) for b in base}
+    nuevos = sorted(set(df_nuevo['TITULAR'].dropna()) - set(base))
+    sin = []
+    for n in nuevos:
+        nn = _nucleo(n)
+        cand = sorted(((difflib.SequenceMatcher(None, nn, nb).ratio(), b) for b, nb in nbase.items()), reverse=True)[:3]
+        cand = [(r, b) for r, b in cand if r >= umbral or (len(nn) >= 5 and nn == nbase[b])]
+        if cand:
+            print(f"[TITULAR NUEVO] '{n}' se parece a: " + " | ".join(f"'{b}' ({r:.2f})" for r, b in cand))
+            print("      -> si es la misma empresa, agrégala a TITULAR_ALIAS.")
+        else:
+            sin.append(n)
+    if sin:
+        print(f"[TITULAR NUEVO] {len(sin)} sin parecidos (entidades nuevas): " + "; ".join(sin[:max_sin_parecido])
+              + (" ..." if len(sin) > max_sin_parecido else ""))
+```
+
+**2. Pegar DESPUÉS de la línea** (dentro de `main`, misma indentación de 4 espacios):
+`    dff2['UNIDAD'] = dff2['UNIDAD'].map(dic_ren).fillna(dff2['UNIDAD'])`
+
+```python
+    dff2['TITULAR'] = canonizar_titular(dff2['TITULAR'])   # un solo nombre por titular
+    dff2 = normalizar_dimensiones(dff2)
+```
+
+Va antes del `groupby` de la línea `dff2 = dff2.groupby('Keysum_'...`, así que si un mes trae ambos nombres, se suman.
+
+**3. Pegar DESPUÉS de la línea:**
+`    otros['UNIDAD']="OTROS"`
+
+```python
+    otros = normalizar_dimensiones(otros)
+```
+
+**4. Pegar ANTES de la línea:**
+`    BD_Total_=BD_Total.copy()`
+
+```python
+    BD_Total = consolidar_base(BD_Total)          # limpia/fusiona la base histórica (idempotente)
+    reportar_titulares_nuevos(DF_F, BD_Total)     # aviso preventivo de posibles alias nuevos
+```
+
+**5. Pegar DESPUÉS de la línea:**
+`    BD_Total = pd.concat([BD_Total, DF_Total2])`
+
+```python
+    if BD_Total['Key1'].duplicated().any():
+        print(f"[ALERTA] Key1 duplicadas en la base: {BD_Total['Key1'].duplicated().sum()}")
+```
+
+## Cómo usar el aviso preventivo
+
+Cada corrida imprimirá por ejemplo:
+`[TITULAR NUEVO] 'ARES S.A.C.' se parece a: 'ARES' (1.00)`
+Si es la misma empresa, agrega una línea a `TITULAR_ALIAS` con el formato `'variante': 'nombre único'`. Si no se parece a nada, sale en una sola línea como entidad nueva.
+
+## Detalles que debes saber
+
+- **Tu lista tenía dos pares cruzados:** pusiste `NEXA CAJAMARQUILLA = ...EL PORVENIR` y `NEXA EL PORVENIR = ...CAJAMARQUILLA`. Los mapeé Cajamarquilla con Cajamarquilla y El Porvenir con El Porvenir.
+- **Qué nombre queda como único:** el corto, como pediste. Donde todas las variantes son largas (p. ej. Atahualpa, Scorpion), queda la forma sin tilde.
+- **No fusioné a propósito** (los dejo para que los confirmes tú):
+  - `BARRICK` con `BOROO MISQUICHILCA`, porque pueden ser dueños distintos en el tiempo.
+  - `LAS BRAVAS N° 2 DE ICA` (S.M.R.L. vs S.A.C.).
+  - Las tres variantes de `MONTEFLOR`.
+  - `VIRGEN DE LA MERCED` (Cía Minera vs S.M.R.L.).
+  - `CHAMPE CHAMPE RAMON` con `CHAMPI CHAMPI RAMON`.
+- **Antes de la primera corrida:** guarda una copia manual de `Produccion.xlsx`. Tu script sobrescribe `Backup\` en cada corrida, así que la segunda corrida ya guardaría la versión consolidada.
+- **Pendiente tuyo, no lo toqué:** la base tiene diciembre 2025 dos veces, como columna fecha y como texto `'01/12/2025'`, con datos idénticos. Conviene borrar una a mano.
+- **Archivo `.txt`:** traía dos líneas sueltas (` md` y un `<span ... papermill-error-cell>`) que no deben ir en el `.py`. Las quité para validar la sintaxis.
