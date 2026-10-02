@@ -1,0 +1,27 @@
+## Diagnóstico con tu archivo real
+
+**Falta la hoja `Benchmark`** en esta muestra (solo trae Parametria, RVL, BD, DQ_IN, DQ_IN - Old, DQ_SIS, Resumen_b). Sin ella no puedo validar el bloque EPU/ETFPERU. Como tu corrida anterior sí llegó a leer la hoja RVL después de pasar por Benchmark, asumo que en tu archivo real sí existe y que se cayó al recortar la copia. Confírmame si es así.
+
+**Con lo que sí tengo (Parametria + RVL), validé la lectura completa y encontré un bug real:** `construir_mapa_ticker_sbs` genera combinaciones de sufijo de bolsa (PE/US/CN/CI/CB) para TODO ticker, incluso los que ya traen su propio sufijo. Con tu Parametria real esto hace que `IFS PE` e `IFS US` (dos SBS distintos) peleen por la misma llave `"IFS US Equity"` — gana el que se procesa primero (IFS PE) y el precio de IFS US queda en cero en la hoja BD, sin ningún error ni aviso. Lo probé con tu archivo: antes del fix, IFS US faltaba; con el fix, ambos quedan con su precio correcto y no se pierde ningún otro mapeo (solo quedan sin precio las 10 que ya sabes que no tienen Bloomberg diario: OPAs, Cash, ACLARA CDI, BVL, etc.). No toca cómo se arma ni exporta `BD`, solo corrige qué SBS le corresponde a cada columna de precio.
+
+**Ctrl+F:** `    def registrar(raiz: str, sbs: str) -> None:`
+
+Selecciona desde esa línea hasta `            mapa.setdefault(v, sbs)` (inclusive) y reemplaza por:
+
+```python
+    def registrar(raiz: str, sbs: str) -> None:
+        raiz = str(raiz).strip()
+        sbs = str(sbs).strip()
+        if not raiz or raiz.lower() == "nan" or not sbs or sbs.lower() == "nan":
+            return
+        variantes = {raiz, f"{raiz} Equity", f"{raiz} Equity2"}
+        # Solo generamos variantes de bolsa si el ticker de Parametria NO trae
+        # ya su propio sufijo. Si ya lo trae (IFS PE / IFS US), generar todas
+        # las combinaciones los hacía chocar por la misma llave y uno se
+        # quedaba con precio cero en BD, sin aviso.
+        if not raiz.endswith(sufijos):
+            for s in sufijos:
+                variantes |= {f"{raiz}{s} Equity", f"{raiz}{s}"}
+        for v in variantes:
+            mapa.setdefault(v, sbs)
+```
