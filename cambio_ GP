@@ -1,0 +1,166 @@
+Confirmado — y buena corrección: la renormalización va sobre el universo completo QEST (instrumentos + CAJ + DPZ + CPC + CPP), antes de que `operaciones()` filtre por Asset Class. Ya lo diseñé así. Una aclaración antes del código: **`operaciones()` no hay que tocarla** — CAJ/DPZ/CPC/CPP/CDBCR, al no estar en `['Renta Fija','Renta Variable','Alternativos']`, ya caen solos en el bucket `_ac_reportable` que esa función ya registra vía `_registrar_descarte` (visible en Descartes, no en el bucket invisible de Derivados/Monedas). Cero riesgo, cero cambios ahí.
+
+Son 3 bloques a insertar en `BD_G&P Ultimo`. Usa Ctrl+F con el texto exacto de "BUSCA".
+
+---
+
+### BLOQUE 1 — Constantes nuevas
+
+**BUSCA** (línea ~47):
+```python
+ESCENARIO_INPUT = 'TM1'
+```
+**AGREGA DEBAJO:**
+```python
+ESCENARIO_INPUT = 'TM1'
+
+# ---- QEST %Fondo: nuevo posicionamiento absoluto de Integra (reemplaza INF1/2/3 de G&P) ----
+_QEST_SINONIMO_COL = {   # columna QEST que NO es código SBS -> (Asset Class sintética, Nombre)
+    'CAJBAN':  ('CAJ',   'Caja - Bancos'),
+    'CTACOB':  ('CPC',   'Cuenta por Cobrar'),
+    'CTAPAG':  ('CPP',   'Cuenta por Pagar'),
+    'CD_NSOL': ('CDBCR', 'Certificado de Depósito BCR'),
+}
+def _clasificar_qest_col(col):
+    """Clasifica una columna de DQ_IN sin código SBS real (CAJ/DPZ/CPC/CPP/CDBCR)."""
+    col = str(col)
+    if col in _QEST_SINONIMO_COL:
+        return _QEST_SINONIMO_COL[col]
+    if col.startswith('CAJ'):
+        return ('CAJ', col)
+    if col.startswith('DPZ'):
+        return ('DPZ', col)
+    return None
+```
+
+---
+
+### BLOQUE 2 — El reemplazo en sí (dentro de `construir_base()`)
+
+**BUSCA** (línea ~592):
+```python
+    b.qest_rf = leer_xlsx(R_QEST, 'DQ_RF')
+```
+**AGREGA DEBAJO** (todo este bloque, antes de `# ---- Precios`):
+```python
+    b.qest_rf = leer_xlsx(R_QEST, 'DQ_RF')
+
+    # ========================================================================
+    #  QEST %Fondo -> reemplaza el posicionamiento absoluto de Integra (INF1/
+    #  2/3) que antes venía de G&P/Detallado. El GAP sigue viniendo de G&P sin
+    #  tocarse: competencia = INF_nuevo - GAP (misma fórmula de operaciones()).
+    #  Sin match en QEST -> se reporta y se EXCLUYE (sin fallback, por decisión
+    #  explícita). Se renormaliza a 100% ANTES de que operaciones() filtre
+    #  Asset Class, porque CAJ/DPZ/CPC/CPP sí pesan y deben estar en el
+    #  denominador (si no, lo que sobrevive al filtro no cerraría en el 100%).
+    # ========================================================================
+    qin_pct = leer_xlsx(R_QEST, 'DQ_IN')          # cacheado: no vuelve a tocar red
+    qin_pct.columns = qin_pct.iloc[10, ::]
+    qin_pct = qin_pct.drop([10], axis=0)
+    qpct = qin_pct[(qin_pct['Dato'] == '%Fondo') &
+                   (qin_pct['Fecha'] == datetime.fromisoformat(b.fecha_iso + ' 00:00:00'))]
+    if qpct.empty:
+        raise ProcesoError(f"QEST DQ_IN: no hay fila '%Fondo' para {b.fecha_iso}. "
+                            f"Verifica que QEST esté actualizado a ese corte.")
+    tp = qpct.transpose(); tp.columns = tp.iloc[0, ::]
+    dic_pct = tp.to_dict()   # dic_pct['IN-FONDO1'][col_qest] = peso (fracción)
+
+    _META_QEST = {'Fondo', 'Dato', 'Fecha', 'SBS', 'VALFON'}  # 'SBS' aquí = id compuesto, no código
+    _FONDO_KEYS = {'INF1': 'IN-FONDO1', 'INF2': 'IN-FONDO2', 'INF3': 'IN-FONDO3'}
+
+    b.qest_pct_universo = {}   # fondo -> {col_qest: peso renormalizado} (incluye CAJ/DPZ/CPC/CPP)
+    print("\n--- [QEST %Fondo] Cuadre antes de renormalizar (esperado ~1.0) ---")
+    for nombre_inf, fondo_key in _FONDO_KEYS.items():
+        serie = {k: v for k, v in dic_pct[fondo_key].items()
+                 if k not in _META_QEST and isinstance(v, (int, float))}
+        suma = sum(serie.values())
+        print(f"  {fondo_key}: suma={suma:.6f} (n={len(serie)}) -> renormalizando a 1.0")
+        if suma <= 0:
+            raise ProcesoError(f"QEST DQ_IN: suma de %Fondo de {fondo_key} = {suma} (se esperaba ~1.0).")
+        b.qest_pct_universo[nombre_inf] = {k: v / suma for k, v in serie.items()}
+
+    # --- Sustitución INF1/INF2/INF3 (solo SBS que existen como columna en QEST) ---
+    _sbs_norm = b.df['SBS'].astype(str).str.strip()
+    for nombre_inf in ['INF1', 'INF2', 'INF3']:
+        nuevo = _sbs_norm.map(b.qest_pct_universo[nombre_inf])
+        _sin_match = b.df.loc[nuevo.isna() & b.df[nombre_inf].notna() & (b.df[nombre_inf] != 0)]
+        if len(_sin_match):
+            print(f"[QEST %Fondo] {nombre_inf}: {len(_sin_match)} SBS con peso en G&P sin match "
+                  f"en QEST -> se EXCLUYEN de esta rama:")
+            for _, r in _sin_match.iterrows():
+                print(f"    SBS={r['SBS']}  Nombre={r.get('Nombre')}  "
+                      f"Asset Class={r.get('Asset Class')}  {nombre_inf}_G&P={r[nombre_inf]}")
+        b.df[nombre_inf] = nuevo
+
+    b.df = b.df.loc[b.df[['INF1', 'INF2', 'INF3']].notna().any(axis=1)].reset_index(drop=True)
+    for c in ['INF1', 'INF2', 'INF3']:
+        b.df[c] = b.df[c].fillna(0.0)   # cinturón de seguridad; no debería activarse (ver nota abajo)
+
+    # --- Filas nuevas: CAJ / DPZ / CPC / CPP / CDBCR (no existen en G&P) -------
+    # GAP = NaN a propósito: no hay forma de saber la posición de la competencia
+    # en estos rubros, y NaN evita que "Dejados de lado" les atribuya el peso de
+    # Integra a Habitat/Prima/Profuturo/Sistema. Estas filas se filtran solas en
+    # operaciones() (Asset Class no admitido) -> no llegan a BU/TD/SOB/BD1.
+    _GAP_COLS = ['HAF1GAP','RIF1GAP','PFF1GAP','SIF1GAP','HAF2GAP','RIF2GAP',
+                 'PFF2GAP','SIF2GAP','HAF3GAP','RIF3GAP','PFF3GAP','SIF3GAP']
+    _cols_nuevas = [c for c in dic_pct['IN-FONDO1'].keys()
+                    if c not in _META_QEST and _clasificar_qest_col(c) is not None]
+    filas_nuevas = []
+    for col in _cols_nuevas:
+        ac, nom = _clasificar_qest_col(col)
+        filas_nuevas.append({
+            'SBS': col, 'ISIN': None, 'Nombre': nom, 'Asset Class': ac,
+            'Cat': ac, 'SubCat': ac, 'Sub Cat2': ac, 'Categoría': ac,
+            'AC Dir': None, 'Rank Rt': ac,
+            'INF1': b.qest_pct_universo['INF1'].get(col, 0.0),
+            'INF2': b.qest_pct_universo['INF2'].get(col, 0.0),
+            'INF3': b.qest_pct_universo['INF3'].get(col, 0.0),
+            **{g: np.nan for g in _GAP_COLS},
+        })
+    if filas_nuevas:
+        b.df = pd.concat([b.df, pd.DataFrame(filas_nuevas)], ignore_index=True)
+        b.df['SBS2'] = b.df['SBS'].apply(recor)   # recalcular; idéntico para filas preexistentes
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+```
+
+---
+
+### BLOQUE 3 — Excepción: DPZ de Integra en `BD1_S_Huella.xlsx`
+
+**BUSCA** (línea ~1330, dentro de `enriquecer_para_huella`):
+```python
+    n_total = len(df)
+```
+**REEMPLAZA CON:**
+```python
+    # Excepción solo para este output: posiciones DPZ de Integra (QEST), que
+    # operaciones() excluyó del resto del pipeline. Mismas 13 columnas de BD1_S,
+    # mismo orden -> no cambia la estructura del archivo.
+    _univ = getattr(base, 'qest_pct_universo', None)
+    if _univ:
+        _filas_dpz = []
+        for _nombre_inf, _fcod in [('INF1', 'F1'), ('INF2', 'F2'), ('INF3', 'F3')]:
+            for _col, _w in _univ[_nombre_inf].items():
+                if not str(_col).startswith('DPZ') or not _w:
+                    continue
+                _filas_dpz.append({
+                    'SBS': _col, 'ISIN': None, 'Weight': _w, 'Fondo': _fcod,
+                    'assetclass': 'DPZ', 'Strategy': 'BU', 'Afp': 'Integra',
+                    'AUM': {'F1': base.auminf1, 'F2': base.auminf2, 'F3': base.auminf3}[_fcod],
+                    'Tipo': base.valor,
+                    'Q': base.dic_sbs.get('IN-FONDO' + _fcod[-1], {}).get(_col),
+                    'Nombre': _col, 'Fecha': base.fecha_nueva, 'codEmisor': '',
+                })
+        if _filas_dpz:
+            df = pd.concat([df, pd.DataFrame(_filas_dpz).reindex(columns=df.columns)],
+                           ignore_index=True)
+            print(f"[HUELLA] +{len(_filas_dpz)} posiciones DPZ de Integra agregadas "
+                  f"(excepción exclusiva de BD1_S_Huella).")
+
+    n_total = len(df)
+```
+
+---
+
+**Resumen de lo que hace cada bloque:** B1 define cómo reconocer CAJ/DPZ/CPC/CPP/CDBCR dentro de QEST. B2 es el corazón — sustituye INF1/2/3 por QEST, reporta cuadre, renormaliza, descarta sin match, y agrega las 5 categorías nuevas como filas (que `operaciones()` ya filtra solo, sin tocarla). B3 rescata únicamente DPZ para el archivo de Huella, sin alterar su esquema de columnas.
