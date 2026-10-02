@@ -1,0 +1,96 @@
+Voy a leer tu script y los inputs para diagnosticar el error.
+
+Sigo con el diagnóstico: ya revisé las funciones de actualización y el QEST, ahora veo cómo `q_sis` consume `base_sistema` para no romper nada aguas abajo.
+
+Ya tengo el panorama; reproduzco el error con un Monitor sintético armado desde tu QEST de muestra y pruebo la corrección.
+
+El error sale porque `DQ_SIS` busca el match por `Fecha`, que no sirve como llave. Es la fecha de cartera (se repite en ~9 filas por día) y el QEST la puede reetiquetar, así que el `07-24` de tu Monitor ya no existe en el QEST. La llave real de cada fila es `Fondo_Fecha` (ej. `HA-FONDO1_16/06/2026`), y de ahí el resto del script ya saca el día.
+
+La corrección corta el Monitor por día (sacado de `Fondo_Fecha`) en vez de buscar un `Fecha` exacto. Reproduje el mismo `SystemExit` con tu QEST de muestra y con la corrección corre limpio. No toca `DQ_IN` ni los inputs.
+
+## Bloque 1: agregar helpers
+
+**Ctrl+F:** `def actualizar_DQ_SIS(df2`
+
+Pega esto **justo encima** de esa línea, con dos líneas en blanco antes y después:
+
+```python
+def _nombre_col(c) -> str:
+    """Nombres de columna siempre como texto (300011100001.0 / int → '300011100001')."""
+    if isinstance(c, float) and c.is_integer():
+        return str(int(c))
+    return str(c).strip()
+
+
+def _dia_fondo_fecha(serie: pd.Series) -> pd.Series:
+    """Saca el día dd/mm/aaaa que va después del '_' en Fondo_Fecha."""
+    suf = serie.astype(str).str.split("_", n=1).str[-1].str.strip()
+    return pd.to_datetime(suf, format="%d/%m/%Y", errors="coerce")
+```
+
+## Bloque 2: reemplazar el final de `actualizar_DQ_SIS`
+
+**Ctrl+F:** `    base = DQ_SIS_BD.copy()`
+
+Selecciona desde esa línea **hasta** `    return pd.concat([final_hist, nuevos], ignore_index=True)` (ambas inclusive, son las líneas 291–309) y reemplaza todo por:
+
+```python
+    base = DQ_SIS_BD.copy()
+    base.columns = [_nombre_col(c) for c in base.iloc[0].to_list()]
+    base_h = base.drop(0).reset_index(drop=True)
+    filtrada.columns = [_nombre_col(c) for c in filtrada.columns]
+    filtrada = filtrada.reset_index(drop=True)
+
+    for col in ("Fecha", "Fondo_Fecha"):
+        if col not in base_h.columns:
+            fallar(f"DQ_SIS: la hoja del Monitor no tiene '{col}' en su fila 1.")
+
+    dia_mon = _dia_fondo_fecha(base_h["Fondo_Fecha"])
+    dia_qes = _dia_fondo_fecha(filtrada["Fondo_Fecha"])
+    fecha_mon = pd.to_datetime(base_h["Fecha"], format="mixed", dayfirst=True,
+                               errors="coerce")
+    if dia_mon.notna().sum() == 0 or fecha_mon.notna().sum() == 0:
+        fallar("DQ_SIS: el Monitor no tiene filas con Fecha/Fondo_Fecha válidas.")
+    if dia_qes.notna().sum() == 0:
+        fallar("DQ_SIS: el QEST no tiene filas con Fondo_Fecha válido (dd/mm/aaaa).")
+
+    ultima = fecha_mon.dropna().iloc[-1]
+    print(f"DQ SIS — última fecha en Monitor: {ultima}")
+
+    # si el QEST quedó más atrás que el Monitor, no tocamos nada y avisamos
+    if dia_qes.max() < dia_mon.max():
+        print(f"[AVISO] DQ_SIS: el QEST llega hasta {dia_qes.max():%d/%m/%Y} y el "
+              f"Monitor hasta {dia_mon.max():%d/%m/%Y}. No se toca DQ_SIS (revisa el QEST).")
+        return base_h
+
+    # refrescamos desde el primer día de la última cartera cargada (igual que antes),
+    # pero medido en días de Fondo_Fecha y sin exigir que esa Fecha exista en el QEST
+    corte = dia_mon[fecha_mon == ultima].min()
+    if pd.isna(corte):
+        corte = dia_mon.max()
+    if dia_qes.min() > corte:
+        print(f"[AVISO] DQ_SIS: el QEST arranca el {dia_qes.min():%d/%m/%Y}, después del "
+              f"{corte:%d/%m/%Y}; conservo el Monitor hasta esa fecha.")
+        corte = dia_qes.min()
+
+    vacia = base_h.isna().all(axis=1)
+    mantener = base_h[~vacia & (dia_mon.isna() | (dia_mon < corte))]
+    nuevos = filtrada[dia_qes.notna() & (dia_qes >= corte)].dropna(how="all")
+
+    extra = [c for c in nuevos.columns if c not in mantener.columns]
+    if extra:
+        print(f"[AVISO] DQ_SIS: {len(extra)} columna(s) del QEST no están en el "
+              f"encabezado del Monitor: {extra[:5]}")
+
+    mantener = mantener.loc[:, ~mantener.columns.duplicated()]
+    nuevos = nuevos.loc[:, ~nuevos.columns.duplicated()]
+    reemplazadas = int((dia_mon >= corte).sum())
+    print(f"DQ SIS — desde {corte:%d/%m/%Y}: {len(nuevos)} registros del QEST "
+          f"({len(nuevos) - reemplazadas} netos nuevos, {reemplazadas} refrescados).")
+    return pd.concat([mantener, nuevos], ignore_index=True)
+```
+
+- **Colisiones de nombres:** revisé el script y `_nombre_col`, `_dia_fondo_fecha`, `corte`, `mantener`, `dia_mon`, `dia_qes`, `fecha_mon`, `reemplazadas` y `vacia` no chocan con nada.
+- **Fuera de este bloque:** `buscar_fecha()` se queda, porque `DQ_IN` la sigue usando.
+- **Qué mirar en la salida:** al correr deberías ver `DQ SIS — desde dd/mm/aaaa: N registros...`. Si aparece algún `[AVISO]`, pégamelo.
+- **Limitación:** no tuve tu `Rendimiento RVL.xlsm`, así que probé con un Monitor sintético armado desde el QEST de muestra, no con tu hoja real.
