@@ -1,0 +1,188 @@
+Ya con el script a la vista, el diagnóstico es claro.
+
+**Qué pasó**
+El `Message:` vacío con stacktrace es un `TimeoutException` de `WebDriverWait`. Como B (diaria) sí funcionó y F (diaria, mismo código) no, el problema no es la lógica del flujo sino **dos cosas**:
+
+1. Los IDs están hardcodeados (`ctl00_cphContent_btnConsultar`, `btnExportar`, `btnConsultaMensual`, `btnExportarM`, `rdpDate_dateInput`). Esos IDs fueron sacados de la página de Bancos; en las otras páginas del portal SAEE el naming container de ASP.NET suele diferir, así que el wait expira sin decirte qué elemento falló.
+2. Reutilizas **una sola sesión** para los 5 tips. El portal guarda el `tip` en sesión/ViewState, así que el segundo `driver.get(?tip=F)` puede re-renderizar la página anterior.
+
+Te doy los bloques de reemplazo y, al final, un diagnóstico de 20 líneas que nos dice los IDs reales por página (eso cierra el caso definitivamente).
+
+**Bloque 1 — imports (agrega después de la línea 36)**
+
+```python
+from selenium.common.exceptions import TimeoutException
+```
+
+**Bloque 2 — reemplaza TODA la función `iniciar_driver` (líneas 139–171)**
+
+```python
+def iniciar_driver():
+    """Selenium Manager resuelve el chromedriver compatible solo.
+    Se elimina CHROMEDRIVER_PATH: con Chrome autoactualizándose, la ruta fija
+    siempre se va a desfasar."""
+    options = webdriver.ChromeOptions()
+    if HEADLESS:
+        options.add_argument("--headless=new")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--window-size=1366,900")
+
+    carpeta_temp = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "descargas_sbs_tmp")
+    os.makedirs(carpeta_temp, exist_ok=True)
+    options.add_experimental_option("prefs", {
+        "download.default_directory": carpeta_temp,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+    })
+
+    driver = webdriver.Chrome(options=options)   # sin Service() -> Selenium Manager
+    driver.set_page_load_timeout(60)
+    return driver
+
+
+def _esperar(driver, locators, descripcion, clickable=True, timeout=10):
+    """Prueba varios locators en orden. Si ninguno funciona, lanza un error
+    que SÍ dice qué elemento falló y en qué URL (el TimeoutException pelado
+    de Selenium viene con mensaje vacío)."""
+    for by, sel in locators:
+        try:
+            cond = (EC.element_to_be_clickable((by, sel)) if clickable
+                    else EC.presence_of_element_located((by, sel)))
+            return WebDriverWait(driver, timeout).until(cond)
+        except TimeoutException:
+            continue
+    raise TimeoutException(
+        f"[{descripcion}] no apareció en {timeout}s.\n"
+        f"    URL actual: {driver.current_url}\n"
+        f"    Locators probados: {locators}"
+    )
+```
+
+**Bloque 3 — reemplaza `fijar_carpeta_descarga` (líneas 174–179)**
+
+```python
+def fijar_carpeta_descarga(driver, carpeta):
+    """Browser.setDownloadBehavior aplica a toda la sesión (incluidas pestañas
+    nuevas que abre 'Exportar'); Page.setDownloadBehavior está deprecado y solo
+    cubre el target actual."""
+    os.makedirs(carpeta, exist_ok=True)
+    try:
+        driver.execute_cdp_cmd("Browser.setDownloadBehavior",
+                               {"behavior": "allow", "downloadPath": carpeta})
+    except Exception:
+        driver.execute_cdp_cmd("Page.setDownloadBehavior",
+                               {"behavior": "allow", "downloadPath": carpeta})
+```
+
+**Bloque 4 — reemplaza `establecer_fecha_diaria` (líneas 211–219)**
+
+```python
+def establecer_fecha_diaria(driver, wait):
+    # id$= ("termina en") sobrevive a cambios del naming container de ASP.NET
+    campo = _esperar(driver, [
+        (By.ID, "ctl00_cphContent_rdpDate_dateInput"),
+        (By.CSS_SELECTOR, "input[id$='_dateInput']"),
+        (By.CSS_SELECTOR, "input.riTextBox"),
+    ], "campo de fecha (RadDatePicker)", clickable=True)
+    campo.click()
+    campo.send_keys(Keys.CONTROL + "a")
+    campo.send_keys(Keys.DELETE)
+    campo.send_keys(FECHA_OBJETIVO_STR)
+    campo.send_keys(Keys.TAB)
+    time.sleep(1)
+```
+
+**Bloque 5 — reemplaza los dos `procesar_consulta_*` (líneas 270–307)**
+
+```python
+_LOC_CONSULTAR = [
+    (By.ID, "ctl00_cphContent_btnConsultar"),
+    (By.ID, "ctl00_cphContent_btnConsultaMensual"),
+    (By.CSS_SELECTOR, "input[id*='Consult'], a[id*='Consult']"),
+    (By.XPATH, "//input[contains(@value,'onsultar')] | //a[contains(.,'onsultar')] | //button[contains(.,'onsultar')]"),
+]
+_LOC_EXPORTAR = [
+    (By.ID, "ctl00_cphContent_btnExportar"),
+    (By.ID, "ctl00_cphContent_btnExportarM"),
+    (By.CSS_SELECTOR, "input[id*='Export'], a[id*='Export']"),
+    (By.XPATH, "//input[contains(@value,'xportar')] | //a[contains(.,'xportar')] | //button[contains(.,'xportar')]"),
+]
+
+
+def _consultar_y_exportar(driver, carpeta_destino):
+    _esperar(driver, _LOC_CONSULTAR, "botón Consultar", timeout=TIMEOUT).click()
+    time.sleep(ESPERA_POST_CONSULTA)
+
+    fijar_carpeta_descarga(driver, carpeta_destino)
+    archivos_antes = set(os.listdir(carpeta_destino))
+    handle_original = driver.current_window_handle
+
+    _esperar(driver, _LOC_EXPORTAR, "botón Exportar", timeout=TIMEOUT).click()
+
+    try:
+        cerrar_pestanas_extra(driver, handle_original)
+    except Exception:
+        pass  # la pestaña de descarga a veces se autocierra antes de que la cerremos
+    archivo = esperar_descarga_completa(carpeta_destino, archivos_antes)
+    print(f"    -> Descargado: {archivo}")
+
+
+def procesar_consulta_diaria(driver, wait, carpeta_destino):
+    establecer_fecha_diaria(driver, wait)
+    _consultar_y_exportar(driver, carpeta_destino)
+
+
+def procesar_consulta_mensual(driver, wait, carpeta_destino):
+    _esperar(driver, [(By.CSS_SELECTOR, "span.rddlFakeInput")],
+             "combos de mes/año (span.rddlFakeInput)", clickable=False, timeout=TIMEOUT)
+    seleccionar_combo_mes(driver, wait)
+    seleccionar_combo_anio(driver, wait)
+    _consultar_y_exportar(driver, carpeta_destino)
+```
+
+**Bloque 6 — reemplaza el cuerpo de `main` (líneas 318–338)**
+
+```python
+    resultados = {}
+    for tip in ORDEN_TIPS:
+        info = SITIOS[tip]
+        print(f"[{tip}] Abriendo {info['url']}")
+        driver = iniciar_driver()   # sesión limpia por tip: evita que el ViewState
+        wait = WebDriverWait(driver, TIMEOUT)   # del tip anterior contamine el siguiente
+        try:
+            driver.get(info["url"])
+            if info["tipo_consulta"] == "diaria":
+                procesar_consulta_diaria(driver, wait, info["carpeta"])
+            else:
+                procesar_consulta_mensual(driver, wait, info["carpeta"])
+            resultados[tip] = "OK"
+        except Exception as e:
+            resultados[tip] = f"{type(e).__name__}: {str(e).splitlines()[0]}"
+            print(f"    !! Falló {tip}: {type(e).__name__}: {str(e).splitlines()[0]}")
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+```
+
+**Diagnóstico (córrelo aparte si algo sigue fallando)**
+Esto imprime los IDs reales de cada página y nos dice si la teoría de los IDs distintos es correcta:
+
+```python
+def diagnostico():
+    for tip in ORDEN_TIPS:
+        d = iniciar_driver()
+        try:
+            d.get(SITIOS[tip]["url"]); time.sleep(4)
+            print(f"\n=== {tip} === {d.title}")
+            for el in d.find_elements(By.CSS_SELECTOR, "input, select, a[id], button"):
+                i, v = el.get_attribute("id"), (el.get_attribute("value") or el.text)[:30]
+                if i:
+                    print(f"  {el.tag_name:7} id={i:55} val={v}")
+        finally:
+            d.quit()
+```
+
+Córrelo y pégame la salida; con eso fijo los locators exactos en vez de dejarlos tolerantes.
