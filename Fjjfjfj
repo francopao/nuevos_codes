@@ -1,0 +1,66 @@
+Sigo con el error de la hoja RVL: ya probé un lector corregido con casos sintéticos y te dejo el bloque listo.
+
+**Sobre el archivo:** `Rendimiento RVL.xlsm` no está en la biblioteca del proyecto. Solo hay `BDPrecios_VB.xlsx`, `DataValorCuota_IN.xlsm`, `MLab_PA.xlsx` y `QEST_BD.xlsm`. Por eso no pude ver la hoja RVL real y el diagnóstico sale del log y del código. Súbelo y lo verifico (si pesa mucho, sirve una copia con RVL recortada a las primeras 60 filas).
+
+**Lo que dice el error:** el `DQ_SIS` ya quedó bien (90 nuevos, 180 refrescados). El nuevo error viene de `leer_rvl_acotado`, que leyó solo 6 filas: los 5 encabezados más la primera fila de datos. Después de eso encontró 30 filas seguidas sin valor y cortó, por eso `limpiar_precios_rvl` no halló fechas. Hay dos causas posibles:
+- **Bloomberg sin valores guardados:** el archivo en disco tiene las fórmulas de Bloomberg sin valores guardados.
+- **Hueco mayor a 30 filas:** hay un hueco de más de 30 filas entre los encabezados y los datos.
+
+## Bloque: reemplazar `leer_rvl_acotado`
+
+**Ctrl+F:** `def leer_rvl_acotado`
+
+Selecciona desde esa línea hasta `    return df.astype(object)` (inclusive) y reemplaza todo por:
+
+```python
+def leer_rvl_acotado(path: Path, max_filas: int = 12000) -> pd.DataFrame:
+    """Lee la hoja RVL fila por fila (rápido). Solo empezamos a contar filas
+    vacías después de ver datos, así un hueco inicial ya no nos corta la lectura."""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as e:
+        fallar(f"No se pudo abrir {path.name} para leer la hoja RVL: {e}")
+    if "RVL" not in wb.sheetnames:
+        fallar(f"{path.name} no tiene hoja 'RVL'.")
+    ws = wb["RVL"]
+    filas, vacias_seguidas, hay_datos = [], 0, False
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=max_filas, values_only=True)):
+        vacia = all(v is None or (isinstance(v, str) and not v.strip()) for v in row)
+        if i < 6:                      # encabezados + primera fila de datos: siempre
+            filas.append(row)
+            hay_datos = hay_datos or (i == 5 and not vacia)
+            continue
+        if vacia:
+            if hay_datos:              # solo contamos vacías DESPUÉS de ver datos
+                vacias_seguidas += 1
+                if vacias_seguidas >= 30:
+                    break
+        else:
+            hay_datos = True
+            vacias_seguidas = 0
+            filas.append(row)
+    wb.close()
+    if not hay_datos:
+        vista = "\n".join(f"  fila {k + 1}: {list(f[:6])}" for k, f in enumerate(filas[:6]))
+        fallar("Hoja RVL: no hay datos debajo de los encabezados en el archivo guardado "
+               f"(revisé hasta la fila {max_filas}). Esto es lo que ve Python:\n{vista}\n"
+               "Lo más probable: Bloomberg no dejó valores guardados. Abre el Monitor con "
+               "Bloomberg conectado, deja que refresque, GUARDA y vuelve a correr.")
+    df = pd.DataFrame(filas)
+    print(f"Hoja RVL — leídas {len(df)} filas útiles (lectura acotada, rápida).")
+    return df.astype(object)
+```
+
+**Pruebas:** con un hueco de 45 filas vacías ahora lee los datos. Con la hoja sin datos ya no da el error críptico de fechas, sino un mensaje con lo que ve Python en las primeras filas.
+
+**Si sale ese mensaje:** el archivo guardado no tiene valores de Bloomberg. Abre el Monitor con Bloomberg conectado, deja que refresque, guarda y corre de nuevo. No guardes desde el script, porque sin Bloomberg conectado sobrescribirías los valores buenos.
+
+## Aviso pendiente del DQ_SIS
+
+El aviso decía "6 columnas" pero mi mensaje solo imprimía 5. Para ver las 6:
+
+**Ctrl+F:** `{extra[:5]}`
+**Reemplaza por:** `{extra}`
+
+Entre las que aparecen están `3020836W5029` (HOC EU, líquida), `5460042E8427` (EPU) y `5076822E0800` (ETFPERU). Son columnas que el QEST trae pero que el encabezado de tu hoja `DQ_SIS` no tiene. El script las escribe al final de la hoja sin nombre en la fila 1. En la próxima corrida esas columnas se leerían sin título y el historial anterior de esos instrumentos quedaría en 0. Con tu Monitor a la vista confirmo si es así y te doy el ajuste para escribir también el encabezado.
