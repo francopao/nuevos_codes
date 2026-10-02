@@ -1,0 +1,346 @@
+# -*- coding: utf-8 -*-
+"""
+Descarga automática de "Tasas Activas" SBS (Bancos, Financieras, Cajas,
+Cajas Rurales y Mypes) mediante Selenium WebDriver.
+
+Flujo por cada sitio:
+  - Bancos (tip=B) y Financieras (tip=F): consulta DIARIA. Se ingresa en el
+    campo de fecha el último día hábil (lun-vie) del mes de hace dos meses
+    respecto a hoy, se da clic en "Consultar" y luego en "Exportar".
+  - Cajas (tip=C), Cajas Rurales (tip=R) y Mypes (tip=E): consulta MENSUAL.
+    Se selecciona mes y año (mismo mes/año de referencia que arriba) en los
+    RadComboBox de Telerik, se da clic en "Consultar" y luego en "Exportar".
+
+Cada archivo exportado se descarga directamente (vía Chrome DevTools
+Protocol) a su carpeta de destino en Z:\\, sin pasos manuales de "Guardar
+como" ni movimiento posterior de archivos.
+
+Requisitos:
+    pip install selenium
+    (y tener chromedriver.exe compatible con tu versión de Chrome)
+
+Ajusta la sección CONFIGURACIÓN antes de correrlo.
+"""
+
+import os
+import re
+import time
+import unicodedata
+from datetime import date, timedelta
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+
+# ============================================================================
+# CONFIGURACIÓN
+# ============================================================================
+
+# Ruta a tu chromedriver.exe (ajusta si cambia la versión/ubicación)
+CHROMEDRIVER_PATH = r"Z:\Mesa de Inversiones\Bottom-Up\Practis\Drivers\chromedriver.exe"
+
+BASE_DESTINO = (
+    r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija"
+    r"\Corporates - Emisiones\Crédito - BU\1. Emisores\1. One pagers"
+    r"\Complementos\Carpeta de Descarga\23. Tasas Activas\descargas_SBS"
+)
+
+# tip -> (url, carpeta destino, tipo de consulta)
+SITIOS = {
+    "B": {
+        "url": "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaTipoCreditoEmpresa.aspx?tip=B",
+        "carpeta": os.path.join(BASE_DESTINO, "Bancos"),
+        "tipo_consulta": "diaria",
+    },
+    "F": {
+        "url": "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaTipoCreditoEmpresa.aspx?tip=F",
+        "carpeta": os.path.join(BASE_DESTINO, "Financieras"),
+        "tipo_consulta": "diaria",
+    },
+    "C": {
+        "url": "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaTipoCreditoEmpresa.aspx?tip=C",
+        "carpeta": os.path.join(BASE_DESTINO, "Cajas"),
+        "tipo_consulta": "mensual",
+    },
+    "R": {
+        "url": "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaTipoCreditoEmpresa.aspx?tip=R",
+        "carpeta": os.path.join(BASE_DESTINO, "Cajas Rurales"),
+        "tipo_consulta": "mensual",
+    },
+    "E": {
+        "url": "https://www.sbs.gob.pe/app/pp/EstadisticasSAEEPortal/Paginas/TIActivaTipoCreditoEmpresa.aspx?tip=E",
+        "carpeta": os.path.join(BASE_DESTINO, "Mypes"),
+        "tipo_consulta": "mensual",
+    },
+}
+
+ORDEN_TIPS = ["B", "F", "C", "R", "E"]  # orden de ejecución solicitado
+
+HEADLESS = False            # True para correr sin ventana visible
+TIMEOUT = 25                 # segundos máx. de espera por elemento
+ESPERA_POST_CONSULTA = 6     # segundos de espera tras "Consultar" antes de "Exportar"
+ESPERA_DESCARGA = 30          # segundos máx. de espera a que termine la descarga
+
+MESES_ES = {
+    1: ["Enero"], 2: ["Febrero"], 3: ["Marzo"], 4: ["Abril"], 5: ["Mayo"],
+    6: ["Junio"], 7: ["Julio"], 8: ["Agosto"],
+    9: ["Setiembre", "Septiembre"],
+    10: ["Octubre"], 11: ["Noviembre"], 12: ["Diciembre"],
+}
+TODOS_LOS_MESES = [m for lista in MESES_ES.values() for m in lista]
+
+
+# ============================================================================
+# FECHA / PERIODO OBJETIVO
+# ============================================================================
+
+def restar_meses(fecha, n):
+    """Día 1 del mes que está n meses antes del mes de `fecha`."""
+    mes = fecha.month - n
+    anio = fecha.year
+    while mes <= 0:
+        mes += 12
+        anio -= 1
+    return date(anio, mes, 1)
+
+
+def ultimo_dia_habil_del_mes(anio, mes):
+    """Último día hábil (lunes a viernes) del mes indicado."""
+    primer_dia_sig = date(anio + 1, 1, 1) if mes == 12 else date(anio, mes + 1, 1)
+    d = primer_dia_sig - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=sábado, 6=domingo
+        d -= timedelta(days=1)
+    return d
+
+
+_hoy = date.today()
+_mes_referencia = restar_meses(_hoy, 2)
+FECHA_OBJETIVO = ultimo_dia_habil_del_mes(_mes_referencia.year, _mes_referencia.month)
+FECHA_OBJETIVO_STR = FECHA_OBJETIVO.strftime("%d/%m/%Y")
+ANIO_OBJETIVO = FECHA_OBJETIVO.year
+MES_OBJETIVO_NUM = FECHA_OBJETIVO.month
+
+
+# ============================================================================
+# UTILIDADES
+# ============================================================================
+
+def _normalizar(texto):
+    sin_tildes = "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+    return sin_tildes.strip().lower()
+
+
+def iniciar_driver():
+    options = webdriver.ChromeOptions()
+    if HEADLESS:
+        options.add_argument("--headless=new")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--window-size=1366,900")
+
+    carpeta_temp = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "descargas_sbs_tmp")
+    os.makedirs(carpeta_temp, exist_ok=True)
+    options.add_experimental_option(
+        "prefs",
+        {
+            "download.default_directory": carpeta_temp,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+        },
+    )
+
+    # 1er intento: chromedriver local en CHROMEDRIVER_PATH.
+    # Si la versión no coincide con la de Chrome instalado (SessionNotCreatedException,
+    # típico cuando Chrome se autoactualiza), se reintenta con Selenium Manager, que
+    # descarga/usa automáticamente el driver compatible con tu versión de Chrome.
+    try:
+        service = Service(executable_path=CHROMEDRIVER_PATH)
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"  (chromedriver en CHROMEDRIVER_PATH no coincide con tu Chrome: {e})")
+        print("  Reintentando con Selenium Manager (resuelve el driver compatible automáticamente)...")
+        driver = webdriver.Chrome(options=options)  # sin 'service' -> Selenium Manager
+
+    driver.set_page_load_timeout(60)
+    return driver
+
+
+def fijar_carpeta_descarga(driver, carpeta):
+    os.makedirs(carpeta, exist_ok=True)
+    driver.execute_cdp_cmd(
+        "Page.setDownloadBehavior",
+        {"behavior": "allow", "downloadPath": carpeta},
+    )
+
+
+def esperar_descarga_completa(carpeta, archivos_antes, timeout=ESPERA_DESCARGA):
+    """Espera hasta que aparezca un archivo nuevo y completo (sin
+    extensión .crdownload) en la carpeta de destino."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        archivos_ahora = set(os.listdir(carpeta))
+        nuevos = archivos_ahora - archivos_antes
+        en_progreso = [f for f in nuevos if f.endswith(".crdownload")]
+        completos = [f for f in nuevos if not f.endswith(".crdownload")]
+        if completos and not en_progreso:
+            return completos[0]
+        time.sleep(0.5)
+    raise TimeoutError(f"La descarga no finalizó en {timeout}s en: {carpeta}")
+
+
+def cerrar_pestanas_extra(driver, handle_original):
+    """Algunos botones 'Exportar' de ASP.NET abren una pestaña nueva para
+    la descarga; esto la cierra y vuelve a la pestaña principal."""
+    time.sleep(1)
+    for h in driver.window_handles:
+        if h != handle_original:
+            driver.switch_to.window(h)
+            time.sleep(0.5)
+            driver.close()
+    driver.switch_to.window(handle_original)
+
+
+# --- RadDatePicker (consultas diarias B / F) --------------------------------
+
+def establecer_fecha_diaria(driver, wait):
+    campo = wait.until(EC.presence_of_element_located(
+        (By.ID, "ctl00_cphContent_rdpDate_dateInput")))
+    campo.click()
+    campo.send_keys(Keys.CONTROL + "a")
+    campo.send_keys(Keys.DELETE)
+    campo.send_keys(FECHA_OBJETIVO_STR)
+    campo.send_keys(Keys.TAB)
+    time.sleep(1)
+
+
+# --- RadComboBox (consultas mensuales C / R / E) -----------------------------
+
+def _abrir_combo_por_predicado(driver, wait, predicado):
+    spans = driver.find_elements(By.CSS_SELECTOR, "span.rddlFakeInput")
+    span_objetivo = next((sp for sp in spans if predicado(sp.text)), None)
+    if span_objetivo is None:
+        raise RuntimeError(
+            "No se encontró el combo esperado (revisar selector 'rddlFakeInput' "
+            "en la página actual; la estructura pudo haber cambiado)."
+        )
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", span_objetivo)
+    span_objetivo.click()
+    time.sleep(0.4)
+    return wait.until(EC.visibility_of_element_located(
+        (By.XPATH, "//ul[contains(@class,'rcbList')][not(contains(@style,'display: none'))]")
+    ))
+
+
+def _clic_opcion(lista, candidatos_norm):
+    for op in lista.find_elements(By.TAG_NAME, "li"):
+        if _normalizar(op.text) in candidatos_norm:
+            op.click()
+            time.sleep(0.4)
+            return True
+    return False
+
+
+def seleccionar_combo_mes(driver, wait):
+    candidatos_norm = {_normalizar(m) for m in MESES_ES[MES_OBJETIVO_NUM]}
+    todos_meses_norm = {_normalizar(m) for m in TODOS_LOS_MESES}
+    lista = _abrir_combo_por_predicado(driver, wait, lambda t: _normalizar(t) in todos_meses_norm)
+    if not _clic_opcion(lista, candidatos_norm):
+        raise RuntimeError(f"No se encontró el mes objetivo {MESES_ES[MES_OBJETIVO_NUM]} en el combo.")
+
+
+def seleccionar_combo_anio(driver, wait):
+    candidatos_norm = {str(ANIO_OBJETIVO)}
+    lista = _abrir_combo_por_predicado(
+        driver, wait, lambda t: re.fullmatch(r"\d{4}", t.strip()) is not None
+    )
+    if not _clic_opcion(lista, candidatos_norm):
+        raise RuntimeError(f"No se encontró el año objetivo {ANIO_OBJETIVO} en el combo.")
+
+
+# ============================================================================
+# FLUJOS POR TIPO DE CONSULTA
+# ============================================================================
+
+def procesar_consulta_diaria(driver, wait, carpeta_destino):
+    establecer_fecha_diaria(driver, wait)
+
+    wait.until(EC.element_to_be_clickable(
+        (By.ID, "ctl00_cphContent_btnConsultar"))).click()
+    time.sleep(ESPERA_POST_CONSULTA)
+
+    fijar_carpeta_descarga(driver, carpeta_destino)
+    archivos_antes = set(os.listdir(carpeta_destino))
+    handle_original = driver.current_window_handle
+
+    wait.until(EC.element_to_be_clickable(
+        (By.ID, "ctl00_cphContent_btnExportar"))).click()
+
+    cerrar_pestanas_extra(driver, handle_original)
+    archivo = esperar_descarga_completa(carpeta_destino, archivos_antes)
+    print(f"    -> Descargado: {archivo}")
+
+
+def procesar_consulta_mensual(driver, wait, carpeta_destino):
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "span.rddlFakeInput")))
+    seleccionar_combo_mes(driver, wait)
+    seleccionar_combo_anio(driver, wait)
+
+    wait.until(EC.element_to_be_clickable(
+        (By.ID, "ctl00_cphContent_btnConsultaMensual"))).click()
+    time.sleep(ESPERA_POST_CONSULTA)
+
+    fijar_carpeta_descarga(driver, carpeta_destino)
+    archivos_antes = set(os.listdir(carpeta_destino))
+    handle_original = driver.current_window_handle
+
+    wait.until(EC.element_to_be_clickable(
+        (By.ID, "ctl00_cphContent_btnExportarM"))).click()
+
+    cerrar_pestanas_extra(driver, handle_original)
+    archivo = esperar_descarga_completa(carpeta_destino, archivos_antes)
+    print(f"    -> Descargado: {archivo}")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    print(f"Fecha objetivo (consultas diarias B/F):   {FECHA_OBJETIVO_STR}")
+    print(f"Periodo objetivo (consultas mensuales C/R/E): {MES_OBJETIVO_NUM:02d}/{ANIO_OBJETIVO}\n")
+
+    driver = iniciar_driver()
+    wait = WebDriverWait(driver, TIMEOUT)
+    resultados = {}
+
+    try:
+        for tip in ORDEN_TIPS:
+            info = SITIOS[tip]
+            print(f"[{tip}] Abriendo {info['url']}")
+            try:
+                driver.get(info["url"])
+                if info["tipo_consulta"] == "diaria":
+                    procesar_consulta_diaria(driver, wait, info["carpeta"])
+                else:
+                    procesar_consulta_mensual(driver, wait, info["carpeta"])
+                resultados[tip] = "OK"
+            except Exception as e:
+                resultados[tip] = f"ERROR: {e}"
+                print(f"    !! Falló {tip}: {e}")
+            time.sleep(1.5)
+    finally:
+        driver.quit()
+
+    print("\nResumen:")
+    for tip in ORDEN_TIPS:
+        print(f"  {tip}: {resultados.get(tip, 'no ejecutado')}")
+
+
+if __name__ == "__main__":
+    main()
