@@ -1,0 +1,18 @@
+    # --- Sustitución INF1/INF2/INF3 (solo donde el SBS matchea en QEST) --------
+    # Sin match en QEST -> se conserva el INF original de G&P (ya NO se descarta
+    # la fila). La mayoría de "sin match" son SBS que Integra no tiene (por eso
+    # QEST no los rastrea) pero que SÍ pesan en la competencia vía GAP; botar la
+    # fila tumbaba también esa posición de la competencia sin necesidad -- ese
+    # dato nunca dependió de QEST. Medido: ~16-25pp perdidos por Fondo en
+    # Habitat/Prima/Profuturo/Sistema con la versión anterior (solo "descartar").
+    _sbs_norm = b.df['SBS'].astype(str).str.strip()
+    for nombre_inf in ['INF1', 'INF2', 'INF3']:
+        nuevo = _sbs_norm.map(b.qest_pct_universo[nombre_inf])
+        _sin_match_relevante = b.df.loc[nuevo.isna() & b.df[nombre_inf].notna() & (b.df[nombre_inf] != 0)]
+        if len(_sin_match_relevante):
+            print(f"[QEST %Fondo] {nombre_inf}: {len(_sin_match_relevante)} SBS con peso en G&P "
+                  f"sin match en QEST -> se conserva el valor original de G&P:")
+            for _, r in _sin_match_relevante.iterrows():
+                print(f"    SBS={r['SBS']}  Nombre={r.get('Nombre')}  "
+                      f"Asset Class={r.get('Asset Class')}  {nombre_inf}_G&P={r[nombre_inf]}")
+        b.df[nombre_inf] = nuevo.fillna(b.df[nombre_inf]).fillna(0.0)   # QEST > G&P original > 0.0
