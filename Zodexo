@@ -1,0 +1,2104 @@
+# ==============================================================================
+# ZODA — MONITOR DE VALORIZACIÓN AFP INTEGRA
+# v6 — Reescritura fiel al notebook original (2020), modernizada para Python 3.11+
+#       Sin xlwings ni win32com. Usa openpyxl para lectura/escritura.
+# ==============================================================================
+
+import os
+import datetime
+import numpy as np
+import pandas as pd
+from openpyxl import load_workbook
+from time import strftime, sleep
+
+# ==============================================================================
+# SECCIÓN 1: RUTAS
+# ==============================================================================
+
+RUTA_BASE = r"Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\ZODA"
+
+RUTA_QEST              = r"Z:\Benchmarking\QEST_BD.xlsm"
+RUTA_ZODA              = os.path.join(RUTA_BASE, "ZODA.xlsm")
+RUTA_MULTIPLOS_HIST    = os.path.join(RUTA_BASE, "Multiplos_hist.xlsx")
+
+# Archivo de red para las presentaciones semestrales
+
+RUTA_MULT_COMP = (r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up"
+    r"\5 Estrategia del Portafolio\Monitores\ZODA\Evolución de Múltiplos Comparables.xlsx")
+
+# Ruta del CSV intermedio de múltiplos (leído por zoda_dashboard_v3.py)
+RUTA_MULTIPLOS_CSV = os.path.join(RUTA_BASE, "Multiplos_diarios.csv")
+
+# Excel de auditoría con fórmulas vivas (Múltiplos → Z → Z vs Basket)
+RUTA_AUDITORIA = os.path.join(RUTA_BASE, "ZODA_Auditoria_Z.xlsx")
+
+# Excel de Z puros y diagnóstico (empresas del portafolio)
+RUTA_Z_PUROS = os.path.join(RUTA_BASE, "ZODA_Z_Puros.xlsx")
+
+# ==============================================================================
+# SECCIÓN 2: PARÁMETROS GLOBALES (idénticos al notebook original)
+# ==============================================================================
+
+ANIOS_Z        = [1, 3, 5, 10]
+PESOS_Z        = [0.33, 0.33, 0.33, 0.00]
+
+#               Trail_PE  Fwd_PE  Trail_PS  Fwd_PS  Trail_PB  Fwd_PB  Trail_EV  Fwd_EV
+PESOS_FINAN    = [0.33,    0,      0.33,     0,      0.33,     0,      0,        0]
+PESOS_EX_FINAN = [0.25,    0,      0.25,     0,      0.25,     0,      0.25,     0]
+
+TODAS_INDICES = [
+    "SPBLPGPT Index", "IPSA Index", "IBOV Index",
+    "COLCAP Index", "MEXBOL Index", "MXLA Index"
+]
+
+# Strings vacíos de Bloomberg/CIQ que se tratan como 0
+_VACIOS = ["#N/A N/A", "NM", "(Invalid Formula Name)", "NA", "#VALUE!"]
+
+# ==============================================================================
+# SECCIÓN 3: UTILIDADES DE LECTURA
+# ==============================================================================
+
+def leer_hoja_excel(ruta: str, hoja: str,
+                    n_filas: int = 15000,
+                    con_encabezado: bool = False) -> pd.DataFrame:
+    """Lee una hoja Excel con dtype=object para evitar ArrowStringArray."""
+    header = 0 if con_encabezado else None
+    df = pd.read_excel(
+        ruta, sheet_name=hoja,
+        header=header, nrows=n_filas,
+        engine="openpyxl", dtype=object,
+    )
+    if not con_encabezado:
+        df.columns = [f"column_{i}" for i in range(len(df.columns))]
+    return df
+
+
+def escribir_df_en_excel(ruta: str, hoja: str,
+                          df: pd.DataFrame,
+                          incluir_indice: bool = True) -> None:
+    """Sobreescribe el contenido de una hoja Excel preservando macros."""
+    wb = load_workbook(ruta, keep_vba=True)
+    if hoja in wb.sheetnames:
+        ws = wb[hoja]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(hoja)
+
+    df_exp = df.reset_index() if incluir_indice else df.reset_index(drop=True)
+
+    for col_i, col_name in enumerate(df_exp.columns, start=1):
+        ws.cell(row=1, column=col_i, value=str(col_name))
+
+    for row_i, row in enumerate(df_exp.itertuples(index=False), start=2):
+        for col_i, valor in enumerate(row, start=1):
+            if isinstance(valor, (pd.Timestamp, datetime.datetime)):
+                valor = valor.to_pydatetime() if isinstance(valor, pd.Timestamp) else valor
+            elif isinstance(valor, (pd.Period,)):
+                valor = str(valor)
+            elif isinstance(valor, float) and np.isnan(valor):
+                valor = None
+            ws.cell(row=row_i, column=col_i, value=valor)
+
+    for intento in range(5):
+        try:
+            wb.save(ruta)
+            break
+        except PermissionError:
+            if intento == 4:
+                raise PermissionError(
+                    f"No se pudo guardar '{os.path.basename(ruta)}': el archivo está "
+                    "abierto en Excel u otro proceso, o bloqueado por OneDrive/antivirus. "
+                    "Ciérralo y vuelve a ejecutar."
+                )
+            print(f"  ⚠ Archivo bloqueado, reintentando en 5s... ({intento + 1}/5)")
+            sleep(5)
+    print(f"  ✓ Escrito: {os.path.basename(ruta)} → hoja '{hoja}'")
+
+
+# ==============================================================================
+# SECCIÓN 4: ACTUALIZACIÓN DE DQ_IN
+# ==============================================================================
+
+def actualizar_DQ_IN(df_qest: pd.DataFrame,
+                     dq_in_bd: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replica exactamente la función DQ_IN del notebook original.
+    Toma las filas nuevas del QEST a partir de la última fecha registrada
+    en la BD y las concatena.
+    """
+    LISTA_IN = [
+        "Fondo", "Dato", "Fecha", "SBS",
+        "302012200001", "300013200002", "300013200001", "300011100001",
+        "300009100001", "302002100001", "302051100001", "312051100001",
+        "3220512Q1094", "302029100001", "3220082A1040", "302008100002",
+        "302072200001", "302845100002", "395833228291", "312039100001",
+        "302043100001", "302043100002", "302032100002", "302030100001",
+        "302061100001", "302011100001", "312011100001", "302107100001",
+        "3021012171A1", "345874294721", "312025100001", "312034100001",
+        "312026100001", "3020836W5029", "3220292P2083",
+    ]
+
+    # Eliminar las primeras 10 filas (metadatos QEST) y transponer
+    df = df_qest.drop(df_qest.index[list(range(0, 10))])
+    df = df.transpose()
+    df = df.rename(columns={df.columns[0]: "Isins"})
+
+    filtrada = df[df["Isins"].isin(LISTA_IN)].transpose()
+    filtrada.columns = filtrada.iloc[0].tolist()
+    filtrada = filtrada[1:]
+
+    # Última fecha registrada en la BD (la más reciente)
+    ultima_fecha_bd = dq_in_bd["Fecha"][::-1].iloc[0]
+    print(f"  → DQ_IN: última fecha registrada = {ultima_fecha_bd}")
+
+    # Buscar esa fecha en QEST de forma robusta (normalizar a date)
+    ultima_norm = pd.Timestamp(ultima_fecha_bd).normalize()
+    fechas_qest = filtrada["Fecha"].tolist()
+
+    fechas_norm = []
+    for f in fechas_qest:
+        try:
+            fechas_norm.append(pd.Timestamp(f).normalize() if f is not None and not isinstance(f, str) else None)
+        except Exception:
+            fechas_norm.append(None)
+
+    if ultima_norm not in fechas_norm:
+        validas = [f for f in fechas_norm if f is not None]
+        if validas:
+            ultima_norm = validas[-1]  # usar la última fecha disponible
+            print(f"⚠ Advertencia: fecha {ultima_fecha_bd} no encontrada en QEST. Usando {ultima_norm.date()} en su lugar.")
+        else:
+            raise ValueError("No hay fechas válidas en QEST.")
+
+
+    indice_inicio = fechas_norm.index(ultima_norm) + 9
+    nuevas_filas = filtrada.iloc[indice_inicio:].reset_index(drop=True)
+    nuevas_filas = nuevas_filas[
+        nuevas_filas["Dato"].astype(str).str.contains(r"Q|PxQ", na=False)
+    ]
+
+    return pd.concat([dq_in_bd, nuevas_filas], ignore_index=True)
+
+
+# ==============================================================================
+# SECCIÓN 5: LECTURA DE BASKETS
+# ==============================================================================
+
+def leer_baskets(ruta: str):
+    """
+    Lee la hoja Baskets y devuelve las 9 listas/dicts igual que el notebook.
+    Retorna: (Todas_Finan, Empresas_Financieras, Basket_Financieras,
+               Todas_Cons_Const, Empresas_Cons_Const, Basket_Cons_Const,
+               Todas_Min_Utl, Empresas_Min_Utl, Basket_Min_Utl)
+    """
+    df = leer_hoja_excel(ruta, "Baskets", n_filas=100)
+    df = df.dropna(axis=1, how="all")
+
+    def _extraer_grupo(nombre_grupo):
+        bloque = df[df.iloc[:, 0] == nombre_grupo].copy()
+        bloque = bloque.drop(bloque.columns[0], axis=1)
+        bloque = bloque.dropna(axis=1, how="all")
+
+        todas = []
+        empresas = []
+        basket_dic = {}
+
+        for _, fila in bloque.iterrows():
+            vals = [v for v in fila.tolist() if pd.notna(v) and str(v).strip()]
+            if not vals:
+                continue
+            empresa = vals[0]
+            comparables = vals[1:]
+            if empresa not in empresas:
+                empresas.append(empresa)
+            basket_dic[empresa] = comparables
+            for t in [empresa] + comparables:
+                if t not in todas:
+                    todas.append(t)
+
+        return todas, empresas, basket_dic
+
+    todas_f,  emp_f,  basket_f  = _extraer_grupo("Financieras")
+    todas_cc, emp_cc, basket_cc = _extraer_grupo("Con, Ind y HC")
+    todas_mu, emp_mu, basket_mu = _extraer_grupo("Mineria y Utilities")
+
+    return (todas_f,  emp_f,  basket_f,
+            todas_cc, emp_cc, basket_cc,
+            todas_mu, emp_mu, basket_mu)
+
+
+# ==============================================================================
+# SECCIÓN 6: FORWARDS A 12 MESES (idéntico al notebook original)
+# ==============================================================================
+
+def forwards_one_year(base: pd.DataFrame, names: list) -> pd.DataFrame:
+    """
+    Para cada fecha del índice, toma el valor de 12 meses adelante.
+    Si no existe la fecha exacta, usa la anterior más cercana.
+    Replica exactamente la función forwards_one_year del notebook original.
+    """
+    fechas_bd = pd.Series(base.index.tolist())
+    date_to_index = {date: idx for idx, date in enumerate(fechas_bd)}
+    max_fecha = fechas_bd.max()
+    tasa = 0
+
+    doce_meses = {name: [None] * len(fechas_bd) for name in names}
+
+    for idx, dia in enumerate(fechas_bd):
+        fwd = (dia + pd.DateOffset(months=12)).replace(hour=0, minute=0, second=0)
+
+        for name in names:
+            col_idx = names.index(name)
+            if fwd in date_to_index:
+                valor = base.iloc[date_to_index[fwd], col_idx]
+            else:
+                previas = fechas_bd[fechas_bd < fwd]
+                if not previas.empty:
+                    cercana = previas.max()
+                    valor = base.iloc[date_to_index[cercana], col_idx]
+                    if fwd > max_fecha:
+                        diff_dias = (fwd - max_fecha).days
+                        valor = valor * (1 + tasa) ** (diff_dias / 365)
+                else:
+                    valor = None
+            doce_meses[name][idx] = valor
+
+    fwd_df = pd.DataFrame(doce_meses, index=base.index)
+    return pd.concat([base, fwd_df], axis=1)
+
+
+# ==============================================================================
+# SECCIÓN 7: LIMPIEZA DE DATOS (fiel al notebook original)
+# ==============================================================================
+
+def _limpiar_vacios(df: pd.DataFrame) -> pd.DataFrame:
+    for v in _VACIOS:
+        df.replace(v, 0, inplace=True)
+    return df
+
+
+def LimpiandoCIQ(base: pd.DataFrame,
+                  fechas_tri: pd.Series,
+                  nombre: str) -> pd.DataFrame:
+    """
+    Extrae y limpia datos trimestrales de Capital IQ para un ticker.
+
+    NOMBRES DE COLUMNA POR POSICIÓN:
+    La fila 2 del Excel contiene fórmulas del tipo ="IQ_NI" que openpyxl
+    no evalúa siempre, devolviendo NaN como nombre. Para blindar el código,
+    los nombres se asignan por posición fija (el esquema nunca cambia):
+      cols 0-3 → IQ_NI, IQ_TOTAL_REV, IQ_TOTAL_EQUITY, IQ_EBITDA
+      cols 4-6 → Px_last, CUR_MKT_CAP, CURR_ENTP_VAL
+    """
+    _COLS_CIQ = ["IQ_NI", "IQ_TOTAL_REV", "IQ_TOTAL_EQUITY", "IQ_EBITDA"]
+    _COLS_BBG = ["Px_last", "CUR_MKT_CAP", "CURR_ENTP_VAL"]
+    _COLS_ALL = _COLS_CIQ + _COLS_BBG
+
+    data_emp = base.loc[:, base.iloc[4] == nombre]
+    n_cols = len(data_emp.columns)
+    columnas = [
+        _COLS_ALL[i] if i < len(_COLS_ALL) else f"col_{i}"
+        for i in range(n_cols)
+    ]
+    data_emp_ = data_emp.iloc[5:].copy()
+    data_emp_.columns = columnas
+
+    # Las primeras 4 columnas son CIQ
+    data_ciq = data_emp_.iloc[:, :4].dropna(axis=0, how="all")
+    data_ciq = data_ciq.fillna(0)
+
+    # Insertar fechas trimestrales — alinear por tamaño
+    n = min(len(fechas_tri), len(data_ciq))
+    data_ciq = data_ciq.iloc[:n].copy()
+    data_ciq.insert(0, "Fecha", fechas_tri.values[:n])
+    data_ciq.set_index("Fecha", inplace=True)
+
+    _limpiar_vacios(data_ciq)
+    data_ciq = data_ciq.astype(np.float64)
+
+    # Calcular forwards
+    data_ciq = forwards_one_year(
+        data_ciq,
+        ["Fwd_IQ_NI", "Fwd_IQ_TOTAL_REV", "Fwd_IQ_TOTAL_EQUITY", "Fwd_IQ_EBITDA"]
+    )
+
+    return data_ciq
+
+
+def LimpiandoBBG(base: pd.DataFrame,
+                  fechas_diarias: pd.Series,
+                  nombre: str) -> pd.DataFrame:
+    """
+    Extrae y limpia datos diarios de Bloomberg para un ticker.
+
+    NOMBRES DE COLUMNA POR POSICIÓN (igual que LimpiandoCIQ):
+    cols 0-3 → IQ_NI, IQ_TOTAL_REV, IQ_TOTAL_EQUITY, IQ_EBITDA  (CIQ)
+    cols 4-6 → Px_last, CUR_MKT_CAP, CURR_ENTP_VAL               (BBG)
+
+    SIN dropna: preserva todas las filas para alinear correctamente
+    con Fechas_Diarias. Los NaN de celdas #N/A N/A → 0 via fillna,
+    y en multiplos() el num.replace(0→NaN) los excluye del ratio.
+    """
+    _COLS_CIQ = ["IQ_NI", "IQ_TOTAL_REV", "IQ_TOTAL_EQUITY", "IQ_EBITDA"]
+    _COLS_BBG = ["Px_last", "CUR_MKT_CAP", "CURR_ENTP_VAL"]
+    _COLS_ALL = _COLS_CIQ + _COLS_BBG
+
+    data_emp = base.loc[:, base.iloc[4] == nombre]
+    n_cols = len(data_emp.columns)
+    columnas = [
+        _COLS_ALL[i] if i < len(_COLS_ALL) else f"col_{i}"
+        for i in range(n_cols)
+    ]
+    data_emp_ = data_emp.iloc[5:].copy()
+    data_emp_.columns = columnas
+
+    # Las columnas BBG empiezan en posición 4.
+    # SIN dropna: preservar todas las filas para alinear correctamente
+    # con Fechas_Diarias, independientemente de cuándo arrancó el ticker.
+    data_bbg = data_emp_.iloc[:, 4:]
+
+    # Alinear por tamaño (por si el Excel tiene menos filas que fechas)
+    n = min(len(fechas_diarias), len(data_bbg))
+    data_bbg = data_bbg.iloc[:n].copy()
+    data_bbg.insert(0, "Fecha", fechas_diarias.values[:n])
+    data_bbg.set_index("Fecha", inplace=True)
+
+    _limpiar_vacios(data_bbg)
+    # NaN (de celdas #N/A N/A de Bloomberg) → 0
+    # En multiplos(), 0 en el numerador → NaN via num.replace(0, NaN)
+    data_bbg = data_bbg.apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    return data_bbg
+
+
+def LimpiandoIndices(base: pd.DataFrame,
+                      fechas_diarias: pd.Series,
+                      nombre: str) -> pd.DataFrame:
+    """
+    Extrae y limpia datos de un índice bursátil.
+    Replica exactamente LimpiandoIndices del notebook original.
+    Los índices usan la fila 3 (no la 4) para identificar el nombre.
+    """
+    data_idx = base.loc[:, base.iloc[3] == nombre]
+    columnas = ["PX_LAST", "Trail_PE", "Fwd_PE", "Trail_PS", "Fwd_PS",
+                "Trail_PB", "Fwd_PB", "Trail_EVEBITDA", "Fwd_EVEBITDA"]
+    data_idx = data_idx.iloc[5:].copy()
+    data_idx.columns = columnas
+    data_idx = data_idx.fillna(0)
+
+    n = min(len(fechas_diarias), len(data_idx))
+    data_idx = data_idx.iloc[:n].copy()
+    data_idx.insert(0, "Fecha", fechas_diarias.values[:n])
+    data_idx.set_index("Fecha", inplace=True)
+
+    _limpiar_vacios(data_idx)
+    data_idx = data_idx.astype(np.float64)
+
+    return data_idx
+
+
+# ==============================================================================
+# SECCIÓN 8: CÁLCULO DE MÚLTIPLOS
+# ==============================================================================
+
+def multiplos(activo: str,
+              datos_bbg: dict,
+              datos_ciq: dict,
+              fechas_nuevas: pd.Index) -> pd.DataFrame:
+    """
+    Calcula los 8 múltiplos de valorización (Trail/Fwd × PE/PS/PB/EVEBITDA).
+
+    EQUIVALENCIA CON EL NOTEBOOK 2020:
+    El notebook original dividía ambas series en Period Q directamente.
+    Funcionaba porque calamine leía "#N/A N/A" como string (no NaN), así
+    dropna no eliminaba filas y ambas series tenían el mismo largo →
+    no había outer join → no había mismatch de longitudes.
+
+    Con openpyxl, "#N/A N/A" llega como NaN. La división Period Q produce
+    un outer join que agrega trimestres extra (los de CIQ sin contraparte
+    BBG), haciendo len(ratio) > len(fechas_nuevas) y rompiendo la
+    asignación posicional de fechas → ValueError silenciado por try/except
+    → "0 empresas con múltiplos".
+
+    SOLUCIÓN — "map por Q" (matemáticamente idéntica al original):
+    1. Para cada fecha diaria se determina su Period Q.
+    2. Se hace un lookup del valor CIQ indexado por ese Period Q.
+    3. El resultado es siempre de exactamente len(fechas_nuevas) filas,
+       sin outer join, sin duplicados de índice, sin mismatch.
+    Verificado numéricamente: bit-a-bit idéntico al notebook 2020
+    para tickers con historia completa.
+
+    TICKERS CON HISTORIA CORTA (AUNA, INRETC1, futuros):
+    - LimpiandoBBG preserva todas las filas (sin dropna), por lo que
+      los días sin dato BBG llegan como 0 en el numerador.
+    - num.replace(0 → NaN) convierte esos días en NaN en el ratio.
+    - Creacion_Z_Final usa dropna(how='all').index para encontrar la
+      primera fecha con dato real → el Z arranca correctamente desde
+      que el ticker tiene historia, sin afectar a los demás.
+    - Para tickers completos el comportamiento es idéntico al anterior.
+    """
+    bbg = datos_bbg[activo]
+    ciq = datos_ciq[activo]
+
+    # Mapa: cada fecha diaria → su Period Q
+    fechas_q = pd.DatetimeIndex(fechas_nuevas).to_period("Q")
+
+    def _ciq_diario(col: str) -> pd.Series:
+        """
+        Expande CIQ trimestral a frecuencia diaria mediante lookup por Period Q.
+        Cada día diario recibe el valor del trimestre que lo contiene,
+        exactamente igual que el notebook 2020 con Period Q, pero sin outer join.
+        """
+        s = ciq[col].copy()
+        s.index = pd.DatetimeIndex(s.index).to_period("Q")
+        return pd.Series(
+            s.reindex(fechas_q).ffill().values,
+            index=fechas_nuevas,
+            name=col,
+        )
+
+    def _bbg_diario(col: str) -> pd.Series:
+        return bbg[col].copy()
+
+    def _ratio(num: pd.Series, den: pd.Series, nombre: str) -> pd.DataFrame:
+        """
+        Divide num/den y construye un DataFrame diario de len(fechas_nuevas) filas.
+        - 0 en num (sin dato BBG)  → NaN en ratio (no ratio=0 incorrecto).
+        - 0 en den (sin dato CIQ)  → NaN en ratio (sin dato trimestral).
+        - inf/-inf → 0 (igual que notebook original).
+        """
+        num_clean = num.replace(0, np.nan)
+        den_clean = den.replace(0, np.nan)
+        ratio = num_clean / den_clean
+        df = pd.DataFrame({nombre: ratio.values}, index=fechas_nuevas)
+        df.replace([np.inf, -np.inf], 0, inplace=True)
+        return df
+
+    ev         = _bbg_diario("CURR_ENTP_VAL")
+    market_cap = _bbg_diario("CUR_MKT_CAP")
+
+    net_income = _ciq_diario("IQ_NI")
+    ventas     = _ciq_diario("IQ_TOTAL_REV")
+    book       = _ciq_diario("IQ_TOTAL_EQUITY")
+    ebitda     = _ciq_diario("IQ_EBITDA")
+
+    fwd_ni     = _ciq_diario("Fwd_IQ_NI")
+    fwd_ventas = _ciq_diario("Fwd_IQ_TOTAL_REV")
+    fwd_book   = _ciq_diario("Fwd_IQ_TOTAL_EQUITY")
+    fwd_ebitda = _ciq_diario("Fwd_IQ_EBITDA")
+
+    trail_pe      = _ratio(market_cap, net_income,  "Trail_PE")
+    fwd_pe        = _ratio(market_cap, fwd_ni,      "Fwd_PE")
+    trail_ps      = _ratio(market_cap, ventas,      "Trail_PS")
+    fwd_ps        = _ratio(market_cap, fwd_ventas,  "Fwd_PS")
+    trail_pb      = _ratio(market_cap, book,        "Trail_PB")
+    fwd_pb        = _ratio(market_cap, fwd_book,    "Fwd_PB")
+    trail_evebita = _ratio(ev,         ebitda,      "Trail_EVEBITDA")
+    fwd_evebitda  = _ratio(market_cap, fwd_ebitda,  "Fwd_EVEBITDA")
+
+    return pd.concat(
+        [trail_pe, fwd_pe, trail_ps, fwd_ps,
+         trail_pb, fwd_pb, trail_evebita, fwd_evebitda],
+        axis=1, join="outer"
+    )
+
+
+# ==============================================================================
+# SECCIÓN 9: Z-SCORES (fiel al notebook original)
+# ==============================================================================
+
+def Z(prueba_z: pd.DataFrame, anios: int, dias_por_anio: int = 260) -> pd.DataFrame:
+    """
+    Rolling Z-score con ventana de anios × 260 días hábiles.
+    Replica exactamente la función Z() del notebook original.
+    """
+    prueba_z.index = pd.to_datetime(prueba_z.index)
+    window = anios * dias_por_anio
+    media  = prueba_z.rolling(window=window, min_periods=window).mean()
+    std    = prueba_z.rolling(window=window, min_periods=window).std()
+    return (prueba_z - media) / std
+
+
+def Creacion_Z_Final(prueba_z: pd.DataFrame, es_finan: bool,
+                     dias_por_anio: int = 260) -> pd.Series:
+    """
+    Combina Z-scores de múltiples ventanas y múltiplos en un Z único.
+    Replica exactamente Creacion_Z_Final del notebook original,
+    incluyendo la lógica de es_finan para elegir los pesos de múltiplos.
+    """
+    matriz_zs = {}
+    for i, anios in enumerate(ANIOS_Z):
+        z_i = Z(prueba_z, anios, dias_por_anio) * PESOS_Z[i]
+        matriz_zs[anios] = z_i
+
+    # Sumar ventanas (igual que el notebook: fill_value=0 para no propagar NaN)
+    z_acum = pd.DataFrame()
+    for anios in ANIOS_Z:
+        if z_acum.empty:
+            z_acum = matriz_zs[anios]
+        else:
+            z_acum = z_acum.add(matriz_zs[anios], fill_value=0)
+
+    # Encontrar la ventana más larga con peso != 0
+    ubi_mayor = 0
+    for idx, peso in enumerate(reversed(PESOS_Z)):
+        if peso != 0:
+            ubi_mayor = len(PESOS_Z) - 1 - idx
+            break
+
+    # Recortar desde donde esa ventana tiene datos (igual que el notebook)
+    desde_aqui = matriz_zs[ANIOS_Z[ubi_mayor]].dropna(how="all").index
+    if desde_aqui.empty:
+        # Si no hay suficiente historia, buscar la ventana más corta disponible
+        for anios in ANIOS_Z:
+            desde = matriz_zs[anios].dropna(how="all").index
+            if not desde.empty:
+                desde_aqui = desde
+                break
+
+    if not desde_aqui.empty:
+        z_acum = z_acum.loc[desde_aqui[0]:]
+
+    # Ponderar por múltiplo y colapsar a una sola serie
+    pesos_mult = PESOS_FINAN if es_finan else PESOS_EX_FINAN
+    z_final = (z_acum * pesos_mult).sum(axis=1)
+    return z_final
+
+
+# ==============================================================================
+# SECCIÓN 10: CÁLCULO DE BASKETS (fiel al notebook original)
+# ==============================================================================
+
+def Creacion_DF_Basket(basket: list,
+                        matriz_multiplos: dict,
+                        market_cap: pd.DataFrame,
+                        fechas_diarias: pd.Index) -> pd.DataFrame:
+    """
+    Calcula el múltiplo ponderado por Market Cap del basket de comparables.
+    Replica exactamente Creacion_DF_Basket del notebook original.
+    """
+    nombres_mult = [
+        "Trail_PE", "Fwd_PE", "Trail_PS", "Fwd_PS",
+        "Trail_PB", "Fwd_PB", "Trail_EVEBITDA", "Fwd_EVEBITDA"
+    ]
+
+    # Filtrar comparables que existan en la matriz
+    basket_valido = [t for t in basket if t in matriz_multiplos]
+    if not basket_valido:
+        return pd.DataFrame(0, index=fechas_diarias, columns=nombres_mult)
+
+    df_basket = pd.DataFrame(index=fechas_diarias)
+
+    dfs = {m: pd.DataFrame(index=fechas_diarias) for m in nombres_mult}
+    for ticker in basket_valido:
+        for mult in nombres_mult:
+            if mult in matriz_multiplos[ticker].columns:
+                temp = pd.DataFrame(matriz_multiplos[ticker][mult])
+                temp.rename(columns={mult: ticker}, inplace=True)
+                dfs[mult] = pd.concat([dfs[mult], temp], axis=1, sort=False)
+
+    # Pesos por Market Cap (solo comparables presentes en market_cap)
+    mc_cols = [t for t in basket_valido if t in market_cap.columns]
+    if not mc_cols:
+        return pd.DataFrame(0, index=fechas_diarias, columns=nombres_mult)
+
+    mc = market_cap[mc_cols]
+    pesos = mc.div(mc.sum(axis=1), axis=0)
+
+    for mult in nombres_mult:
+        cols_disp = [c for c in mc_cols if c in dfs[mult].columns]
+        if cols_disp:
+            df_basket[mult] = pesos[cols_disp].multiply(dfs[mult][cols_disp]).sum(axis=1)
+        else:
+            df_basket[mult] = 0.0
+
+    return df_basket
+
+
+# ==============================================================================
+# SECCIÓN 11: EXPORTAR HISTÓRICO DE MÚLTIPLOS POR GICS
+# ==============================================================================
+
+def exportar_multiplos_historicos(todos_multiplos: dict,
+                                   ruta_zoda: str,
+                                   ruta_salida: str) -> None:
+    """
+    Crea Multiplos_hist.xlsx con una pestaña por sector GICS.
+    Incluye TODOS los múltiplos (trailing + forward).
+    """
+    print("  → Exportando histórico de múltiplos por sector GICS...")
+
+    dic = leer_hoja_excel(ruta_zoda, "GICS", con_encabezado=True)
+    dic = dic.apply(lambda c: c.str.strip() if c.dtype == "object" else c)
+    mapa_emp  = dic.set_index("BBG")["Empresa"].to_dict()
+    mapa_gics = dic.set_index("BBG")["GICS"].to_dict()
+
+    concat = pd.concat(todos_multiplos, names=["Activo", "Fecha"]).reset_index()
+
+    # Incluir TODOS los múltiplos (trailing y forward)
+    cols_mult = [c for c in concat.columns if c not in ("Activo", "Fecha")]
+
+    largo = concat.melt(
+        id_vars=["Activo", "Fecha"],
+        value_vars=cols_mult,
+        var_name="Multiplo", value_name="Valor"
+    )
+    largo["Fecha"]  = pd.to_datetime(largo["Fecha"], errors="coerce")
+    largo["Valor"]  = pd.to_numeric(largo["Valor"],  errors="coerce")
+    largo.loc[largo["Valor"] == 0, "Valor"] = np.nan
+    largo = largo.dropna(subset=["Valor"]).reset_index(drop=True)
+
+    ancho = (
+        largo
+        .pivot(index="Fecha", columns=["Activo", "Multiplo"], values="Valor")
+        .sort_index(axis=0).sort_index(axis=1)
+    )
+
+    nuevas_cols = [(mapa_emp.get(a, a), m) for a, m in ancho.columns]
+    sectores    = [mapa_gics.get(a, "Sin GICS") for a, _ in ancho.columns]
+    ancho.columns = pd.MultiIndex.from_tuples(nuevas_cols, names=["Empresa", "Multiplo"])
+
+    df_sec = pd.DataFrame({
+        "Empresa": [c[0] for c in ancho.columns],
+        "GICS":    sectores
+    }).drop_duplicates()
+
+    with pd.ExcelWriter(ruta_salida, engine="openpyxl") as writer:
+        for sector in sorted(df_sec["GICS"].unique()):
+            emps = df_sec.loc[df_sec["GICS"] == sector, "Empresa"]
+            cols_sec = [c for c in ancho.columns if c[0] in emps.values]
+            ancho[cols_sec].to_excel(writer, sheet_name=str(sector)[:31])
+
+    print(f"  ✓ Guardado: {ruta_salida}")
+
+
+# ==============================================================================
+# SECCIÓN 12: EXPORTAR MÚLTIPLOS COMPARABLES (para red)
+# ==============================================================================
+
+def exportar_multiplos_comparables(matriz_multiplos: dict,
+                                    matriz_baskets: dict,
+                                    todas_empresas: list,
+                                    fechas_tri: pd.Series,
+                                    fechas_diarias: pd.Index,
+                                    ruta_salida: str) -> None:
+    """
+    Exporta múltiplos trimestrales de empresa y basket al Excel de red.
+    Replica la lógica de combinado + combinado_basket del notebook.
+    """
+
+    def _appendar(df, combinado, prefijo):
+        df2 = df.copy()
+        df2.columns = [f"{prefijo}_{col}" for col in df2.columns]
+        return pd.concat([combinado, df2], axis=1, sort=False)
+
+    # Alinear a fechas trimestrales
+    fechas_d_sorted = pd.DatetimeIndex(fechas_diarias).sort_values()
+    fechas_q_alineadas = [fechas_d_sorted.asof(q) for q in fechas_tri]
+
+    combinado = pd.DataFrame()
+    for t in todas_empresas:
+        if t in matriz_multiplos:
+            combinado = _appendar(
+                matriz_multiplos[t].fillna(0).reindex(fechas_q_alineadas),
+                combinado, t
+            )
+
+    combinado_basket = pd.DataFrame()
+    for t in todas_empresas:
+        if t in matriz_baskets:
+            combinado_basket = _appendar(
+                matriz_baskets[t].fillna(0).reindex(fechas_q_alineadas),
+                combinado_basket, t
+            )
+
+    combinado_final = pd.concat([combinado, combinado_basket], axis=1, sort=False)
+
+    try:
+        wb = load_workbook(ruta_salida, keep_vba=True)
+        ws = wb["Multiplos"] if "Multiplos" in wb.sheetnames else wb.create_sheet("Multiplos")
+        ws.delete_rows(1, ws.max_row)
+
+        df_exp = combinado_final.reset_index()
+        for ci, cn in enumerate(df_exp.columns, 1):
+            ws.cell(row=1, column=ci, value=str(cn))
+        for ri, row in enumerate(df_exp.itertuples(index=False), 2):
+            for ci, val in enumerate(row, 1):
+                if isinstance(val, pd.Timestamp):
+                    val = val.to_pydatetime()
+                elif isinstance(val, float) and np.isnan(val):
+                    val = None
+                ws.cell(row=ri, column=ci, value=val)
+        wb.save(ruta_salida)
+        print(f"  ✓ Escrito en red: {ruta_salida}")
+    except Exception as e:
+        print(f"  ✗ Error al escribir en red: {e}")
+
+
+# ==============================================================================
+# SECCIÓN 13: EXCEL DE AUDITORÍA CON FÓRMULAS VIVAS  (Múltiplos → Z → Z vs Basket)
+# ==============================================================================
+# Genera un Excel pequeño donde TODO el camino se ve con fórmulas:
+#   Datos (inputs editables) → Múltiplos → Z por ventana → Z compuesto
+#   → Basket ponderado por Market Cap → ratio empresa/basket → Z vs Basket
+# Cada resultado se contrasta contra el valor que calculó Python (foto al generar).
+# Si cambias un input en Excel, TODO se recalcula solo.
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter as _L
+from openpyxl.workbook.properties import CalcProperties
+
+# --- Parámetros del Excel de auditoría (se cambian aquí, no en main) ----------
+XL_DIAS_POR_ANIO      = 20     # días hábiles que equivalen a "1 año" en el Excel (producción = 260)
+XL_N_FECHAS           = 5      # nº de fechas finales donde se calcula el Z con fórmulas
+XL_EMPRESAS_AUDITORIA = None   # None = 1ra empresa de cada grupo; o lista de tickers BBG
+
+# --- Constantes internas ------------------------------------------------------
+_XL_ORDEN = ["Trail_PE", "Fwd_PE", "Trail_PS", "Fwd_PS",
+             "Trail_PB", "Fwd_PB", "Trail_EVEBITDA", "Fwd_EVEBITDA"]   # mismo orden que PESOS_*
+# (nombre interno, etiqueta, numerador BBG, denominador CIQ)
+_XL_MULT = [
+    ("Trail_PE",       "P/E",       "CUR_MKT_CAP",   "IQ_NI"),
+    ("Trail_PS",       "P/S",       "CUR_MKT_CAP",   "IQ_TOTAL_REV"),
+    ("Trail_PB",       "P/B",       "CUR_MKT_CAP",   "IQ_TOTAL_EQUITY"),
+    ("Trail_EVEBITDA", "EV/EBITDA", "CURR_ENTP_VAL", "IQ_EBITDA"),
+]
+_XL_CIQ   = ["IQ_NI", "IQ_TOTAL_REV", "IQ_TOTAL_EQUITY", "IQ_EBITDA"]
+_XL_FILA0 = 6     # primera fila de datos en Datos y Mult
+_XL_BW    = 11    # ancho del bloque por ticker en la hoja Mult
+
+_F_TIT = Font(bold=True, size=13, color="1F3864")
+_F_HDR = Font(bold=True, color="FFFFFF")
+_F_BOLD = Font(bold=True)
+_F_IN  = Font(color="0000FF")                    # inputs editables
+_F_PY  = Font(color="7F7F7F", italic=True)       # foto de Python (solo contraste)
+_FILL_HDR = PatternFill("solid", fgColor="3E63AD")
+_FILL_SEC = PatternFill("solid", fgColor="D9E1F2")
+_FILL_OK  = PatternFill("solid", fgColor="E2EFDA")
+
+
+def _xl_val(v):
+    """Convierte valores pandas/numpy a algo que openpyxl acepte (NaN/inf → None)."""
+    if v is None:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.to_pydatetime()
+    if isinstance(v, (float, np.floating)):
+        return None if (np.isnan(v) or np.isinf(v)) else float(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    return v
+
+
+def _xl_hdr(ws, fila, col, texto):
+    c = ws.cell(row=fila, column=col, value=texto)
+    c.font, c.fill = _F_HDR, _FILL_HDR
+    c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    return c
+
+
+def _xl_diff(x: str, y: str) -> str:
+    """Texto de fórmula Excel: |x−y|; 0 si ambos vacíos; 1 si solo uno tiene dato."""
+    return (f'IF(AND(ISNUMBER({x}),ISNUMBER({y})),ABS({x}-{y}),'
+            f'IF(OR(ISNUMBER({x}),ISNUMBER({y})),1,0))')
+
+
+def _auditoria_xl_empresa(wb, cod, empresa, grupo, comps_def, mbk, es_fin,
+                          matriz_multiplos, datos_bbg, datos_ciq,
+                          n_filas, n_fechas, dpa, ventanas, refs) -> dict:
+    """
+    Construye las 3 hojas de UNA empresa: <cod>_Datos, <cod>_Mult, <cod>_Z.
+
+    Parámetros
+    ----------
+    cod        : código corto de hoja ("E1", "E2", ...).
+    empresa    : ticker BBG de la empresa del portafolio.
+    comps_def  : lista de comparables del basket (tal como sale de leer_baskets).
+    mbk        : dict {empresa: DataFrame basket 8 columnas} (Matriz_Baskets_*).
+    es_fin     : True si usa PESOS_FINAN, False si PESOS_EX_FINAN.
+    n_filas    : filas diarias a volcar (= ventana máx. en días + n_fechas − 1).
+    refs       : referencias a la hoja Parametros (dpa, tolerancia, ventanas, pesos).
+    Retorna dict con celdas clave para la hoja Resumen.
+
+    Supuestos: se replica el framework TAL CUAL (incluida la alineación por tamaño
+    de CIQ y la convención 0 = sin dato). Solo múltiplos Trail (los Fwd tienen peso 0).
+    """
+    comps = [c for c in comps_def if c in matriz_multiplos and c in datos_bbg]
+    tickers = [empresa] + comps
+    T, C = len(tickers), len(comps)
+
+    idx_full = matriz_multiplos[empresa].index
+    if len(idx_full) < n_filas:
+        raise ValueError(
+            f"{empresa}: solo {len(idx_full)} fechas diarias y el Excel necesita {n_filas}. "
+            f"Reduce XL_DIAS_POR_ANIO o XL_N_FECHAS.")
+    fechas = idx_full[-n_filas:]
+    K = n_fechas
+    fechas_eval = fechas[-K:]
+    nm, nv = len(_XL_MULT), len(ventanas)
+
+    # ── Foto de Python (solo para contraste) ────────────────────────────────
+    py_mult = {j: matriz_multiplos[t].reindex(fechas) for j, t in enumerate(tickers)}
+    bk_py = mbk[empresa].reindex(fechas)
+    ratio_raw = py_mult[0].div(bk_py)                       # igual que main: mult / basket
+    z_abs_py = Creacion_Z_Final(py_mult[0].copy(), es_fin, dias_por_anio=dpa).reindex(fechas_eval)
+    z_bk_py = Creacion_Z_Final(ratio_raw.copy(), es_fin, dias_por_anio=dpa).reindex(fechas_eval)
+
+    D, M, Zn = f"{cod}_Datos", f"{cod}_Mult", f"{cod}_Z"
+    wsD, wsM, wsZ = wb.create_sheet(D), wb.create_sheet(M), wb.create_sheet(Zn)
+    F0, N = _XL_FILA0, n_filas
+    R1 = F0 + N - 1                                          # última fila de datos
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # HOJA DATOS: (1) diario BBG, (2) trimestral CIQ por ticker, (3) foto Python
+    # ══════════════════════════════════════════════════════════════════════════
+    wsD.cell(row=1, column=1, value=f"{empresa} — INPUTS (azul = editable) y foto de Python (gris)").font = _F_TIT
+    wsD.cell(row=2, column=1, value=("Convención del framework: 0 o vacío = 'sin dato'. "
+                                     "Cambia cualquier celda azul y las hojas Mult y Z se recalculan."))
+    _xl_hdr(wsD, 5, 1, "Fecha")
+    for r, f in enumerate(fechas):
+        c = wsD.cell(row=F0 + r, column=1, value=_xl_val(pd.Timestamp(f)))
+        c.number_format = "dd/mm/yyyy"
+    col_mc, col_ev = {}, {}
+    for j, t in enumerate(tickers):
+        col_mc[j], col_ev[j] = 2 + 2 * j, 3 + 2 * j
+        wsD.cell(row=4, column=col_mc[j], value=f"{t}" + ("  (EMPRESA)" if j == 0 else "  (comparable)")).font = _F_BOLD
+        _xl_hdr(wsD, 5, col_mc[j], "Market Cap")
+        _xl_hdr(wsD, 5, col_ev[j], "EV")
+        bbg = datos_bbg[t].reindex(fechas)
+        for r, (mc, ev) in enumerate(zip(bbg["CUR_MKT_CAP"].values, bbg["CURR_ENTP_VAL"].values)):
+            a = wsD.cell(row=F0 + r, column=col_mc[j], value=_xl_val(mc)); a.font = _F_IN
+            b = wsD.cell(row=F0 + r, column=col_ev[j], value=_xl_val(ev)); b.font = _F_IN
+            a.number_format = b.number_format = "#,##0.00"
+
+    qa = 1 + 2 * T + 2                                       # inicio del bloque trimestral
+    qinfo = {}                                               # j → (col_clave, [cols IQ], fila1, fila2)
+    q_ini = pd.Period(fechas[0], "Q") - 4                    # 1 año extra hacia atrás (ffill)
+    for j, t in enumerate(tickers):
+        c0 = qa + 6 * j
+        wsD.cell(row=4, column=c0, value=f"CIQ trimestral · {t}").font = _F_BOLD
+        for k, h in enumerate(["Fecha trim.", "Clave"] + _XL_CIQ):
+            _xl_hdr(wsD, 5, c0 + k, h)
+        ciq = datos_ciq[t][_XL_CIQ]
+        ciq = ciq[pd.DatetimeIndex(ciq.index).to_period("Q") >= q_ini]
+        if not ciq.index.is_monotonic_increasing:
+            raise ValueError(f"{t}: fechas trimestrales CIQ no están en orden ascendente.")
+        for r, (f, fila) in enumerate(zip(ciq.index, ciq.values)):
+            fr = F0 + r
+            c = wsD.cell(row=fr, column=c0, value=_xl_val(pd.Timestamp(f))); c.number_format = "dd/mm/yyyy"
+            wsD.cell(row=fr, column=c0 + 1,
+                     value=f"=YEAR({_L(c0)}{fr})*10+ROUNDUP(MONTH({_L(c0)}{fr})/3,0)")
+            for k, v in enumerate(fila):
+                x = wsD.cell(row=fr, column=c0 + 2 + k, value=_xl_val(v)); x.font = _F_IN
+                x.number_format = "#,##0.00"
+        qinfo[j] = (c0 + 1, [c0 + 2 + k for k in range(4)], F0, F0 + max(len(ciq), 1) - 1)
+
+    pa = qa + 6 * T + 1                                      # inicio foto Python
+    wsD.cell(row=3, column=pa, value="FOTO DE PYTHON (solo contraste — no editar)").font = _F_BOLD
+    for j, t in enumerate(tickers):
+        wsD.cell(row=4, column=pa + 4 * j, value=f"Py múltiplos · {t}").font = _F_BOLD
+        for k, (mk, lbl, _, _) in enumerate(_XL_MULT):
+            _xl_hdr(wsD, 5, pa + 4 * j + k, lbl)
+            for r, v in enumerate(py_mult[j][mk].values):
+                x = wsD.cell(row=F0 + r, column=pa + 4 * j + k, value=_xl_val(v))
+                x.font, x.number_format = _F_PY, "0.0000"
+    pb, pr = pa + 4 * T, pa + 4 * T + 4
+    ratio_show = ratio_raw.replace([np.inf, -np.inf], np.nan)
+    wsD.cell(row=4, column=pb, value="Py basket (mult. ponderado por MC)").font = _F_BOLD
+    wsD.cell(row=4, column=pr, value="Py ratio empresa/basket").font = _F_BOLD
+    for k, (mk, lbl, _, _) in enumerate(_XL_MULT):
+        _xl_hdr(wsD, 5, pb + k, lbl)
+        _xl_hdr(wsD, 5, pr + k, lbl)
+        for r, (vb, vr) in enumerate(zip(bk_py[mk].values, ratio_show[mk].values)):
+            x = wsD.cell(row=F0 + r, column=pb + k, value=_xl_val(vb)); x.font, x.number_format = _F_PY, "0.0000"
+            y = wsD.cell(row=F0 + r, column=pr + k, value=_xl_val(vr)); y.font, y.number_format = _F_PY, "0.0000"
+    wsD.freeze_panes = wsD.cell(row=F0, column=2)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # HOJA MULT: múltiplos de cada ticker (fórmulas) + basket + ratio
+    # ══════════════════════════════════════════════════════════════════════════
+    wsM.cell(row=1, column=1, value=f"{empresa} — MÚLTIPLOS, BASKET Y RATIO (todo con fórmulas)").font = _F_TIT
+    wsM.cell(row=2, column=1, value=("Múltiplo = numerador BBG / denominador CIQ vigente (último trimestre ≤ fecha, "
+                                     "= reindex+ffill de pandas). Si cualquiera es 0/vacío → sin dato."))
+    _xl_hdr(wsM, 5, 1, "Fecha"); _xl_hdr(wsM, 5, 2, "Clave trim.")
+    cm = {j: 3 + _XL_BW * j for j in range(T)}               # col inicial de cada bloque
+    mult_col = {}                                            # (j, k) → letra de la col del múltiplo
+    delta_cols = []
+    for j, t in enumerate(tickers):
+        wsM.cell(row=4, column=cm[j], value=f"{t}" + ("  (EMPRESA)" if j == 0 else "  (comparable)")).font = _F_BOLD
+        for k, h in enumerate(["Market Cap", "EV", "NI vig.", "Ventas vig.", "Patrim. vig.", "EBITDA vig."]
+                              + [m[1] for m in _XL_MULT] + ["Máx |Δ| vs Py"]):
+            _xl_hdr(wsM, 5, cm[j] + k, h)
+        for k in range(4):
+            mult_col[(j, k)] = _L(cm[j] + 6 + k)
+        delta_cols.append(_L(cm[j] + 10))
+    cb = 3 + _XL_BW * T                                      # bloque basket
+    cw = {i: cb + i for i in range(C)}                       # pesos por comparable
+    c_sum = cb + C
+    c_bk = [c_sum + 1 + k for k in range(4)]
+    c_rt = [c_sum + 5 + k for k in range(4)]
+    c_dbk, c_drt = c_sum + 9, c_sum + 10
+    wsM.cell(row=4, column=cb, value="BASKET ponderado por Market Cap y ratio empresa/basket").font = _F_BOLD
+    for i, t in enumerate(comps):
+        _xl_hdr(wsM, 5, cw[i], f"Peso {t}")
+    _xl_hdr(wsM, 5, c_sum, "Σ pesos")
+    for k, m in enumerate(_XL_MULT):
+        _xl_hdr(wsM, 5, c_bk[k], f"Basket {m[1]}")
+        _xl_hdr(wsM, 5, c_rt[k], f"Ratio {m[1]}")
+    _xl_hdr(wsM, 5, c_dbk, "Máx |Δ| basket vs Py"); _xl_hdr(wsM, 5, c_drt, "Máx |Δ| ratio vs Py")
+
+    for r in range(F0, R1 + 1):
+        wsM.cell(row=r, column=1, value=f"='{D}'!A{r}").number_format = "dd/mm/yyyy"
+        wsM.cell(row=r, column=2, value=f"=YEAR(A{r})*10+ROUNDUP(MONTH(A{r})/3,0)")
+        for j in range(T):
+            c0 = cm[j]
+            mc, ev = f"{_L(c0)}{r}", f"{_L(c0 + 1)}{r}"
+            wsM.cell(row=r, column=c0,     value=f"='{D}'!{_L(col_mc[j])}{r}").number_format = "#,##0.00"
+            wsM.cell(row=r, column=c0 + 1, value=f"='{D}'!{_L(col_ev[j])}{r}").number_format = "#,##0.00"
+            ck, cols_iq, q1, q2 = qinfo[j]
+            for k in range(4):                                # NI, Ventas, Patrimonio, EBITDA vigentes
+                rng_v = f"'{D}'!${_L(cols_iq[k])}${q1}:${_L(cols_iq[k])}${q2}"
+                rng_k = f"'{D}'!${_L(ck)}${q1}:${_L(ck)}${q2}"
+                wsM.cell(row=r, column=c0 + 2 + k,
+                         value=f'=IFERROR(INDEX({rng_v},MATCH($B{r},{rng_k},1)),"")').number_format = "#,##0.00"
+            difs = []
+            for k, (mk, lbl, num, den) in enumerate(_XL_MULT):
+                n_ref = mc if num == "CUR_MKT_CAP" else ev
+                d_ref = f"{_L(c0 + 2 + _XL_CIQ.index(den))}{r}"
+                wsM.cell(row=r, column=c0 + 6 + k,
+                         value=(f'=IF(AND(ISNUMBER({n_ref}),ISNUMBER({d_ref})),'
+                                f'IF(OR({n_ref}=0,{d_ref}=0),"",{n_ref}/{d_ref}),"")')).number_format = "0.0000"
+                difs.append(_xl_diff(f"{mult_col[(j, k)]}{r}", f"'{D}'!{_L(pa + 4 * j + k)}{r}"))
+            wsM.cell(row=r, column=c0 + 10, value="=MAX(" + ",".join(difs) + ")").number_format = "0.0E+00"
+
+        # Basket: pesos = MC_i / Σ MC (de todos los comparables válidos), igual que Creacion_DF_Basket
+        mcs = [f"{_L(cm[j + 1])}{r}" for j in range(C)]
+        suma_mc = "SUM(" + ",".join(mcs) + ")" if mcs else "0"
+        for i in range(C):
+            wsM.cell(row=r, column=cw[i],
+                     value=f'=IF({suma_mc}=0,"",{mcs[i]}/{suma_mc})').number_format = "0.0000"
+        if C:
+            wsM.cell(row=r, column=c_sum, value=f'=IF(COUNT({_L(cw[0])}{r}:{_L(cw[C-1])}{r})=0,"",'
+                                                f'SUM({_L(cw[0])}{r}:{_L(cw[C-1])}{r}))').number_format = "0.0000"
+        difs_b, difs_r = [], []
+        for k in range(4):
+            terms = [f"N({_L(cw[i])}{r})*N({mult_col[(i + 1, k)]}{r})" for i in range(C)]
+            wsM.cell(row=r, column=c_bk[k], value="=" + ("+".join(terms) if terms else "0")).number_format = "0.0000"
+            bk_ref, me_ref = f"{_L(c_bk[k])}{r}", f"{mult_col[(0, k)]}{r}"
+            wsM.cell(row=r, column=c_rt[k],
+                     value=(f'=IF(AND(ISNUMBER({me_ref}),ISNUMBER({bk_ref})),'
+                            f'IF({bk_ref}=0,"",{me_ref}/{bk_ref}),"")')).number_format = "0.0000"
+            difs_b.append(_xl_diff(bk_ref, f"'{D}'!{_L(pb + k)}{r}"))
+            difs_r.append(_xl_diff(f"{_L(c_rt[k])}{r}", f"'{D}'!{_L(pr + k)}{r}"))
+        wsM.cell(row=r, column=c_dbk, value="=MAX(" + ",".join(difs_b) + ")").number_format = "0.0E+00"
+        wsM.cell(row=r, column=c_drt, value="=MAX(" + ",".join(difs_r) + ")").number_format = "0.0E+00"
+    delta_cols += [_L(c_dbk), _L(c_drt)]
+    wsM.freeze_panes = wsM.cell(row=F0, column=3)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # HOJA Z: resumen (A: Z absoluto, B: Z vs basket) + detalle por ventana
+    # ══════════════════════════════════════════════════════════════════════════
+    wsZ.cell(row=1, column=1, value=f"{empresa} — Z-SCORE: de múltiplos a Z compuesto").font = _F_TIT
+    wsZ.cell(row=2, column=1, value=(
+        "Z = (x − promedio ventana) / desv. muestral (n−1) · ventana de N días con N = años × días/año (Parametros) · "
+        "exige ventana completa sin huecos (min_periods de pandas) · Z compuesto = Σ_múltiplos peso × Σ_ventanas peso × Z."))
+    filas_det = K * nm * nv
+    rA = 4
+    rB = rA + K + 5
+    rC = rB + K + 5
+    rD = rC + filas_det + 4
+    detC = (rC + 2, rC + 1 + filas_det)
+    detD = (rD + 2, rD + 1 + filas_det)
+    sumA0, sumB0 = rA + 3, rB + 3
+    series_abs = [mult_col[(0, k)] for k in range(4)]
+    series_rt = [_L(c) for c in c_rt]
+    idx_peso = 0 if es_fin else 1
+
+    def _resumen(r_t, titulo, det, z_py):
+        wsZ.cell(row=r_t, column=1, value=titulo).font = _F_BOLD
+        for cc in range(1, 11):
+            wsZ.cell(row=r_t, column=cc).fill = _FILL_SEC
+        wsZ.cell(row=r_t + 1, column=2, value="Peso del múltiplo →").alignment = Alignment(horizontal="right")
+        for k, (mk, lbl, _, _) in enumerate(_XL_MULT):
+            wsZ.cell(row=r_t + 1, column=3 + k, value=f"={refs['pm'][mk][idx_peso]}")
+        for k, h in enumerate(["Fecha", f"Fila en {M}"] + [m[1] for m in _XL_MULT]
+                              + ["Z final (Excel)", "Z final (Python)", "|Δ|", "Contraste"]):
+            _xl_hdr(wsZ, r_t + 2, 1 + k, h)
+        d1, d2 = det
+        for i in range(K):
+            r = r_t + 3 + i
+            wsZ.cell(row=r, column=1, value=f"='{M}'!A{F0 + N - K + i}").number_format = "dd/mm/yyyy"
+            wsZ.cell(row=r, column=2, value=f"=MATCH(A{r},'{M}'!$A:$A,0)")
+            for k in range(nm):
+                col = _L(3 + k)
+                wsZ.cell(row=r, column=3 + k,
+                         value=(f"=SUMIFS($M${d1}:$M${d2},$A${d1}:$A${d2},$A{r},"
+                                f"$B${d1}:$B${d2},{col}${r_t + 2})")).number_format = "0.0000"
+            wsZ.cell(row=r, column=7, value=f"=SUMPRODUCT(C{r}:F{r},$C${r_t + 1}:$F${r_t + 1})").number_format = "0.0000"
+            wsZ.cell(row=r, column=7).font = _F_BOLD
+            py = wsZ.cell(row=r, column=8, value=_xl_val(z_py.values[i])); py.font, py.number_format = _F_PY, "0.0000"
+            wsZ.cell(row=r, column=9, value=f'=IF(ISNUMBER(H{r}),ABS(G{r}-H{r}),"—")').number_format = "0.0E+00"
+            wsZ.cell(row=r, column=10, value=f'=IF(ISNUMBER(I{r}),IF(I{r}<={refs["tol"]},"✓","✗"),"—")')
+
+    def _detalle(r_t, titulo, det, series, sum0):
+        wsZ.cell(row=r_t, column=1, value=titulo).font = _F_BOLD
+        for cc in range(1, 14):
+            wsZ.cell(row=r_t, column=cc).fill = _FILL_SEC
+        for k, h in enumerate(["Fecha", "Múltiplo", "Ventana (años)", "Días ventana (N)", f"Fila fin ({M})",
+                               "Fila inicio", "x (valor hoy)", "Obs. válidas", "Promedio", "Desv. (n−1)",
+                               "Z", "Peso ventana", "Z ponderado"]):
+            _xl_hdr(wsZ, r_t + 1, 1 + k, h)
+        r = det[0]
+        for i in range(K):
+            s = sum0 + i
+            for k, (mk, lbl, _, _) in enumerate(_XL_MULT):
+                sc = series[k]
+                colref = f"'{M}'!${sc}:${sc}"
+                for v in range(nv):
+                    rng = f"INDEX({colref},$F{r}):INDEX({colref},$E{r})"
+                    wsZ.cell(row=r, column=1, value=f"=$A${s}").number_format = "dd/mm/yyyy"
+                    wsZ.cell(row=r, column=2, value=lbl)
+                    wsZ.cell(row=r, column=3, value=f"={refs['vent'][v][0]}")
+                    wsZ.cell(row=r, column=4, value=f"={refs['vent'][v][2]}")
+                    wsZ.cell(row=r, column=5, value=f"=$B${s}")
+                    wsZ.cell(row=r, column=6, value=f"=E{r}-D{r}+1")
+                    wsZ.cell(row=r, column=7, value=f"=INDEX({colref},$E{r})").number_format = "0.0000"
+                    wsZ.cell(row=r, column=8, value=f"=IF($F{r}<{F0},0,COUNT({rng}))")
+                    wsZ.cell(row=r, column=9, value=f'=IF($H{r}<$D{r},"",AVERAGE({rng}))').number_format = "0.0000"
+                    wsZ.cell(row=r, column=10, value=f'=IF($H{r}<$D{r},"",STDEV({rng}))').number_format = "0.0000"
+                    wsZ.cell(row=r, column=11,
+                             value=(f'=IF($H{r}<$D{r},"",IF(NOT(ISNUMBER($G{r})),"",'
+                                    f'IF($J{r}=0,"",($G{r}-$I{r})/$J{r})))')).number_format = "0.0000"
+                    wsZ.cell(row=r, column=12, value=f"={refs['vent'][v][1]}")
+                    wsZ.cell(row=r, column=13, value=f'=IF(ISNUMBER($K{r}),$K{r}*$L{r},"")').number_format = "0.0000"
+                    r += 1
+
+    _resumen(rA, "A. Z ABSOLUTO — ¿está el múltiplo de la empresa caro/barato contra SU PROPIA historia?",
+             detC, z_abs_py)
+    _resumen(rB, "B. Z vs BASKET — Z del ratio (múltiplo empresa / múltiplo basket) contra la historia de ESE ratio",
+             detD, z_bk_py)
+    _detalle(rC, "C. DETALLE Z ABSOLUTO (una fila por fecha × múltiplo × ventana)", detC, series_abs, sumA0)
+    _detalle(rD, "D. DETALLE Z vs BASKET (misma mecánica, sobre el ratio empresa/basket)", detD, series_rt, sumB0)
+    wsZ.freeze_panes = "A4"
+
+    for ws, anchos in ((wsD, 14), (wsM, 13), (wsZ, 15)):
+        for col in range(1, ws.max_column + 1):
+            ws.column_dimensions[_L(col)].width = anchos
+        ws.row_dimensions[5].height = 30
+
+    return {
+        "cod": cod, "empresa": empresa, "grupo": grupo, "es_fin": es_fin, "n_comps": C,
+        "fecha": f"'{Zn}'!A{sumA0 + K - 1}",
+        "z_abs_xl": f"'{Zn}'!G{sumA0 + K - 1}", "z_abs_py": f"'{Zn}'!H{sumA0 + K - 1}",
+        "z_bk_xl": f"'{Zn}'!G{sumB0 + K - 1}",  "z_bk_py": f"'{Zn}'!H{sumB0 + K - 1}",
+        "d_mult": [f"'{M}'!${c}${F0}:${c}${R1}" for c in delta_cols],
+        "d_z": [f"'{Zn}'!$I${sumA0}:$I${sumA0 + K - 1}", f"'{Zn}'!$I${sumB0}:$I${sumB0 + K - 1}"],
+    }
+
+
+def exportar_auditoria_excel(matriz_multiplos: dict,
+                             datos_bbg: dict,
+                             datos_ciq: dict,
+                             grupos: list,
+                             ruta_salida: str,
+                             dias_por_anio: int = XL_DIAS_POR_ANIO,
+                             n_fechas: int = XL_N_FECHAS,
+                             empresas=XL_EMPRESAS_AUDITORIA) -> None:
+    """
+    Genera el Excel de auditoría con fórmulas vivas para pocas empresas y pocas fechas.
+
+    Parámetros
+    ----------
+    grupos : lista de tuplas (nombre_grupo, empresas_del_portafolio, basket_def,
+             matriz_baskets, es_finan).
+    dias_por_anio : días hábiles que representan "1 año" (20 = demo rápida; 260 = réplica
+             exacta de producción, necesita ≥ 5×260 + n_fechas filas de historia).
+    empresas : None → 1ra empresa de cada grupo; o lista de tickers BBG del portafolio.
+    Supuestos: el Z de Python se recalcula con Creacion_Z_Final(dias_por_anio=...) sobre
+    el mismo tramo, así que Excel y Python usan exactamente la misma ventana.
+    """
+    print("  → Generando Excel de auditoría (múltiplos → Z → Z vs Basket)...")
+    try:
+        ventanas = [(a, p) for a, p in zip(ANIOS_Z, PESOS_Z) if p != 0]
+        if not ventanas:
+            raise ValueError("PESOS_Z no tiene ninguna ventana con peso distinto de 0.")
+        for nom, pesos in (("PESOS_FINAN", PESOS_FINAN), ("PESOS_EX_FINAN", PESOS_EX_FINAN)):
+            fwd = [m for m, p in zip(_XL_ORDEN, pesos) if m.startswith("Fwd_") and p != 0]
+            if fwd:
+                print(f"  ⚠ {nom} pondera {fwd}: el Excel de auditoría solo replica múltiplos Trail.")
+        dias_vent = [int(round(a * dias_por_anio)) for a, _ in ventanas]
+        n_filas = max(dias_vent) + n_fechas - 1
+
+        elegidas = []
+        if empresas is None:
+            for nombre, lista, bdef, mbk, es_fin in grupos:
+                for t in lista:
+                    if t in matriz_multiplos and t in mbk and t in bdef:
+                        elegidas.append((t, nombre, bdef[t], mbk, es_fin))
+                        break
+        else:
+            for t in empresas:
+                for nombre, lista, bdef, mbk, es_fin in grupos:
+                    if t in lista and t in matriz_multiplos and t in mbk:
+                        elegidas.append((t, nombre, bdef[t], mbk, es_fin))
+                        break
+                else:
+                    print(f"  ⚠ {t}: no es empresa del portafolio o no tiene múltiplos → se omite.")
+        if not elegidas:
+            raise ValueError("No hay empresas del portafolio con múltiplos y basket para auditar.")
+
+        wb = Workbook()
+        wsR = wb.active
+        wsR.title = "Resumen"
+        wsP = wb.create_sheet("Parametros")
+
+        # ── Hoja Parametros (todas las fórmulas leen de aquí) ────────────────
+        wsP.cell(row=1, column=1, value="PARÁMETROS DEL FRAMEWORK (azul = editable)").font = _F_TIT
+        wsP.cell(row=3, column=1, value="Días hábiles por 'año' (producción = 260)")
+        wsP.cell(row=3, column=2, value=dias_por_anio).font = _F_IN
+        wsP.cell(row=4, column=1, value="Tolerancia contraste Excel vs Python")
+        wsP.cell(row=4, column=2, value=1e-6).font = _F_IN
+        for k, h in enumerate(["Ventana", "Años", "Peso", "Días (= Años × días/año)"]):
+            _xl_hdr(wsP, 7, 1 + k, h)
+        refs = {"tol": "Parametros!$B$4", "vent": [], "pm": {}}
+        for v, (a, p) in enumerate(ventanas):
+            r = 8 + v
+            wsP.cell(row=r, column=1, value=f"Ventana {v + 1}")
+            wsP.cell(row=r, column=2, value=a).font = _F_IN
+            wsP.cell(row=r, column=3, value=p).font = _F_IN
+            wsP.cell(row=r, column=4, value=f"=B{r}*$B$3")
+            refs["vent"].append((f"Parametros!$B${r}", f"Parametros!$C${r}", f"Parametros!$D${r}"))
+        r_pm = 8 + len(ventanas) + 2
+        for k, h in enumerate(["Múltiplo", "Peso Financieras", "Peso No financieras"]):
+            _xl_hdr(wsP, r_pm, 1 + k, h)
+        for k, (mk, lbl, _, _) in enumerate(_XL_MULT):
+            r = r_pm + 1 + k
+            ix = _XL_ORDEN.index(mk)
+            wsP.cell(row=r, column=1, value=lbl)
+            wsP.cell(row=r, column=2, value=PESOS_FINAN[ix]).font = _F_IN
+            wsP.cell(row=r, column=3, value=PESOS_EX_FINAN[ix]).font = _F_IN
+            refs["pm"][mk] = (f"Parametros!$B${r}", f"Parametros!$C${r}")
+        wsP.column_dimensions["A"].width = 44
+        for c in "BCD":
+            wsP.column_dimensions[c].width = 22
+
+        # ── Hojas por empresa ────────────────────────────────────────────────
+        resultados = []
+        for i, (t, nombre, comps_def, mbk, es_fin) in enumerate(elegidas, start=1):
+            resultados.append(_auditoria_xl_empresa(
+                wb, f"E{i}", t, nombre, comps_def, mbk, es_fin,
+                matriz_multiplos, datos_bbg, datos_ciq,
+                n_filas, n_fechas, dias_por_anio, ventanas, refs))
+
+        # ── Hoja Resumen ─────────────────────────────────────────────────────
+        wsR.cell(row=1, column=1, value="ZODA — AUDITORÍA DE FÓRMULAS: Múltiplos → Z → Z vs Basket").font = _F_TIT
+        enc = ["Hoja", "Empresa (BBG)", "Grupo", "Nº comparables", "Última fecha",
+               "Z absoluto (Excel)", "Z absoluto (Python)", "Z vs Basket (Excel)", "Z vs Basket (Python)",
+               "Máx |Δ| múltiplos/basket", "Máx |Δ| Z", "Estado"]
+        for k, h in enumerate(enc):
+            _xl_hdr(wsR, 3, 1 + k, h)
+        for i, res in enumerate(resultados):
+            r = 4 + i
+            wsR.cell(row=r, column=1, value=res["cod"])
+            wsR.cell(row=r, column=2, value=res["empresa"])
+            wsR.cell(row=r, column=3, value=res["grupo"])
+            wsR.cell(row=r, column=4, value=res["n_comps"])
+            wsR.cell(row=r, column=5, value=f"={res['fecha']}").number_format = "dd/mm/yyyy"
+            wsR.cell(row=r, column=6, value=f"={res['z_abs_xl']}").number_format = "0.0000"
+            wsR.cell(row=r, column=7, value=f"={res['z_abs_py']}").number_format = "0.0000"
+            wsR.cell(row=r, column=8, value=f"={res['z_bk_xl']}").number_format = "0.0000"
+            wsR.cell(row=r, column=9, value=f"={res['z_bk_py']}").number_format = "0.0000"
+            wsR.cell(row=r, column=10, value="=MAX(" + ",".join(res["d_mult"]) + ")").number_format = "0.0E+00"
+            wsR.cell(row=r, column=11, value="=MAX(" + ",".join(res["d_z"]) + ")").number_format = "0.0E+00"
+            wsR.cell(row=r, column=12,
+                     value=(f'=IF(AND(J{r}<={refs["tol"]},K{r}<={refs["tol"]}),'
+                            f'"✓ Excel = Python","≠ difiere de la foto de Python")'))
+        notas = [
+            "CÓMO LEER ESTE LIBRO",
+            "1) Flujo por empresa:  E#_Datos (inputs)  →  E#_Mult (múltiplos, basket, ratio)  →  E#_Z (Z por ventana y Z compuesto).",
+            "2) Azul = input editable · Negro = fórmula · Gris cursiva = foto de Python al generar (solo contraste).",
+            "3) Cambia un Market Cap, una utilidad o un peso en Parametros: Mult y Z se recalculan solos.",
+            "   La columna 'Python' queda como foto del run original, por eso tras editar inputs el contraste mostrará",
+            "   diferencias: es lo esperado. Lo que prueba el framework son las fórmulas, no la foto.",
+            "4) En este Excel '1 año' = Parametros!B3 días hábiles (producción = 260). La lógica es idéntica; solo la ventana es más corta.",
+            "5) Convención del framework: 0 o vacío = sin dato. Una ventana con algún hueco da Z vacío (min_periods de pandas).",
+            "6) Z compuesto = Σ_múltiplos [ peso_múltiplo × Σ_ventanas ( peso_ventana × Z ) ]; ventana sin historia aporta 0.",
+            "7) Se abre bien en Excel de escritorio (recalcula al abrir). Vistas previas web/móvil pueden mostrar celdas vacías.",
+        ]
+        for i, txt in enumerate(notas):
+            c = wsR.cell(row=5 + len(resultados) + i, column=1, value=txt)
+            if i == 0:
+                c.font = _F_BOLD
+        for col, w in zip("ABCDEFGHIJKL", [8, 24, 16, 14, 13, 16, 16, 16, 16, 20, 14, 30]):
+            wsR.column_dimensions[col].width = w
+        wsR.row_dimensions[3].height = 32
+
+        wb.calculation = CalcProperties(fullCalcOnLoad=True)
+        try:
+            wb.save(ruta_salida)
+        except PermissionError:
+            raise PermissionError(f"No se pudo guardar '{os.path.basename(ruta_salida)}': "
+                                  "está abierto en Excel. Ciérralo y vuelve a ejecutar.")
+        print(f"  ✓ Excel de auditoría: {ruta_salida}")
+        print(f"    → {len(resultados)} empresas × {n_filas} fechas diarias "
+              f"(Z con fórmulas en las últimas {n_fechas}; 1 año = {dias_por_anio} días)")
+    except Exception as e:
+        import traceback
+        print(f"  ✗ Error al generar el Excel de auditoría: {e}")
+        traceback.print_exc()
+
+
+# ==============================================================================
+# SECCIÓN 13b: EXCEL DE Z PUROS Y DIAGNÓSTICO  (solo empresas del portafolio)
+# ==============================================================================
+# Responde dos preguntas que la hoja BD (que solo guarda el Z compuesto) no responde:
+#   1) ¿POR QUÉ está caro/barato?  → Z puro de cada múltiplo × ventana y su aporte
+#   2) ¿DESDE CUÁNDO y por quién?  → diagnóstico diario de ~12 meses (niveles de la
+#      empresa, del basket y del ratio; composición del basket; calidad del dato)
+#
+# Hojas:  Guia · Pesos · Foto_Z · Foto_Aportes · Diag_<empresa en foco> ...
+#   - Foto_*  : TODAS las empresas del portafolio (empresas con basket), último día.
+#   - Diag_*  : solo las empresas de EMPRESAS_FOCO (una hoja por empresa).
+# No inventa métricas: usa la misma Z(), los mismos pesos y los mismos baskets del script.
+# El peer group NO se exporta (solo entra como insumo del basket).
+
+# --- Parámetros (se cambian aquí, no en main) --------------------------------
+EMPRESAS_FOCO         = None   # None = las 2 primeras de cada grupo; o lista, ej. ["BAP US Equity", ...]
+XL_Z_DIAS_DIAG        = 260    # filas diarias del diagnóstico (≈ 12 meses)
+XL_Z_UMBRAL_COBERTURA = 1.0    # alerta si la cobertura del basket es menor a este valor (1.0 = 100 %)
+
+# --- Constantes internas ------------------------------------------------------
+_ZP_ETQ = {"Trail_PE": "P/E", "Trail_PS": "P/S", "Trail_PB": "P/B", "Trail_EVEBITDA": "EV/EBITDA",
+           "Fwd_PE": "Fwd P/E", "Fwd_PS": "Fwd P/S", "Fwd_PB": "Fwd P/B", "Fwd_EVEBITDA": "Fwd EV/EBITDA"}
+# múltiplo → (nombre del denominador, columna CIQ, numerador BBG); solo Trail (los Fwd tienen peso 0)
+_ZP_DEN = {"Trail_PE": ("Utilidad", "IQ_NI", "CUR_MKT_CAP"),
+           "Trail_PS": ("Ventas", "IQ_TOTAL_REV", "CUR_MKT_CAP"),
+           "Trail_PB": ("Patrimonio", "IQ_TOTAL_EQUITY", "CUR_MKT_CAP"),
+           "Trail_EVEBITDA": ("EBITDA", "IQ_EBITDA", "CURR_ENTP_VAL")}
+_ZP_COLORES = {"niv": "3E63AD", "cau": "5B7F5B", "zb": "C55A11", "za": "7030A0", "cal": "C00000", "id": "404040"}
+
+
+def _zp_ciq_vigente(ciq: pd.DataFrame, col: str, idx_full: pd.Index) -> pd.Series:
+    """
+    Dato CIQ trimestral expandido a diario IGUAL que multiplos(): lookup por Period Q + ffill
+    (cada día recibe el valor del trimestre que lo contiene). Se calcula sobre el índice
+    completo para que el ffill sea idéntico al del script y luego se recorta.
+    """
+    s = ciq[col].copy()
+    s.index = pd.DatetimeIndex(s.index).to_period("Q")
+    vals = s.reindex(pd.DatetimeIndex(idx_full).to_period("Q")).ffill().values
+    return pd.Series(vals, index=idx_full, name=col)
+
+
+def _zp_calcular(t: str, es_fin: bool, basket_def: list, mbk: dict,
+                 matriz_multiplos: dict, datos_bbg: dict,
+                 act_mults: list, ventanas: list, dpa: int, n_diag: int) -> dict:
+    """
+    Calcula, para UNA empresa del portafolio, todo lo que alimenta las hojas del Excel.
+
+    Retorna dict con:
+      fechas      : DatetimeIndex de las últimas filas (largo ≤ ventana máx + n_diag − 1)
+      mu, bk, ratio : múltiplos de la empresa, del basket y su cociente (solo act_mults)
+      zA, zB      : {(múltiplo, ventana_idx): Serie de Z puro} para marco absoluto y vs basket
+      w_m         : {múltiplo: peso del múltiplo según sector}
+      comps, pesos, mult_comps, cob : composición del basket y cobertura por múltiplo
+
+    Supuestos: Z puro = Z() del script (ventana completa o NaN, desv. muestral n−1).
+    Se calcula solo sobre la cola de la serie (el Z de un día depende solo de su ventana),
+    por eso es muy barato. ratio = mult_empresa / mult_basket, igual que main().
+    """
+    max_w = max(int(round(a * dpa)) for a, _ in ventanas)
+    L = max_w + n_diag - 1
+    idx_full = matriz_multiplos[t].index
+    fechas = idx_full[-L:] if len(idx_full) > L else idx_full
+
+    mu = matriz_multiplos[t].reindex(fechas)[act_mults]
+    bk = mbk[t].reindex(fechas)[act_mults]
+    ratio = mu.div(bk)                                     # igual que main(): puede traer inf
+    zA, zB = {}, {}
+    for k, (a, _) in enumerate(ventanas):
+        za = Z(mu.copy(), a, dpa)
+        zb = Z(ratio.copy(), a, dpa)
+        for m in act_mults:
+            zA[(m, k)], zB[(m, k)] = za[m], zb[m]
+
+    pm = PESOS_FINAN if es_fin else PESOS_EX_FINAN
+    w_m = {m: pm[_XL_ORDEN.index(m)] for m in act_mults}
+
+    # Composición del basket (pesos por Market Cap, igual que Creacion_DF_Basket)
+    comps = [c for c in basket_def if c in matriz_multiplos]
+    mc_cols = [c for c in comps if c in datos_bbg and "CUR_MKT_CAP" in datos_bbg[c].columns]
+    if mc_cols:
+        mc = pd.DataFrame({c: datos_bbg[c]["CUR_MKT_CAP"].reindex(fechas) for c in mc_cols})
+        pesos = mc.div(mc.sum(axis=1), axis=0)
+    else:
+        pesos = pd.DataFrame(index=fechas)
+    mult_comps = {m: pd.DataFrame({c: matriz_multiplos[c][m].reindex(fechas) for c in mc_cols})
+                  for m in act_mults}
+    cob = pd.DataFrame({m: (pesos * mult_comps[m].notna()).sum(axis=1) if mc_cols else 0.0
+                        for m in act_mults}, index=fechas)   # peso del basket que SÍ tiene el múltiplo
+    return {"fechas": fechas, "mu": mu, "bk": bk, "ratio": ratio, "zA": zA, "zB": zB, "w_m": w_m,
+            "mc_cols": mc_cols, "pesos": pesos, "mult_comps": mult_comps, "cob": cob}
+
+
+def _zp_alertas(d: dict, marco: str, i: int, ventanas: list, act_mults: list, umbral: float) -> tuple:
+    """
+    Calidad del dato en la posición i (fila) para un marco ('A' absoluto o 'B' vs basket).
+    Retorna (ventanas_válidas, ventanas_aplicables, texto_alertas, cobertura_mín).
+    Una celda 'aplicable' es un (múltiplo, ventana) con peso de múltiplo ≠ 0 para ese sector.
+    """
+    z = d["zA"] if marco == "A" else d["zB"]
+    ap = [(m, k) for m in act_mults if d["w_m"][m] != 0 for k in range(len(ventanas))]
+    muertas = [f"{_ZP_ETQ[m]}·{ventanas[k][0]}A" for (m, k) in ap if np.isnan(z[(m, k)].values[i])]
+    alertas = []
+    if muertas:
+        alertas.append("Z sin dato (cuenta 0 en el compuesto): " + ", ".join(muertas[:4])
+                       + (f" +{len(muertas) - 4}" if len(muertas) > 4 else ""))
+    cov = np.nan
+    if marco == "B":
+        cm = [d["cob"][m].values[i] for m in act_mults if d["w_m"][m] != 0]
+        cov = float(np.nanmin(cm)) if cm else np.nan
+        if not np.isnan(cov) and cov < umbral - 1e-12:
+            alertas.append(f"Cobertura basket {cov:.0%}")
+    neg = [_ZP_ETQ[m] for m in act_mults if d["w_m"][m] != 0 and d["mu"][m].values[i] < 0]
+    if neg:
+        alertas.append("Múltiplo negativo: " + ", ".join(neg))
+    return len(ap) - len(muertas), len(ap), " | ".join(alertas), cov
+
+
+def exportar_z_puros_excel(matriz_multiplos: dict, datos_bbg: dict, datos_ciq: dict,
+                           grupos: list, base_final_z: pd.DataFrame, ruta_salida: str,
+                           empresas_foco=EMPRESAS_FOCO, dias_por_anio: int = 260,
+                           n_diag: int = XL_Z_DIAS_DIAG,
+                           umbral_cobertura: float = XL_Z_UMBRAL_COBERTURA) -> None:
+    """
+    Exporta el Excel de Z puros (foto del portafolio + diagnóstico de empresas en foco).
+
+    Parámetros
+    ----------
+    grupos : lista de (nombre_grupo, empresas_portafolio, basket_def, matriz_baskets, es_finan).
+    base_final_z : Base_Final_Z de main() (columnas 'Z_<t>' y 'Z_Basket_<t>'), usada solo para
+        cuadrar la suma de aportes contra el compuesto que ya se guarda en BD.
+    empresas_foco : None → 2 primeras de cada grupo; o lista de tickers del portafolio.
+    dias_por_anio : 260 en producción (solo se cambia para pruebas con poca historia).
+    n_diag : filas diarias del diagnóstico.
+    Supuestos: solo muestra múltiplos/ventanas con peso ≠ 0 (hoy 4 Trail × 3 ventanas;
+    EV/EBITDA no aplica a financieras). Un Z sin dato se muestra vacío y suma 0 en el
+    compuesto (igual que Creacion_Z_Final) — la columna de alertas lo avisa.
+    """
+    print("  → Generando Excel de Z puros (foto + diagnóstico)...")
+    try:
+        ventanas = [(a, p) for a, p in zip(ANIOS_Z, PESOS_Z) if p != 0]
+        if not ventanas:
+            raise ValueError("PESOS_Z no tiene ninguna ventana con peso distinto de 0.")
+        act_mults = [m for i, m in enumerate(_XL_ORDEN) if PESOS_FINAN[i] != 0 or PESOS_EX_FINAN[i] != 0]
+        nm, nw = len(act_mults), len(ventanas)
+
+        # ── 1) Portafolio = empresas con múltiplos y basket ───────────────────
+        port = []                                         # (ticker, grupo, es_fin, basket_def, mbk)
+        for nombre, lista, bdef, mbk, es_fin in grupos:
+            for t in lista:
+                if t in matriz_multiplos and t in mbk and t in bdef:
+                    port.append((t, nombre, es_fin, bdef[t], mbk))
+        if not port:
+            raise ValueError("No hay empresas del portafolio con múltiplos y basket.")
+        if empresas_foco is None:
+            foco, vistos = [], {}
+            for t, g, *_ in port:
+                vistos[g] = vistos.get(g, 0) + 1
+                if vistos[g] <= 2:
+                    foco.append(t)
+        else:
+            foco = []
+            for t in empresas_foco:
+                if any(t == p[0] for p in port):
+                    foco.append(t)
+                else:
+                    print(f"  ⚠ {t}: no es empresa del portafolio (con basket) → se omite del diagnóstico.")
+
+        # ── 2) Cálculo por empresa ────────────────────────────────────────────
+        calc = {}
+        for t, g, es_fin, bdef, mbk in port:
+            calc[t] = _zp_calcular(t, es_fin, bdef, mbk, matriz_multiplos, datos_bbg,
+                                   act_mults, ventanas, dias_por_anio, n_diag)
+
+        wb = Workbook()
+        wsG = wb.active
+        wsG.title = "Guia"
+        wsP = wb.create_sheet("Pesos")
+        wsF = wb.create_sheet("Foto_Z")
+        wsA = wb.create_sheet("Foto_Aportes")
+
+        # ── 3) Hoja Pesos (las fórmulas de aportes leen de aquí) ──────────────
+        wsP.cell(row=1, column=1, value="PESOS DEL FRAMEWORK (copiados de ZODA 2026; editar aquí recalcula aportes)").font = _F_TIT
+        for c, h in enumerate(["Ventana", "Años", "Peso"], start=1):
+            _xl_hdr(wsP, 3, c, h)
+        ref_wk = []
+        for k, (a, p) in enumerate(ventanas):
+            wsP.cell(row=4 + k, column=1, value=f"Ventana {k + 1}")
+            wsP.cell(row=4 + k, column=2, value=a)
+            wsP.cell(row=4 + k, column=3, value=p).font = _F_IN
+            ref_wk.append(f"Pesos!$C${4 + k}")
+        r_pm = 4 + nw + 1
+        for c, h in enumerate(["Múltiplo", "Peso Financieras", "Peso No financieras"], start=1):
+            _xl_hdr(wsP, r_pm, c, h)
+        ref_wm = {}
+        for j, m in enumerate(act_mults):
+            ix = _XL_ORDEN.index(m)
+            wsP.cell(row=r_pm + 1 + j, column=1, value=_ZP_ETQ[m])
+            wsP.cell(row=r_pm + 1 + j, column=2, value=PESOS_FINAN[ix]).font = _F_IN
+            wsP.cell(row=r_pm + 1 + j, column=3, value=PESOS_EX_FINAN[ix]).font = _F_IN
+            ref_wm[m] = (f"Pesos!$B${r_pm + 1 + j}", f"Pesos!$C${r_pm + 1 + j}")
+        wsP.cell(row=r_pm + nm + 3, column=1, value=f"Días hábiles por 'año' usados: {dias_por_anio}")
+        for col, w in zip("ABC", [24, 18, 22]):
+            wsP.column_dimensions[col].width = w
+
+        # ── 4) Hojas Foto_Z y Foto_Aportes (una fila por empresa × marco) ──────
+        for ws, ttl in ((wsF, "FOTO DEL ÚLTIMO DÍA — Z PUROS por múltiplo y ventana (portafolio)"),
+                        (wsA, "FOTO DEL ÚLTIMO DÍA — APORTES al Z compuesto (peso múltiplo × peso ventana × Z puro)")):
+            ws.cell(row=1, column=1, value=ttl).font = _F_TIT
+        wsF.cell(row=2, column=1, value=("Z puro = (x − promedio ventana) / desv. muestral. Vacío = el múltiplo no aplica al sector "
+                                         "o la ventana no tiene historia completa. 'A' = años de la ventana."))
+        wsA.cell(row=2, column=1, value=("Aporte = peso del múltiplo × peso de la ventana × Z puro. Todos los aportes suman el Z compuesto "
+                                         "(fórmulas vivas). 'Compuesto BD' es el valor que el script guardó en la hoja BD."))
+        ids = ["Grupo", "Empresa", "Marco", "Fecha"]
+        for ws in (wsF, wsA):
+            for c, h in enumerate(ids, start=1):
+                _xl_hdr(ws, 5, c, h)
+        zcols = {}                                         # (m, k) → columna (1-based) en Foto_Z y en Foto_Aportes (misma)
+        c = 5
+        for m in act_mults:
+            for k, (a, _) in enumerate(ventanas):
+                zcols[(m, k)] = c
+                _xl_hdr(wsF, 5, c, f"{_ZP_ETQ[m]} · {a}A")
+                _xl_hdr(wsA, 5, c, f"{_ZP_ETQ[m]} · {a}A")
+                c += 1
+        c_q = c                                            # columnas de calidad en Foto_Z
+        for j, h in enumerate(["Ventanas válidas", "Cobertura mín. basket", "Alertas"]):
+            _xl_hdr(wsF, 5, c_q + j, h)
+        c_sm = {m: c + j for j, m in enumerate(act_mults)}                 # subtotales por múltiplo (Aportes)
+        for m, cc in c_sm.items():
+            _xl_hdr(wsA, 5, cc, f"Subtotal {_ZP_ETQ[m]}")
+        c_sw = {k: c + nm + k for k in range(nw)}                           # subtotales por ventana
+        for k, cc in c_sw.items():
+            _xl_hdr(wsA, 5, cc, f"Subtotal ventana {ventanas[k][0]}A")
+        c_comp = c + nm + nw
+        for j, h in enumerate(["Z compuesto (Σ aportes)", "Compuesto BD", "|Δ|", "Cuadre"]):
+            _xl_hdr(wsA, 5, c_comp + j, h)
+
+        r = 6
+        marcos = (("A", "Absoluto", "Z_"), ("B", "vs Basket", "Z_Basket_"))
+        for t, g, es_fin, bdef, mbk in port:
+            d = calc[t]
+            i = len(d["fechas"]) - 1
+            fecha = d["fechas"][-1]
+            for marco, etq, pref in marcos:
+                z = d["zA"] if marco == "A" else d["zB"]
+                for ws in (wsF, wsA):
+                    ws.cell(row=r, column=1, value=g)
+                    ws.cell(row=r, column=2, value=t)
+                    ws.cell(row=r, column=3, value=etq)
+                    ws.cell(row=r, column=4, value=_xl_val(pd.Timestamp(fecha))).number_format = "dd/mm/yyyy"
+                for m in act_mults:
+                    aplica = d["w_m"][m] != 0
+                    for k in range(nw):
+                        cc = zcols[(m, k)]
+                        v = _xl_val(z[(m, k)].values[i]) if aplica else None
+                        wsF.cell(row=r, column=cc, value=v).number_format = "0.000"
+                        if aplica:
+                            L = _L(cc)
+                            wm = ref_wm[m][0 if es_fin else 1]
+                            wsA.cell(row=r, column=cc,
+                                     value=f'=IF(ISNUMBER(Foto_Z!{L}{r}),Foto_Z!{L}{r}*{wm}*{ref_wk[k]},"")').number_format = "0.000"
+                nv, na, txt, cov = _zp_alertas(d, marco, i, ventanas, act_mults, umbral_cobertura)
+                wsF.cell(row=r, column=c_q, value=f"{nv}/{na}")
+                wsF.cell(row=r, column=c_q + 1, value=_xl_val(cov)).number_format = "0%"
+                wsF.cell(row=r, column=c_q + 2, value=txt)
+                for m in act_mults:
+                    cs = [_L(zcols[(m, k)]) for k in range(nw)]
+                    wsA.cell(row=r, column=c_sm[m],
+                             value="=SUM(" + ",".join(f"{x}{r}" for x in cs) + ")").number_format = "0.000"
+                for k in range(nw):
+                    cs = [_L(zcols[(m, k)]) for m in act_mults]
+                    wsA.cell(row=r, column=c_sw[k],
+                             value="=SUM(" + ",".join(f"{x}{r}" for x in cs) + ")").number_format = "0.000"
+                Lc = _L(c_comp)
+                wsA.cell(row=r, column=c_comp,
+                         value=f"=SUM({_L(c_sm[act_mults[0]])}{r}:{_L(c_sm[act_mults[-1]])}{r})").number_format = "0.000"
+                col_bd = f"{pref}{t}"
+                bd = np.nan
+                if col_bd in base_final_z.columns:
+                    bd = base_final_z[col_bd].reindex([fecha]).values[0]
+                wsA.cell(row=r, column=c_comp + 1, value=_xl_val(bd)).number_format = "0.000"
+                wsA.cell(row=r, column=c_comp + 2,
+                         value=f'=IF(ISNUMBER({_L(c_comp + 1)}{r}),ABS({Lc}{r}-{_L(c_comp + 1)}{r}),"—")').number_format = "0.0E+00"
+                wsA.cell(row=r, column=c_comp + 3,
+                         value=f'=IF(ISNUMBER({_L(c_comp + 2)}{r}),IF({_L(c_comp + 2)}{r}<=0.000001,"✓","≠"),"—")')
+                r += 1
+        for ws, ncol in ((wsF, c_q + 2), (wsA, c_comp + 3)):
+            for col in range(1, ncol + 1):
+                ws.column_dimensions[_L(col)].width = 13
+            ws.column_dimensions["A"].width = 16
+            ws.column_dimensions["B"].width = 22
+            ws.row_dimensions[5].height = 32
+            ws.freeze_panes = "E6"
+        wsF.column_dimensions[_L(c_q + 2)].width = 60
+
+        # ── 5) Diagnóstico por empresa en foco ───────────────────────────────
+        nombres_usados = set()
+        hojas_diag = []
+        for t in foco:
+            d = calc[t]
+            es_fin = next(p[2] for p in port if p[0] == t)
+            g = next(p[1] for p in port if p[0] == t)
+            base = "Diag_" + "".join(ch for ch in t.split()[0] if ch not in '[]:*?/\\')[:20]
+            nom, n = base, 2
+            while nom in nombres_usados:
+                nom, n = f"{base}_{n}", n + 1
+            nombres_usados.add(nom)
+            hojas_diag.append((nom, t))
+            ws = wb.create_sheet(nom)
+            _zp_escribir_diag(ws, t, g, es_fin, d, ventanas, act_mults, ref_wk, ref_wm,
+                              matriz_multiplos, datos_bbg, datos_ciq, base_final_z, n_diag, umbral_cobertura)
+
+        # ── 6) Hoja Guia ──────────────────────────────────────────────────────
+        wsG.cell(row=1, column=1, value="ZODA — Z PUROS Y DIAGNÓSTICO (empresas del portafolio)").font = _F_TIT
+        lineas = [
+            "QUÉ ES: lo que la hoja BD no muestra. BD guarda solo el Z COMPUESTO; aquí se ve de qué está hecho.",
+            "",
+            "Z puro = (múltiplo de hoy − promedio de su ventana) / desviación muestral (n−1). Una celda por múltiplo × ventana.",
+            f"Ventanas: {', '.join(str(a) + 'A' for a, _ in ventanas)} (1A = {dias_por_anio} días hábiles). Múltiplos: {', '.join(_ZP_ETQ[m] for m in act_mults)}.",
+            "Aporte = peso del múltiplo × peso de la ventana × Z puro.  Σ aportes = Z compuesto de BD (columna 'Cuadre').",
+            "",
+            "HOJAS",
+            "  Foto_Z / Foto_Aportes : todas las empresas del portafolio, último día, marcos Absoluto y vs Basket.",
+            "  Diag_<empresa>        : empresas en foco, ~12 meses diarios. Bloques: Niveles · Causa · Z vs Basket · Z Absoluto · Calidad.",
+            "",
+            "CÓMO LEER 'vs Basket'",
+            "  Z vs Basket NO mide si la empresa está cara contra su basket: mide si el RATIO (empresa/basket) está alto",
+            "  contra su propia historia. Mira siempre el ratio (bloque Niveles) junto al Z.",
+            "  Para saber si sube la empresa o baja el basket: compara 'empresa' y 'basket' en el bloque Niveles.",
+            "",
+            "CALIDAD DEL DATO (lo que el compuesto de BD no avisa)",
+            "  • Una ventana sin historia completa (o con un hueco de datos) queda VACÍA aquí y vale 0 en el compuesto.",
+            "  • Cobertura del basket < 100 %: algún comparable tiene Market Cap pero no ese múltiplo; su peso se pierde",
+            "    y el múltiplo del basket queda subestimado (el script no reparte ese peso).",
+            "  • Múltiplo negativo: utilidad/patrimonio negativos entran al promedio sin filtro.",
+            "",
+            "El compuesto se lee como un PUNTAJE RELATIVO, no como 'desviaciones estándar' exactas (pesos suman 0.99 y",
+            "los Z que se promedian están correlacionados). No mide si la prima está justificada (crecimiento, márgenes, riesgo).",
+        ]
+        for i, txt in enumerate(lineas):
+            c = wsG.cell(row=3 + i, column=1, value=txt)
+            if txt in ("HOJAS", "CÓMO LEER 'vs Basket'", "CALIDAD DEL DATO (lo que el compuesto de BD no avisa)", "QUÉ ES: lo que la hoja BD no muestra. BD guarda solo el Z COMPUESTO; aquí se ve de qué está hecho."):
+                c.font = _F_BOLD
+        r0 = 4 + len(lineas)
+        wsG.cell(row=r0, column=1, value="Empresas en foco: " + ", ".join(f"{n} → {t}" for n, t in hojas_diag)).font = _F_BOLD
+        wsG.column_dimensions["A"].width = 130
+
+        wb.calculation = CalcProperties(fullCalcOnLoad=True)
+        try:
+            wb.save(ruta_salida)
+        except PermissionError:
+            raise PermissionError(f"No se pudo guardar '{os.path.basename(ruta_salida)}': "
+                                  "está abierto en Excel. Ciérralo y vuelve a ejecutar.")
+        print(f"  ✓ Excel de Z puros: {ruta_salida}")
+        print(f"    → Foto: {len(port)} empresas del portafolio | Diagnóstico: {len(foco)} empresas en foco × "
+              f"{min(n_diag, len(next(iter(calc.values()))['fechas']))} días")
+    except Exception as e:
+        import traceback
+        print(f"  ✗ Error al generar el Excel de Z puros: {e}")
+        traceback.print_exc()
+
+
+def _zp_escribir_diag(ws, t, grupo, es_fin, d, ventanas, act_mults, ref_wk, ref_wm,
+                      matriz_multiplos, datos_bbg, datos_ciq, base_final_z, n_diag, umbral):
+    """
+    Escribe la hoja de diagnóstico diario de UNA empresa en foco.
+
+    Bloques (de izquierda a derecha):
+      Niveles : múltiplo de la empresa, del basket y ratio (por múltiplo aplicable).
+      Causa   : Market Cap/EV, denominadores vigentes (CIQ), peso y múltiplo de cada comparable,
+                cobertura del basket por múltiplo.
+      Z vs Basket / Z Absoluto : 12 Z puros (múltiplo × ventana) + subtotales por múltiplo y por
+                ventana + compuesto (Σ aportes, fórmula) + compuesto de BD + |Δ|.
+      Calidad : ventanas válidas, cobertura mínima y alertas por día.
+    Los subtotales y el compuesto son fórmulas que leen la hoja Pesos.
+    """
+    F0 = 6
+    fechas = d["fechas"][-n_diag:]
+    n = len(fechas)
+    off = len(d["fechas"]) - n                              # posición del primer día mostrado
+    sl = slice(off, off + n)
+    app = [m for m in act_mults if d["w_m"][m] != 0]        # múltiplos aplicables a este sector
+    nw = len(ventanas)
+    idx_full = matriz_multiplos[t].index
+    cols = []                                               # cada col: dict(key, header, block, fmt, vals|formula)
+
+    def add(key, header, block, fmt="0.000", vals=None, formula=None):
+        cols.append({"key": key, "h": header, "b": block, "fmt": fmt, "vals": vals, "f": formula})
+
+    # Niveles
+    for m in app:
+        add(f"mu|{m}", f"{_ZP_ETQ[m]} empresa", "niv", "0.00", d["mu"][m].values[sl])
+        add(f"bk|{m}", f"{_ZP_ETQ[m]} basket", "niv", "0.00", d["bk"][m].values[sl])
+        add(f"rt|{m}", f"{_ZP_ETQ[m]} ratio", "niv", "0.000", d["ratio"][m].values[sl])
+    # Causa: empresa
+    bbg = datos_bbg[t].reindex(fechas)
+    add("mc", "Market Cap empresa", "cau", "#,##0", bbg["CUR_MKT_CAP"].values)
+    if "Trail_EVEBITDA" in app:
+        add("ev", "EV empresa", "cau", "#,##0", bbg["CURR_ENTP_VAL"].values)
+    for m in app:
+        if m in _ZP_DEN:
+            nombre, col, _ = _ZP_DEN[m]
+            den = _zp_ciq_vigente(datos_ciq[t], col, idx_full).reindex(fechas)
+            add(f"den|{m}", f"{nombre} vigente", "cau", "#,##0", den.values)
+    # Causa: basket
+    for c in d["mc_cols"]:
+        add(f"w|{c}", f"Peso {c.split()[0]}", "cau", "0.0%", d["pesos"][c].reindex(fechas).values)
+    for m in app:
+        for c in d["mc_cols"]:
+            add(f"mc|{m}|{c}", f"{_ZP_ETQ[m]} · {c.split()[0]}", "cau", "0.00", d["mult_comps"][m][c].reindex(fechas).values)
+    for m in app:
+        add(f"cob|{m}", f"Cobertura {_ZP_ETQ[m]}", "cau", "0%", d["cob"][m].reindex(fechas).values)
+
+    # Z puros + subtotales + compuesto, para cada marco
+    for marco, bloque, etq, pref in (("B", "zb", "vs Basket", "Z_Basket_"), ("A", "za", "Absoluto", "Z_")):
+        z = d["zB"] if marco == "B" else d["zA"]
+        for m in app:
+            for k, (a, _) in enumerate(ventanas):
+                add(f"z{marco}|{m}|{k}", f"Z {etq}: {_ZP_ETQ[m]} · {a}A", bloque, "0.000", z[(m, k)].values[sl])
+        for m in app:
+            wm = ref_wm[m][0 if es_fin else 1]
+            add(f"sm{marco}|{m}", f"Subtotal {_ZP_ETQ[m]} ({etq})", bloque, "0.000",
+                formula=(lambda r, P, m=m, marco=marco, wm=wm:
+                         f"={wm}*(" + "+".join(f"{ref_wk[k]}*N({P[f'z{marco}|{m}|{k}']}{r})" for k in range(nw)) + ")"))
+        for k, (a, _) in enumerate(ventanas):
+            add(f"sw{marco}|{k}", f"Subtotal ventana {a}A ({etq})", bloque, "0.000",
+                formula=(lambda r, P, k=k, marco=marco:
+                         "=" + "+".join(f"{ref_wm[m][0 if es_fin else 1]}*{ref_wk[k]}*N({P[f'z{marco}|{m}|{k}']}{r})" for m in app)))
+        add(f"comp{marco}", f"Z compuesto {etq} (Σ aportes)", bloque, "0.000",
+            formula=(lambda r, P, marco=marco: "=SUM(" + ",".join(f"{P[f'sm{marco}|{m}']}{r}" for m in app) + ")"))
+        col_bd = f"{pref}{t}"
+        bd = (base_final_z[col_bd].reindex(fechas).values if col_bd in base_final_z.columns
+              else np.full(n, np.nan))
+        add(f"bd{marco}", f"Compuesto BD ({etq})", bloque, "0.000", bd)
+        add(f"dl{marco}", f"|Δ| vs BD ({etq})", bloque, "0.0E+00",
+            formula=(lambda r, P, marco=marco:
+                     f'=IF(ISNUMBER({P[f"bd{marco}"]}{r}),ABS({P[f"comp{marco}"]}{r}-{P[f"bd{marco}"]}{r}),"—")'))
+
+    # Calidad (día a día)
+    qB = [_zp_alertas(d, "B", off + i, ventanas, act_mults, umbral) for i in range(n)]
+    qA = [_zp_alertas(d, "A", off + i, ventanas, act_mults, umbral) for i in range(n)]
+    add("qvB", "Ventanas válidas (vs Basket)", "cal", "@", [f"{x[0]}/{x[1]}" for x in qB])
+    add("qvA", "Ventanas válidas (Absoluto)", "cal", "@", [f"{x[0]}/{x[1]}" for x in qA])
+    add("qcov", "Cobertura mín. basket", "cal", "0%", [x[3] for x in qB])
+    add("qal", "Alertas", "cal", "@", [" | ".join(s for s in dict.fromkeys(
+        (qB[i][2] + " | " + qA[i][2]).split(" | ")) if s) for i in range(n)])
+
+    # Posiciones de columna (A = fecha)
+    P = {c["key"]: _L(2 + i) for i, c in enumerate(cols)}
+    ws.cell(row=1, column=1, value=f"{t} — DIAGNÓSTICO DIARIO ({grupo})").font = _F_TIT
+    ws.cell(row=2, column=1, value=("Niveles: ¿sube la empresa o baja el basket? · Causa: denominadores y pesos de los comparables · "
+                                    "Z puros y aportes · Calidad del dato. Vacío = sin dato / no aplica."))
+    _xl_hdr(ws, 5, 1, "Fecha")
+    bloque_titulo = {"niv": "NIVELES", "cau": "CAUSA", "zb": "Z vs BASKET", "za": "Z ABSOLUTO", "cal": "CALIDAD"}
+    previo = None
+    for i, c in enumerate(cols):
+        col = 2 + i
+        h = _xl_hdr(ws, 5, col, c["h"])
+        h.fill = PatternFill("solid", fgColor=_ZP_COLORES[c["b"]])
+        if c["b"] != previo:
+            ws.cell(row=4, column=col, value=bloque_titulo[c["b"]]).font = Font(bold=True, color=_ZP_COLORES[c["b"]])
+            previo = c["b"]
+        ws.column_dimensions[_L(col)].width = 14
+    ws.column_dimensions[P["qal"]].width = 70
+    ws.row_dimensions[5].height = 45
+    for i in range(n):
+        r = F0 + i
+        ws.cell(row=r, column=1, value=_xl_val(pd.Timestamp(fechas[i]))).number_format = "dd/mm/yyyy"
+        for j, c in enumerate(cols):
+            if c["f"] is not None:
+                v = c["f"](r, P)
+            else:
+                v = c["vals"][i]
+                v = v if isinstance(v, str) else _xl_val(v)
+            cell = ws.cell(row=r, column=2 + j, value=v)
+            if c["fmt"] != "@":
+                cell.number_format = c["fmt"]
+    ws.freeze_panes = "B6"
+    ws.column_dimensions["A"].width = 12
+
+
+# ==============================================================================
+# SECCIÓN 14b: EXPORTAR MÚLTIPLOS A CSV (para zoda_dashboard_v3.py)
+# ==============================================================================
+
+def exportar_multiplos_csv(matriz_multiplos: dict, ruta_csv: str) -> None:
+    """
+    Exporta Matriz_Multiplos a un CSV en formato largo (long format):
+      Fecha | Ticker | Trail_PE | Fwd_PE | Trail_PS | Fwd_PS |
+      Trail_PB | Fwd_PB | Trail_EVEBITDA | Fwd_EVEBITDA
+
+    Este CSV es la única fuente de múltiplos para zoda_dashboard_v3.py,
+    eliminando el recalculo de ~55 segundos en cada generación del dashboard.
+
+    DISEÑO:
+    - Datos diarios a resolución completa (misma frecuencia que Matriz_Multiplos).
+    - zoda_dashboard_v3.py aplica su propio resample al leerlo (bi-weekly).
+    - Los NaN se preservan como celdas vacías en CSV (no como 0) para que
+      el dashboard pueda distinguir "sin dato" de "múltiplo = 0".
+    - El archivo se sobreescribe en cada ejecución de ZODA_03_06_2026.py.
+    - Añade columna "GeneradoEn" con timestamp para trazabilidad.
+    """
+    partes = []
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    for ticker, df_mult in matriz_multiplos.items():
+        df_tmp = df_mult.copy().reset_index()
+        df_tmp.rename(columns={df_tmp.columns[0]: "Fecha"}, inplace=True)
+        df_tmp.insert(1, "Ticker", ticker)
+        df_tmp["GeneradoEn"] = timestamp
+        partes.append(df_tmp)
+
+    if not partes:
+        print("  ⚠️  exportar_multiplos_csv: Matriz_Multiplos vacía, CSV no generado.")
+        return
+
+    csv_final = pd.concat(partes, ignore_index=True)
+
+    # Asegurar que Fecha quede como string ISO para portabilidad
+    csv_final["Fecha"] = pd.to_datetime(csv_final["Fecha"]).dt.strftime("%Y-%m-%d")
+
+    csv_final.to_csv(ruta_csv, index=False, encoding="utf-8-sig")
+
+    n_tickers = csv_final["Ticker"].nunique()
+    n_filas   = len(csv_final)
+    tam_mb    = os.path.getsize(ruta_csv) / 1_048_576
+    print(f"  ✓ CSV exportado: {os.path.basename(ruta_csv)}")
+    print(f"    → {n_tickers} tickers | {n_filas:,} filas | {tam_mb:.1f} MB")
+
+# ==============================================================================
+# SECCIÓN 14: MAIN
+# ==============================================================================
+
+def main():
+    inicio = datetime.datetime.now()
+    fecha_hoy = datetime.datetime.today().strftime("%d.%m.%y")
+
+    print("=" * 70)
+    print("  ZODA — MONITOR DE VALORIZACIÓN AFP INTEGRA")
+    print(f"  Inicio: {inicio.strftime('%d/%m/%Y %H:%M:%S')}")
+    print("=" * 70)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 1: Leer Baskets
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[1/9] Leyendo configuración de Baskets desde ZODA.xlsm...")
+    (Todas_Finan,    Empresas_Financieras, Basket_Financieras,
+     Todas_Cons_Const, Empresas_Cons_Const, Basket_Cons_Const,
+     Todas_Min_Utl,  Empresas_Min_Utl,    Basket_Min_Utl) = leer_baskets(RUTA_ZODA)
+
+    print(f"  → {len(Empresas_Financieras)} financieras | "
+          f"{len(Empresas_Cons_Const)} Cons/Const | "
+          f"{len(Empresas_Min_Utl)} Min/Utl")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 2: Actualizar DQ_IN
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[2/9] Actualizando base DQ_IN...")
+    dq_in_bd = leer_hoja_excel(RUTA_ZODA, "DQ_IN", con_encabezado=True)
+    df_qest  = leer_hoja_excel(RUTA_QEST, "DQ_IN")
+    base_dq_in = actualizar_DQ_IN(df_qest, dq_in_bd)
+    base_dq_in = base_dq_in.reset_index(drop=True)
+    base_dq_in.loc[3:, "Fecha"] = pd.to_datetime(
+        base_dq_in.loc[3:, "Fecha"], dayfirst=True, errors="coerce"
+    )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 3: Leer hojas de datos
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[3/9] Leyendo datos de Bloomberg y Capital IQ desde ZODA.xlsm...")
+    Financials_Datos  = leer_hoja_excel(RUTA_ZODA, "Financials")
+    Min_Utl_Datos     = leer_hoja_excel(RUTA_ZODA, "Min y Uti")
+    Cons_Const_Datos  = leer_hoja_excel(RUTA_ZODA, "Cons y Const")
+    Indices_Datos     = leer_hoja_excel(RUTA_ZODA, "Indices")
+
+    # Fechas trimestrales: column_1 desde fila 5, igual que el notebook
+    Fechas_Tri = pd.to_datetime(
+        Financials_Datos["column_1"].iloc[5:], errors="coerce"
+    ).dropna()
+
+    # Fechas diarias: primera columna etiquetada "Px_last" en fila 2
+    mask_px = Financials_Datos.iloc[2] == "Px_last"
+    Fechas_Diarias = pd.to_datetime(
+        Financials_Datos.loc[5:, mask_px].iloc[:, 0], errors="coerce"
+    ).dropna()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 4: Limpiar datos
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[4/9] Limpiando datos y calculando múltiplos de valorización...")
+
+    # Solo procesar tickers que realmente existen en su hoja
+    def _existe(hoja, ticker):
+        return (hoja.iloc[4] == ticker).any()
+
+    Datos_CIQ, Datos_BBG = {}, {}
+    for t in Todas_Finan:
+        if _existe(Financials_Datos, t):
+            Datos_CIQ[t] = LimpiandoCIQ(Financials_Datos, Fechas_Tri,     t)
+            Datos_BBG[t] = LimpiandoBBG(Financials_Datos, Fechas_Diarias,  t)
+    for t in Todas_Cons_Const:
+        if _existe(Cons_Const_Datos, t):
+            Datos_CIQ[t] = LimpiandoCIQ(Cons_Const_Datos, Fechas_Tri,     t)
+            Datos_BBG[t] = LimpiandoBBG(Cons_Const_Datos, Fechas_Diarias,  t)
+    for t in Todas_Min_Utl:
+        if _existe(Min_Utl_Datos, t):
+            Datos_CIQ[t] = LimpiandoCIQ(Min_Utl_Datos,   Fechas_Tri,     t)
+            Datos_BBG[t] = LimpiandoBBG(Min_Utl_Datos,   Fechas_Diarias,  t)
+
+    total_pedidos = len(Todas_Finan) + len(Todas_Cons_Const) + len(Todas_Min_Utl)
+    print(f"  → {len(Datos_BBG)}/{total_pedidos} tickers con datos en el Excel")
+
+    # Índices
+    Matriz_Indices = {i: LimpiandoIndices(Indices_Datos, Fechas_Diarias, i)
+                      for i in TODAS_INDICES}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 5: Calcular múltiplos
+    # (Fechas_Nuevas = índice diario de BAP, igual que el notebook original)
+    # ──────────────────────────────────────────────────────────────────────────
+    # Tomar primer ticker disponible como referencia de fechas
+    primer_ticker = next(iter(Datos_BBG))
+    Fechas_Nuevas = Datos_BBG[primer_ticker].index
+
+    Matriz_Multiplos = {}
+    for t in Datos_BBG:
+        try:
+            Matriz_Multiplos[t] = multiplos(t, Datos_BBG, Datos_CIQ, Fechas_Nuevas)
+        except Exception as e:
+            print(f"  ⚠️  {t}: error en múltiplos → {e}")
+
+    # Múltiplos de índices: columnas 1 en adelante (sin PX_LAST)
+    Matriz_Multiplos_Indices = {
+        i: Matriz_Indices[i].iloc[:, 1:] for i in TODAS_INDICES
+    }
+
+    print(f"  → Múltiplos calculados para {len(Matriz_Multiplos)} empresas")
+
+    # Exportar CSV intermedio para zoda_dashboard_v3.py
+    exportar_multiplos_csv(Matriz_Multiplos, RUTA_MULTIPLOS_CSV)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 6: Market Cap para ponderación de baskets
+    # ──────────────────────────────────────────────────────────────────────────
+    market_cap_parts = []
+    for t in Datos_BBG:
+        if "CUR_MKT_CAP" in Datos_BBG[t].columns:
+            temp = pd.DataFrame(Datos_BBG[t]["CUR_MKT_CAP"]).rename(columns={"CUR_MKT_CAP": t})
+            market_cap_parts.append(temp)
+    MarketCap = pd.concat(market_cap_parts, axis=1, sort=False) if market_cap_parts else pd.DataFrame()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 7: Z-scores absolutos (igual que notebook: es_finan como variable global)
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[5/9] Calculando Z-scores...")
+
+    Matriz_Z_Financieras = {}
+    for t in Empresas_Financieras:
+        if t in Matriz_Multiplos:
+            Matriz_Z_Financieras[f"Z_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(Matriz_Multiplos[t], es_finan=True),
+                columns=[f"Z_{t}"]
+            )
+
+    Matriz_Z_Cons_Const = {}
+    for t in Empresas_Cons_Const:
+        if t in Matriz_Multiplos:
+            Matriz_Z_Cons_Const[f"Z_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(Matriz_Multiplos[t], es_finan=False),
+                columns=[f"Z_{t}"]
+            )
+
+    Matriz_Z_Min_Utl = {}
+    for t in Empresas_Min_Utl:
+        if t in Matriz_Multiplos:
+            Matriz_Z_Min_Utl[f"Z_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(Matriz_Multiplos[t], es_finan=False),
+                columns=[f"Z_{t}"]
+            )
+
+    # Z-scores de índices
+    Matriz_Z_Indices = {}
+    for i in TODAS_INDICES:
+        Matriz_Z_Indices[i] = pd.DataFrame(
+            Creacion_Z_Final(Matriz_Multiplos_Indices[i], es_finan=False),
+            columns=[i]
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 8: Baskets y Z relativos
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[6/9] Calculando Baskets y Z relativos (basket y BVL)...")
+
+    Matriz_Baskets_Finan = {
+        t: Creacion_DF_Basket(Basket_Financieras[t], Matriz_Multiplos, MarketCap, Fechas_Diarias)
+        for t in Empresas_Financieras if t in Basket_Financieras
+    }
+    Matriz_Baskets_Cons_Const = {
+        t: Creacion_DF_Basket(Basket_Cons_Const[t], Matriz_Multiplos, MarketCap, Fechas_Diarias)
+        for t in Empresas_Cons_Const if t in Basket_Cons_Const
+    }
+    Matriz_Baskets_Min_Utl = {
+        t: Creacion_DF_Basket(Basket_Min_Utl[t], Matriz_Multiplos, MarketCap, Fechas_Diarias)
+        for t in Empresas_Min_Utl if t in Basket_Min_Utl
+    }
+
+    # Z_Basket = Z-score de (mult_empresa / mult_basket)  ← fiel al notebook
+    Matriz_Z_Financieras_Basket = {}
+    for t in Empresas_Financieras:
+        if t in Matriz_Multiplos and t in Matriz_Baskets_Finan:
+            ratio = Matriz_Multiplos[t].div(Matriz_Baskets_Finan[t])
+            Matriz_Z_Financieras_Basket[f"Z_Basket_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(ratio, es_finan=True), columns=[f"Z_Basket_{t}"]
+            )
+
+    Matriz_Z_Cons_Const_Basket = {}
+    for t in Empresas_Cons_Const:
+        if t in Matriz_Multiplos and t in Matriz_Baskets_Cons_Const:
+            ratio = Matriz_Multiplos[t].div(Matriz_Baskets_Cons_Const[t])
+            Matriz_Z_Cons_Const_Basket[f"Z_Basket_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(ratio, es_finan=False), columns=[f"Z_Basket_{t}"]
+            )
+
+    Matriz_Z_Min_Utl_Basket = {}
+    for t in Empresas_Min_Utl:
+        if t in Matriz_Multiplos and t in Matriz_Baskets_Min_Utl:
+            ratio = Matriz_Multiplos[t].div(Matriz_Baskets_Min_Utl[t])
+            Matriz_Z_Min_Utl_Basket[f"Z_Basket_{t}"] = pd.DataFrame(
+                Creacion_Z_Final(ratio, es_finan=False), columns=[f"Z_Basket_{t}"]
+            )
+
+    # Z_BVL = Z-score de (mult_empresa / mult_SPBLPGPT)  ← fiel al notebook
+    def _z_bvl(t, mult_emp, es_fin):
+        ratio = mult_emp.div(Matriz_Multiplos_Indices["SPBLPGPT Index"])
+        return pd.DataFrame(
+            Creacion_Z_Final(ratio, es_finan=es_fin), columns=[f"Z_BVL_{t}"]
+        )
+
+    Matriz_Z_Financieras_BVL = {
+        f"Z_BVL_{t}": _z_bvl(t, Matriz_Multiplos[t], True)
+        for t in Empresas_Financieras if t in Matriz_Multiplos
+    }
+    Matriz_Z_Cons_Const_BVL = {
+        f"Z_BVL_{t}": _z_bvl(t, Matriz_Multiplos[t], False)
+        for t in Empresas_Cons_Const if t in Matriz_Multiplos
+    }
+    Matriz_Z_Min_Utl_BVL = {
+        f"Z_BVL_{t}": _z_bvl(t, Matriz_Multiplos[t], False)
+        for t in Empresas_Min_Utl if t in Matriz_Multiplos
+    }
+
+    # Z_MXLA = Z-score de (mult_indice / mult_MXLA)  ← fiel al notebook
+    Matriz_Z_Indices_MXLA = {}
+    for i in TODAS_INDICES:
+        if i == "MXLA Index":
+            break
+        ratio = Matriz_Multiplos_Indices[i].div(Matriz_Multiplos_Indices["MXLA Index"])
+        Matriz_Z_Indices_MXLA[f"Z_MXLA_{i}"] = pd.DataFrame(
+            Creacion_Z_Final(ratio, es_finan=False), columns=[f"Z_MXLA_{i}"]
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 9: Consolidar Base_Final_Z (orden exacto del notebook original)
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[7/9] Consolidando Z-scores y exportando a Excel...")
+
+    # Concatenar DataFrames individuales igual que el notebook:
+    # [Z_emp | Z_basket_emp | Z_BVL_emp | Z_indices | Z_MXLA_indices]
+    DF_Z_Financieras        = pd.concat(Matriz_Z_Financieras.values(),        axis=1, sort=False)
+    DF_Z_Cons_Const         = pd.concat(Matriz_Z_Cons_Const.values(),         axis=1, sort=False)
+    DF_Z_Min_Utl            = pd.concat(Matriz_Z_Min_Utl.values(),            axis=1, sort=False)
+    DF_Z_Financieras_Basket = pd.concat(Matriz_Z_Financieras_Basket.values(), axis=1, sort=False)
+    DF_Z_Cons_Const_Basket  = pd.concat(Matriz_Z_Cons_Const_Basket.values(),  axis=1, sort=False)
+    DF_Z_Min_Utl_Basket     = pd.concat(Matriz_Z_Min_Utl_Basket.values(),     axis=1, sort=False)
+    DF_Z_Financieras_BVL    = pd.concat(Matriz_Z_Financieras_BVL.values(),    axis=1, sort=False)
+    DF_Z_Cons_Const_BVL     = pd.concat(Matriz_Z_Cons_Const_BVL.values(),     axis=1, sort=False)
+    DF_Z_Min_Utl_BVL        = pd.concat(Matriz_Z_Min_Utl_BVL.values(),        axis=1, sort=False)
+    DF_Z_Indices            = pd.concat(Matriz_Z_Indices.values(),             axis=1, sort=False)
+    DF_Z_Indices_MXLA       = pd.concat(Matriz_Z_Indices_MXLA.values(),       axis=1, sort=False)
+
+    Base_Final_Z = pd.concat([
+        DF_Z_Financieras,
+        DF_Z_Cons_Const,
+        DF_Z_Min_Utl,
+        DF_Z_Financieras_Basket,
+        DF_Z_Cons_Const_Basket,
+        DF_Z_Min_Utl_Basket,
+        DF_Z_Financieras_BVL,
+        DF_Z_Cons_Const_BVL,
+        DF_Z_Min_Utl_BVL,
+        DF_Z_Indices,
+        DF_Z_Indices_MXLA,
+    ], axis=1, sort=False)
+
+    # Escribir BD y DQ_IN en ZODA.xlsm
+    escribir_df_en_excel(RUTA_ZODA, "BD",    Base_Final_Z)
+    escribir_df_en_excel(RUTA_ZODA, "DQ_IN", base_dq_in, incluir_indice=False)
+
+    # Exportar histórico de múltiplos por GICS
+    exportar_multiplos_historicos(Matriz_Multiplos, RUTA_ZODA, RUTA_MULTIPLOS_HIST)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 10: Exportar múltiplos comparables a la red
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[8/9] Exportando múltiplos comparables a la red...")
+    todas_empresas = list(Datos_BBG.keys())
+    todas_baskets  = {**Matriz_Baskets_Finan,
+                      **Matriz_Baskets_Cons_Const,
+                      **Matriz_Baskets_Min_Utl}
+
+    exportar_multiplos_comparables(
+        Matriz_Multiplos, todas_baskets, todas_empresas,
+        Fechas_Tri, Fechas_Diarias, RUTA_MULT_COMP
+    )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PASO 11: Excel de auditoría (fórmulas vivas) y Excel de Z puros
+    # ──────────────────────────────────────────────────────────────────────────
+    print("\n[9/9] Generando Excel de auditoría y Excel de Z puros...")
+    _grupos_xl = [
+        ("Financieras",   Empresas_Financieras, Basket_Financieras, Matriz_Baskets_Finan,      True),
+        ("Cons/Ind/HC",   Empresas_Cons_Const,  Basket_Cons_Const,  Matriz_Baskets_Cons_Const, False),
+        ("Min/Utilities", Empresas_Min_Utl,     Basket_Min_Utl,     Matriz_Baskets_Min_Utl,    False),
+    ]
+    exportar_auditoria_excel(
+        Matriz_Multiplos, Datos_BBG, Datos_CIQ,
+        grupos=_grupos_xl, ruta_salida=RUTA_AUDITORIA,
+    )
+    exportar_z_puros_excel(
+        Matriz_Multiplos, Datos_BBG, Datos_CIQ,
+        grupos=_grupos_xl, base_final_z=Base_Final_Z, ruta_salida=RUTA_Z_PUROS,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # FIN
+    # ──────────────────────────────────────────────────────────────────────────
+    fin = datetime.datetime.now()
+    print("\n" + "=" * 70)
+    print(f"  ✓ Completado en {fin - inicio}")
+    print(f"  Hora de término: {fin.strftime('%d/%m/%Y %H:%M:%S')}")
+    print("=" * 70)
+    print(r"  \(._.)/  ¡Corrió con éxito!")
+    print("     |")
+    print("    7 7")
+
+
+# ==============================================================================
+# PUNTO DE ENTRADA
+# ==============================================================================
+if __name__ == "__main__":
+    main()
+
