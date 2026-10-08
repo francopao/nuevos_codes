@@ -1,0 +1,97 @@
+Leo primero tu "ZODA ultimate" para ubicar los textos exactos que se buscan y reemplazan.
+
+Tu script ya trae las Secciones 13 y 13b de la versión anterior. Reviso los puntos exactos donde se conectará lo nuevo.
+
+Estoy escribiendo el bloque nuevo; luego lo pruebo sobre tu script.
+
+Compilan los dos casos (con y sin la 13b vieja), y los únicos avisos son imports repetidos que no afectan nada. Ahora corro el pipeline real con la muestra de tu biblioteca.
+
+El CSV cuadra con lo que va a `BD` en las 25 empresas (diferencia máxima 4e-5, solo por el redondeo a 4 decimales). Repito con la variante sin la 13b vieja y reviso cómo queda el Excel.
+
+Las medidas a escala real ya están. Falta probar un ticker mal escrito en la lista de foco, y entrego.
+
+Son 3 reemplazos más un paso opcional de limpieza, hechos sobre tu "ZODA ultimate". Apliqué esos mismos cambios a una copia de tu script y la probé con los datos de tu biblioteca.
+
+## Bloque 1: rutas
+
+Busca `RUTA_Z_PUROS` (aparece una sola vez, en la sección de rutas). Borra estas 2 líneas con su comentario:
+
+```python
+# Excel de Z puros y diagnóstico (empresas del portafolio)
+RUTA_Z_PUROS = os.path.join(RUTA_BASE, "ZODA_Z_Puros.xlsx")
+```
+
+y pega en su lugar:
+
+```python
+# CSV de Z puros diarios de todo el portafolio (input del dashboard nuevo)
+RUTA_Z_PUROS_CSV = os.path.join(RUTA_BASE, "Z_puros_diarios.csv")
+
+# Excel de Z puros de las empresas en foco (lectura humana)
+RUTA_Z_FOCO = os.path.join(RUTA_BASE, "ZODA_Z_Foco.xlsx")
+```
+
+## Bloque 2: sección nueva (archivo adjunto `bloque_2_nueva_seccion_13c.py`)
+
+1. Busca `SECCIÓN 14b`.
+2. Pon el cursor al inicio de la línea `# ======` que está justo arriba de ese título.
+3. Abre el archivo adjunto, copia todo y pégalo ahí.
+
+Esa sección trae la lista editable de empresas en foco, en la parte de arriba:
+
+```python
+Z_FOCO_EMPRESAS = ["BAP US Equity", "ALICORC1 PE Equity"]
+```
+
+Cámbialas por tus 2 empresas con el ticker tal cual está en tu hoja de baskets. Si escribes uno que no es del portafolio, el script lo avisa y lo omite sin romper nada.
+
+## Bloque 3: llamada en main
+
+1. Busca `[9/9] Generando Excel de auditoría y Excel de Z puros`.
+2. Borra esa línea `print(...)` y, bajando, también estas líneas:
+
+```python
+    exportar_z_puros_excel(
+        Matriz_Multiplos, Datos_BBG, Datos_CIQ,
+        grupos=_grupos_xl, base_final_z=Base_Final_Z, ruta_salida=RUTA_Z_PUROS,
+    )
+```
+
+3. Deja intactas las líneas de `_grupos_xl` y de `exportar_auditoria_excel`. Pon la línea nueva del `print` donde estaba la vieja:
+
+```python
+    print("\n[9/9] Generando Excel de auditoría, CSV de Z puros y Excel de empresas en foco...")
+```
+
+4. Y pega estas dos llamadas donde estaba `exportar_z_puros_excel`:
+
+```python
+    exportar_z_dashboard_csv(
+        Matriz_Multiplos, grupos=_grupos_xl, ruta_csv=RUTA_Z_PUROS_CSV,
+    )
+    exportar_z_foco_excel(
+        Matriz_Multiplos, Datos_BBG, grupos=_grupos_xl, ruta_salida=RUTA_Z_FOCO,
+    )
+```
+
+## Paso opcional: borrar la sección vieja
+
+Después de confirmar que corre bien, puedes borrar la sección vieja para no tener código muerto. Busca `SECCIÓN 13b`. Selecciona desde la línea `# ======` de arriba de ese título hasta la línea justo antes del `# ======` de arriba de `SECCIÓN 14b`, y bórrala. Son unas 482 líneas. El script funciona igual si la dejas, porque los nombres nuevos no chocan con los viejos.
+
+## Qué sale al correr
+
+- **`Z_puros_diarios.csv`:** una fila por fecha y ticker, todas las empresas del portafolio, diario, con 4 decimales. Tiene 24 columnas de Z: `Z_Abs_PE_1A`, `Z_Abs_PE_3A`, ..., y lo mismo con `Z_Basket_...` para el marco vs basket. En bancos las columnas de EV/EBITDA quedan vacías y se omiten las filas sin ningún Z.
+- **`ZODA_Z_Foco.xlsx`:** una hoja por empresa, con el ticker corto como nombre. De izquierda a derecha: Fecha, Z vs basket, Z absoluto, ratio empresa/basket, múltiplo del basket y cobertura. Va desde el primer día con algún Z, con lo más reciente arriba. Sin guías, sin fotos, sin textos explicativos, con colores sobrios.
+
+## Qué verifiqué
+
+- **Cuadre con `BD`:** rearmé el Z compuesto desde los Z puros del CSV y lo comparé contra `Creacion_Z_Final` en las 25 empresas y los 2 marcos. La diferencia máxima fue 4.3e-5, que es solo el redondeo a 4 decimales. Esta prueba usó la muestra de tu biblioteca con ventanas reducidas (1 año = 10 días), porque la muestra solo trae 92 días.
+- **Niveles:** para ALICORC1, el ratio P/E del Excel (1.05) y el P/E del basket (15.20) coinciden con el ejemplo que vimos antes.
+- **Variantes:** probé el script con y sin la sección vieja, y con tickers mal escritos o con historia insuficiente; el script avisa y sigue.
+- **Escala real:** con series sintéticas de 4,100 días y 25 empresas, el CSV tardó 2.8 s y pesó 17.5 MB, y el Excel de 2 empresas tardó 1.3 s y pesó 1.2 MB. El dashboard lo lee en 0.2 s.
+
+## Lo que no pude verificar
+
+No corrí el script contra tu historia completa ni con las ventanas reales de 260/780/1300 días, porque la muestra no alcanza. El tiempo y el peso reales pueden variar un poco.
+
+**Los 3 puntos abiertos** (sugerencias 3, 4 y 5: huecos, pesos 0.99 y renormalizar el basket) siguen sin aplicarse. Los Z puros salen exactamente como los calcula hoy tu script.
