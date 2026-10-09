@@ -1,0 +1,126 @@
+Dos cambios, ambos con Ctrl+F. El primero quita el archivo "Dejados de lado"; el segundo agrega el comparativo G&P vs QEST que pediste.
+
+---
+
+### Cambio 1 — Quitar la exportación de "Dejados de lado NORMAL/SOBERANOS"
+
+**BUSCA** (dentro de `reporte_dejados_de_lado`, al final de la función):
+```python
+    arch = ruta + f'Dejados de lado {etiqueta}.xlsx'
+    try:
+        with pd.ExcelWriter(arch, engine='openpyxl') as w:
+            detalle.to_excel(w, sheet_name='Detalle', index=False)
+            resumen_df.to_excel(w, sheet_name='Resumen', index=False)
+        print(f"[DEJADOS DE LADO {etiqueta}] -> {arch}")
+    except Exception as e:
+        print(f"[AVISO] No se pudo escribir el reporte 'dejados de lado': {e}")
+```
+
+**REEMPLAZA CON:**
+```python
+    # Excel "Dejados de lado {etiqueta}.xlsx" eliminado a propósito: Descartes.xlsx
+    # ya registra cada SBS excluido con su Etapa/Motivo (incl. 'operaciones() -
+    # Asset Class' y 'Clasificación BU/TD/SOB', que son justo lo que medía este
+    # reporte). El resumen %-por-AFP×Fondo de aquí arriba queda solo en consola.
+```
+
+No toco nada más de la función — el `print(resumen_df...)` de más arriba sigue igual, así que no pierdes el resumen en consola, solo el archivo Excel.
+
+---
+
+### Cambio 2 — Capturar el valor original de G&P antes de sobrescribirlo
+
+**BUSCA:**
+```python
+    _sbs_norm = b.df['SBS'].astype(str).str.strip()
+    for nombre_inf in ['INF1', 'INF2', 'INF3']:
+        nuevo = _sbs_norm.map(b.qest_pct_universo[nombre_inf])
+```
+
+**REEMPLAZA CON:**
+```python
+    # Snapshot ANTES de sobrescribir: lo necesita el comparativo G&P vs QEST
+    # (más abajo), que audita cuánto cambia el posicionamiento entre fuentes.
+    b.df_gyp_orig = b.df[['SBS', 'Nombre', 'Asset Class', 'INF1', 'INF2', 'INF3']].copy()
+
+    _sbs_norm = b.df['SBS'].astype(str).str.strip()
+    for nombre_inf in ['INF1', 'INF2', 'INF3']:
+        nuevo = _sbs_norm.map(b.qest_pct_universo[nombre_inf])
+```
+
+---
+
+### Cambio 3 — El Excel comparativo (G&P vs QEST crudo vs QEST renormalizado)
+
+**BUSCA:**
+```python
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+```
+
+**AGREGA DEBAJO** (todo este bloque, antes de `# ---- Precios`):
+```python
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+
+    # ========================================================================
+    #  COMPARATIVO G&P vs QEST (crudo) vs QEST (post-renormalización)
+    #  Solo diagnóstico/auditoría -> Excel aparte. No altera el pipeline ni
+    #  ningún otro output. Objetivo: ver, por instrumento y por fondo, qué tan
+    #  distinto es el posicionamiento que decía G&P del que dice QEST, y qué
+    #  tan poco (o mucho) mueve la renormalización al valor crudo de QEST.
+    # ========================================================================
+    try:
+        _dic_gyp = {n: dict(zip(b.df_gyp_orig['SBS'].astype(str).str.strip(),
+                                 b.df_gyp_orig[n])) for n in ['INF1', 'INF2', 'INF3']}
+        _dic_nombre_gyp = dict(zip(b.df_gyp_orig['SBS'].astype(str).str.strip(),
+                                    b.df_gyp_orig['Nombre']))
+        _dic_ac_gyp = dict(zip(b.df_gyp_orig['SBS'].astype(str).str.strip(),
+                                b.df_gyp_orig['Asset Class']))
+
+        _filas_cmp = []
+        for nombre_inf, fondo_key in _FONDO_KEYS.items():
+            _crudo = dic_pct[fondo_key]                  # tal cual QEST, sin ajustar
+            _renorm = b.qest_pct_universo[nombre_inf]    # con CPP restado, FUT fuera, /suma
+            _gyp = _dic_gyp[nombre_inf]
+            _todos = set(_gyp) | set(_renorm) | {k for k, v in _crudo.items()
+                                                  if isinstance(v, (int, float))}
+            for sbs in _todos:
+                if sbs in _META_QEST:
+                    continue
+                v_gyp = _gyp.get(sbs)
+                v_crudo = _crudo.get(sbs)
+                v_crudo = v_crudo if isinstance(v_crudo, (int, float)) else None
+                v_renorm = _renorm.get(sbs)
+                if not (v_gyp or 0) and not (v_crudo or 0) and not (v_renorm or 0):
+                    continue   # sin peso en ninguna de las 3 vistas: no aporta al comparativo
+                _clasif = _clasificar_qest_col(sbs)
+                _filas_cmp.append({
+                    'Fondo': 'F' + nombre_inf[-1],
+                    'SBS': sbs,
+                    'Nombre': _dic_nombre_gyp.get(sbs) or (_clasif[1] if _clasif else None),
+                    'Asset Class': _dic_ac_gyp.get(sbs) or (_clasif[0] if _clasif else None),
+                    'Sinónimo QEST': dic_sinonimo.get(sbs),
+                    'INF_G&P (original)': v_gyp,
+                    'INF_QEST (crudo)': v_crudo,
+                    'INF_QEST (post-renormalización)': v_renorm,
+                    'Dif. G&P vs QEST crudo (pp)': (None if v_gyp is None or v_crudo is None
+                                                     else round((v_crudo - v_gyp) * 100, 4)),
+                    'Dif. QEST crudo vs renorm. (pp)': (None if v_crudo is None or v_renorm is None
+                                                         else round((v_renorm - v_crudo) * 100, 4)),
+                })
+        df_cmp = pd.DataFrame(_filas_cmp).sort_values(['Fondo', 'SBS']).reset_index(drop=True)
+        arch_cmp = D_INTERMEDIO + f'{b.anio}{b.mes} Comparativo GyP vs QEST.xlsx'
+        with pd.ExcelWriter(arch_cmp, engine='openpyxl') as _w:
+            df_cmp.to_excel(_w, sheet_name='Detalle', index=False)
+        print(f"[COMPARATIVO G&P vs QEST] -> {arch_cmp}  ({len(df_cmp)} filas)")
+    except Exception as e:
+        print(f"[AVISO] No se pudo generar el comparativo G&P vs QEST (no crítico): {e}")
+```
+
+---
+
+**Qué vas a ver en el Excel nuevo** (`{AAAAMM} Comparativo GyP vs QEST.xlsx`, una fila por SBS×Fondo):
+- `Dif. G&P vs QEST crudo (pp)` — la brecha real entre lo que decía G&P y lo que dice QEST tal cual. Esta es la que importa para juzgar si cambiar de fuente es grave o no.
+- `Dif. QEST crudo vs renorm. (pp)` — debería salir chiquita y pareja (~0.2-0.7pp, consistente con el cuadre de 100.2%-100.7% que ya viste), confirmando que la renormalización ya no distorsiona nada.
+- `Sinónimo QEST` te deja filtrar/ver directo cuáles filas son CPP (signo invertido) para que no te confunda ver un valor negativo en la columna renormalizada.
