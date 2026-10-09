@@ -1,0 +1,73 @@
+Encontrado. Confirmo exactamente lo que sospechaba: tu script actual **nunca tuvo el parche CPP/FUT** — nadie lo insertó. Lo que sí tiene es el código del Comparativo (que lo necesita), por eso truena.
+
+Mirando tu archivo línea por línea:
+- Línea 630-644: el bucle que construye `serie` suma TODO sin excluir FUT ni voltear el signo de CPP. Por eso `n=1092` y `suma=1.11…`.
+- No existe en ningún lado la línea que crea `dic_sinonimo`. Por eso el `NameError`.
+- Bonus (no es la causa del error, pero hay que limpiarlo): las líneas 693-694 y 696-697 son literalmente el mismo `print` pegado dos veces — por eso ves el mensaje duplicado en el log.
+
+Aquí van los 2 arreglos con Ctrl+F:
+
+**Cambio 1 — agrega `dic_sinonimo` y aplica el filtro CPP/FUT antes de sumar**
+
+Busca este bloque exacto (líneas ~635-644):
+
+```python
+    b.qest_pct_universo = {}   # fondo -> {col_qest: peso renormalizado} (incluye CAJ/DPZ/CPC/CPP)
+    print("\n--- [QEST %Fondo] Cuadre antes de renormalizar (esperado ~1.0) ---")
+    for nombre_inf, fondo_key in _FONDO_KEYS.items():
+        serie = {k: v for k, v in dic_pct[fondo_key].items()
+                 if k not in _META_QEST and isinstance(v, (int, float))}
+        suma = sum(serie.values())
+        print(f"  {fondo_key}: suma={suma:.6f} (n={len(serie)}) -> renormalizando a 1.0")
+        if suma <= 0:
+            raise ProcesoError(f"QEST DQ_IN: suma de %Fondo de {fondo_key} = {suma} (se esperaba ~1.0).")
+        b.qest_pct_universo[nombre_inf] = {k: v / suma for k, v in serie.items()}
+```
+
+Y reemplázalo por:
+
+```python
+    dic_sinonimo = qin_pct.loc[13].to_dict()   # fila 14 (1-idx) de DQ_IN: categoría contable por columna (CAJ/CPC/CPP/CDBCR/FUT/...)
+
+    b.qest_pct_universo = {}   # fondo -> {col_qest: peso renormalizado} (incluye CAJ/DPZ/CPC/CPP)
+    print("\n--- [QEST %Fondo] Cuadre antes de renormalizar (esperado ~1.0) ---")
+    for nombre_inf, fondo_key in _FONDO_KEYS.items():
+        serie = {}
+        _excluidos_fut = 0
+        for k, v in dic_pct[fondo_key].items():
+            if k in _META_QEST or not isinstance(v, (int, float)):
+                continue
+            sinon = dic_sinonimo.get(k)
+            if sinon == 'FUT':      # notional de derivados, no capital real -> fuera del cuadre
+                _excluidos_fut += 1
+                continue
+            if sinon == 'CPP':      # cuenta por pagar: pasivo almacenado en positivo -> signo invertido
+                v = -v
+            serie[k] = v
+        suma = sum(serie.values())
+        print(f"  {fondo_key}: suma={suma:.6f} (n={len(serie)}, FUT excluidos={_excluidos_fut}) -> renormalizando a 1.0")
+        if suma <= 0:
+            raise ProcesoError(f"QEST DQ_IN: suma de %Fondo de {fondo_key} = {suma} (se esperaba ~1.0).")
+        b.qest_pct_universo[nombre_inf] = {k: v / suma for k, v in serie.items()}
+```
+
+**Cambio 2 — quita el print duplicado**
+
+Busca (líneas ~693-697):
+
+```python
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+```
+
+Y déjalo en una sola:
+
+```python
+    print(f"[QEST %Fondo] +{len(filas_nuevas)} posiciones CAJ/DPZ/CPC/CPP/CDBCR agregadas "
+          f"(aparecerán en Descartes como 'Asset Class no admitido' — esperado, no es error).")
+```
+
+Con esto el cuadre debería volver a `n=821` y mostrar `FUT excluidos=271`, y el Comparativo ya no debería fallar porque `dic_sinonimo` existe antes de que se use en la línea 736. El resto del script (filas nuevas, sustitución INF, exclusión de Dejados de lado) ya está bien, no toques nada más.
