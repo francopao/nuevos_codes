@@ -1,0 +1,278 @@
+# ==============================================================================
+# SECCIÓN 13c: Z PUROS PARA EL DASHBOARD (CSV) Y EXCEL DE EMPRESAS EN FOCO
+# ==============================================================================
+# Z puro = el Z de UN múltiplo en UNA ventana: (valor de hoy - promedio de la
+# ventana) / desviación. Es lo que calcula Z() antes de ponderar. Aquí se guarda
+# tal cual, sin pesos.
+#   1) CSV diario con TODAS las empresas del portafolio (input del dashboard nuevo).
+#   2) Excel para lectura humana, solo con las empresas de Z_FOCO_EMPRESAS.
+# El peer group no se exporta: solo entra como insumo del basket.
+
+from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+# --- Parámetros (se cambian aquí, no en main) ---------------------------------
+Z_FOCO_EMPRESAS = ["BAP US Equity", "ALICORC1 PE Equity"]   # lista editable (tickers del portafolio)
+Z_DECIMALES     = 4                                          # decimales de los Z en el CSV
+
+# --- Constantes internas ------------------------------------------------------
+_ZN_ORDEN = ["Trail_PE", "Fwd_PE", "Trail_PS", "Fwd_PS",
+             "Trail_PB", "Fwd_PB", "Trail_EVEBITDA", "Fwd_EVEBITDA"]   # mismo orden que PESOS_*
+_ZN_COD = {"Trail_PE": "PE", "Trail_PS": "PS", "Trail_PB": "PB", "Trail_EVEBITDA": "EVEBITDA"}
+_ZN_ETQ = {"Trail_PE": "P/E", "Trail_PS": "P/S", "Trail_PB": "P/B", "Trail_EVEBITDA": "EV/EBITDA"}
+
+
+def _zn_config() -> tuple:
+    """
+    Ventanas y múltiplos que hoy tienen peso distinto de 0.
+    Retorna (ventanas, multiplos): ventanas = [(años, peso)], multiplos = [nombre interno].
+    """
+    ventanas = [(a, p) for a, p in zip(ANIOS_Z, PESOS_Z) if p != 0]
+    if not ventanas:
+        raise ValueError("PESOS_Z no tiene ninguna ventana con peso distinto de 0.")
+    mults = [m for i, m in enumerate(_ZN_ORDEN) if PESOS_FINAN[i] != 0 or PESOS_EX_FINAN[i] != 0]
+    if not mults:
+        raise ValueError("PESOS_FINAN y PESOS_EX_FINAN no tienen ningún múltiplo con peso distinto de 0.")
+    faltan = [m for m in mults if m not in _ZN_COD]
+    if faltan:
+        raise ValueError(f"Hay pesos en múltiplos no soportados por esta sección: {faltan}. "
+                         "Solo se exportan los múltiplos Trail.")
+    return ventanas, mults
+
+
+def _zn_portafolio(grupos: list, matriz_multiplos: dict) -> list:
+    """
+    Empresas del portafolio = las que tienen múltiplos y basket (el peer group no entra).
+    Retorna lista de (ticker, nombre_grupo, es_fin, basket_def_de_la_empresa, matriz_baskets_del_grupo).
+    """
+    port = []
+    for nombre, lista, bdef, mbk, es_fin in grupos:
+        for t in lista:
+            if t in matriz_multiplos and t in mbk and t in bdef:
+                port.append((t, nombre, es_fin, bdef[t], mbk))
+    return port
+
+
+def _zn_calcular(t: str, es_fin: bool, basket_def: list, mbk: dict, matriz_multiplos: dict,
+                 datos_bbg: dict, mults: list, ventanas: list, dpa: int, con_niveles: bool) -> dict:
+    """
+    Calcula los Z puros de UNA empresa sobre toda su historia.
+
+    Parámetros
+    ----------
+    t, es_fin, basket_def : ticker, si es financiera y lista de comparables de su basket.
+    mbk : {empresa: DataFrame del basket} del grupo (Matriz_Baskets_*).
+    mults, ventanas : salida de _zn_config().
+    dpa : días hábiles por año (260 en producción).
+    con_niveles : True agrega ratio, basket y cobertura (solo para el Excel de foco).
+
+    Retorna dict con:
+      zA, zB : {(múltiplo, índice_ventana): Serie} Z puro absoluto y vs basket.
+      w_m    : {múltiplo: peso del múltiplo según el sector} (0 = no aplica, ej. EV/EBITDA en bancos).
+      ratio, bk, cob : solo si con_niveles (ratio empresa/basket, múltiplo del basket y
+               cobertura = parte del peso del basket que SÍ tiene ese múltiplo).
+
+    Supuestos: misma Z() del script (ventana completa o NaN, desviación muestral n-1) y
+    ratio = múltiplo empresa / múltiplo basket, igual que main(). Los inf pasan a NaN.
+    """
+    mu = matriz_multiplos[t][mults]
+    ratio = matriz_multiplos[t].div(mbk[t])[mults]
+    pm = PESOS_FINAN if es_fin else PESOS_EX_FINAN
+    w_m = {m: pm[_ZN_ORDEN.index(m)] for m in mults}
+    zA, zB = {}, {}
+    for k, (a, _) in enumerate(ventanas):
+        za = Z(mu.copy(), a, dpa)
+        zb = Z(ratio.copy(), a, dpa)
+        for m in mults:
+            zA[(m, k)] = za[m].replace([np.inf, -np.inf], np.nan)
+            zB[(m, k)] = zb[m].replace([np.inf, -np.inf], np.nan)
+    out = {"zA": zA, "zB": zB, "w_m": w_m}
+    if con_niveles:
+        fechas = mu.index
+        comps = [c for c in basket_def
+                 if c in matriz_multiplos and c in datos_bbg and "CUR_MKT_CAP" in datos_bbg[c].columns]
+        if comps:
+            mc = pd.DataFrame({c: datos_bbg[c]["CUR_MKT_CAP"].reindex(fechas) for c in comps})
+            pesos = mc.div(mc.sum(axis=1), axis=0)
+            cob = pd.DataFrame({
+                m: (pesos * pd.DataFrame({c: matriz_multiplos[c][m].reindex(fechas) for c in comps}).notna()).sum(axis=1)
+                for m in mults})
+        else:
+            cob = pd.DataFrame(0.0, index=fechas, columns=mults)
+        out.update({"ratio": ratio.replace([np.inf, -np.inf], np.nan),
+                    "bk": mbk[t].reindex(fechas)[mults], "cob": cob})
+    return out
+
+
+def _zn_anios(a) -> str:
+    """Texto de la ventana: '1 año', '3 años'."""
+    return f"{a:g} año" if a == 1 else f"{a:g} años"
+
+
+def exportar_z_dashboard_csv(matriz_multiplos: dict, grupos: list, ruta_csv: str,
+                             dias_por_anio: int = 260, decimales: int = Z_DECIMALES) -> None:
+    """
+    Exporta los Z puros diarios de todas las empresas del portafolio a un CSV en formato
+    largo (una fila por fecha y ticker). Input del dashboard nuevo.
+
+    Columnas: Fecha, Ticker, Z_Abs_<mult>_<años>A (absoluto) y Z_Basket_<mult>_<años>A (vs basket).
+    Siempre salen las mismas columnas; EV/EBITDA queda vacío en financieras (no aplica).
+    Una celda vacía = ventana sin historia completa o dato faltante. Se omiten las filas sin
+    ningún Z. Los Z se redondean a 'decimales'.
+
+    Parámetros
+    ----------
+    grupos : lista de (nombre_grupo, empresas_portafolio, basket_def, matriz_baskets, es_finan).
+    dias_por_anio : 260 en producción (solo se cambia para pruebas con poca historia).
+    """
+    print("  → Exportando CSV de Z puros (dashboard)...")
+    try:
+        ventanas, mults = _zn_config()
+        port = _zn_portafolio(grupos, matriz_multiplos)
+        if not port:
+            raise ValueError("No hay empresas del portafolio con múltiplos y basket.")
+        cols_abs = [f"Z_Abs_{_ZN_COD[m]}_{a:g}A" for m in mults for a, _ in ventanas]
+        cols_bsk = [f"Z_Basket_{_ZN_COD[m]}_{a:g}A" for m in mults for a, _ in ventanas]
+        partes = []
+        for t, g, es_fin, bdef, mbk in port:
+            d = _zn_calcular(t, es_fin, bdef, mbk, matriz_multiplos, {}, mults, ventanas,
+                             dias_por_anio, con_niveles=False)
+            claves = [(m, k) for m in mults for k in range(len(ventanas))]
+            df = pd.DataFrame(
+                {**{c: d["zA"][cl] for c, cl in zip(cols_abs, claves)},
+                 **{c: d["zB"][cl] for c, cl in zip(cols_bsk, claves)}})
+            for (m, k), ca, cb in zip(claves, cols_abs, cols_bsk):
+                if d["w_m"][m] == 0:                     # el múltiplo no aplica a este sector
+                    df[ca] = np.nan
+                    df[cb] = np.nan
+            df = df.dropna(how="all")
+            df.insert(0, "Ticker", t)
+            partes.append(df.rename_axis("Fecha").reset_index())
+        csv_final = pd.concat(partes, ignore_index=True)
+        csv_final["Fecha"] = pd.to_datetime(csv_final["Fecha"]).dt.strftime("%Y-%m-%d")
+        try:
+            csv_final.to_csv(ruta_csv, index=False, encoding="utf-8-sig",
+                             float_format=f"%.{int(decimales)}f")
+        except PermissionError:
+            raise PermissionError(f"No se pudo guardar '{os.path.basename(ruta_csv)}': "
+                                  "está abierto en Excel. Ciérralo y vuelve a ejecutar.")
+        print(f"  ✓ CSV de Z puros: {ruta_csv}")
+        print(f"    → {len(port)} empresas | {len(csv_final):,} filas | {len(cols_abs) + len(cols_bsk)} columnas de Z")
+    except Exception as e:
+        import traceback
+        print(f"  ✗ Error al exportar el CSV de Z puros: {e}")
+        traceback.print_exc()
+
+
+def exportar_z_foco_excel(matriz_multiplos: dict, datos_bbg: dict, grupos: list, ruta_salida: str,
+                          empresas_foco=None, dias_por_anio: int = 260) -> None:
+    """
+    Excel de lectura humana: una hoja por empresa en foco, todas las fechas con Z, más reciente arriba.
+
+    Cada hoja trae, de izquierda a derecha: Fecha | Z vs basket | Z absoluto | Ratio empresa/basket |
+    Múltiplo del basket | Cobertura del basket. Los Z van agrupados por múltiplo (corto, medio, largo).
+    En financieras no aparece EV/EBITDA. Celda vacía = sin historia completa o dato faltante.
+
+    Parámetros
+    ----------
+    empresas_foco : lista de tickers del portafolio (si es None usa Z_FOCO_EMPRESAS).
+    dias_por_anio : 260 en producción.
+    """
+    print("  → Exportando Excel de Z puros de empresas en foco...")
+    try:
+        empresas_foco = Z_FOCO_EMPRESAS if empresas_foco is None else empresas_foco
+        ventanas, mults = _zn_config()
+        port = {p[0]: p for p in _zn_portafolio(grupos, matriz_multiplos)}
+        foco = []
+        for t in empresas_foco:
+            if t in port:
+                foco.append(t)
+            else:
+                print(f"  ⚠ {t}: no es empresa del portafolio (con basket), se omite.")
+        if not foco:
+            raise ValueError("Ninguna empresa de Z_FOCO_EMPRESAS está en el portafolio.")
+
+        wb = Workbook(write_only=True)
+        f_grp = Font(bold=True, color="1F2937")
+        f_hdr = Font(bold=True, color="FFFFFF")
+        fill_hdr = PatternFill("solid", fgColor="374151")
+        fills_grp = {"zb": PatternFill("solid", fgColor="DBEAFE"), "za": PatternFill("solid", fgColor="E5E7EB"),
+                     "rt": PatternFill("solid", fgColor="DBEAFE"), "bk": PatternFill("solid", fgColor="E5E7EB"),
+                     "cb": PatternFill("solid", fgColor="DBEAFE")}
+        usados = set()
+        resumen = []
+        for t in foco:
+            _, grupo, es_fin, bdef, mbk = port[t]
+            d = _zn_calcular(t, es_fin, bdef, mbk, matriz_multiplos, datos_bbg, mults, ventanas,
+                             dias_por_anio, con_niveles=True)
+            aplica = [m for m in mults if d["w_m"][m] != 0]
+            # Columnas: (grupo, encabezado, serie, tipo)
+            cols = []
+            for m in aplica:
+                for k, (a, _) in enumerate(ventanas):
+                    cols.append(("zb", "Z vs basket", f"{_ZN_ETQ[m]} {_zn_anios(a)}", d["zB"][(m, k)]))
+            for m in aplica:
+                for k, (a, _) in enumerate(ventanas):
+                    cols.append(("za", "Z absoluto", f"{_ZN_ETQ[m]} {_zn_anios(a)}", d["zA"][(m, k)]))
+            for m in aplica:
+                cols.append(("rt", "Ratio empresa / basket", _ZN_ETQ[m], d["ratio"][m]))
+            for m in aplica:
+                cols.append(("bk", "Múltiplo del basket", _ZN_ETQ[m], d["bk"][m]))
+            cols.append(("cb", "Cobertura del basket (1 = 100%)", "Mínima entre múltiplos",
+                         d["cob"][aplica].min(axis=1)))
+            tabla = pd.concat([c[3] for c in cols], axis=1)
+            tabla.columns = range(len(cols))
+            n_z = sum(1 for c in cols if c[0] in ("zb", "za"))
+            tabla = tabla[tabla.iloc[:, :n_z].notna().any(axis=1)]      # desde el primer día con algún Z
+            tabla = tabla.sort_index(ascending=False)                    # más reciente arriba
+            if tabla.empty:
+                print(f"  ⚠ {t}: sin ningún Z calculable con {dias_por_anio} días por año.")
+            val = tabla.replace([np.inf, -np.inf], np.nan).round(Z_DECIMALES).to_numpy(dtype=float)
+
+            base = "".join(ch for ch in t.split()[0] if ch not in '[]:*?/\\')[:28] or "Empresa"
+            nom, n = base, 2
+            while nom in usados:
+                nom, n = f"{base}_{n}", n + 1
+            usados.add(nom)
+            ws = wb.create_sheet(nom)
+            ws.freeze_panes = "B3"
+            ws.column_dimensions["A"].width = 12
+            for j in range(len(cols)):
+                ws.column_dimensions[get_column_letter(j + 2)].width = 13
+            # Fila 1: nombre del grupo de columnas (en la primera columna de cada grupo)
+            fila1 = [WriteOnlyCell(ws, value="")]
+            previo = None
+            for tipo, titulo, _, _ in cols:
+                c = WriteOnlyCell(ws, value=titulo if tipo != previo else None)
+                c.font, c.fill = f_grp, fills_grp[tipo]
+                fila1.append(c)
+                previo = tipo
+            ws.append(fila1)
+            # Fila 2: encabezados
+            fila2 = []
+            for texto in ["Fecha"] + [c[2] for c in cols]:
+                c = WriteOnlyCell(ws, value=texto)
+                c.font, c.fill = f_hdr, fill_hdr
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                fila2.append(c)
+            ws.append(fila2)
+            for fecha, fila in zip(tabla.index, val):
+                cf = WriteOnlyCell(ws, value=pd.Timestamp(fecha).to_pydatetime())
+                cf.number_format = "dd/mm/yyyy"
+                ws.append([cf] + [None if v != v else float(v) for v in fila])
+            resumen.append((nom, t, len(tabla), len(cols)))
+
+        try:
+            wb.save(ruta_salida)
+        except PermissionError:
+            raise PermissionError(f"No se pudo guardar '{os.path.basename(ruta_salida)}': "
+                                  "está abierto en Excel. Ciérralo y vuelve a ejecutar.")
+        print(f"  ✓ Excel de empresas en foco: {ruta_salida}")
+        for nom, t, nf, nc in resumen:
+            print(f"    → hoja {nom} ({t}): {nf:,} fechas x {nc} columnas")
+    except Exception as e:
+        import traceback
+        print(f"  ✗ Error al exportar el Excel de empresas en foco: {e}")
+        traceback.print_exc()
