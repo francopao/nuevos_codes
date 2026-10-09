@@ -1,0 +1,809 @@
+# -*- coding: utf-8 -*-
+"""
+ZODA_Monitor_Dashboard.py
+=========================
+Dashboard HTML autónomo (Plotly) que replica el "Monitor Z Valuation RVL" SIN depender de la hoja Monitor.
+
+Entradas : ZODA.xlsm  -> hojas BD, Parametría, Baskets
+           QEST_BD.xlsm -> hoja DQ_IN, filas %Fondo (tamaño de burbuja en pbs del fondo)
+           Z_ventanas.csv (OPCIONAL) -> habilita los pesos de Z editables en vivo
+Salida   : Monitor_ZODA_Dashboard_<fecha>.html (se abre en cualquier navegador, sin internet)
+
+Formato de Z_ventanas.csv (una fila por fecha-serie):  Fecha, Ticker, Marco, Z_1Y, Z_3Y, Z_5Y, Z_10Y
+    Ticker = alias (BAP) o ticker BBG (BAP US Equity)  ·  Marco = ABS | BASKET | BVL
+    Z_kY   = suma de (peso del múltiplo x Z puro del múltiplo en la ventana kY), SIN el peso de ventana.
+    Se exige que 0.33*Z_1Y + 0.33*Z_3Y + 0.33*Z_5Y reproduzca la columna de BD (tolerancia TOL_Z_VENTANAS);
+    la serie que no cuadre se descarta y el dashboard avisa (no muestra números que no cuadran con BD).
+
+Notas de diseño:
+  * Posición de la burbuja: última carga de QEST_BD con fecha <= fecha elegida (se rotula en pantalla).
+  * Consolidado (pbs) = suma(%Fondo_f x PAT_f) / suma(PAT_f) x 10,000, con PAT_f = columna VALFON de la fila PxQ.
+  * Con pesos por defecto (33/33/33/0) se muestra el Z de BD tal cual. El motor usa 0.33 x 3 = 99%;
+    al editar pesos (suma exacta 100%) el Z recalculado queda ~1.01x respecto de BD. Es esperado.
+"""
+
+# %% 0. IMPORTS
+import json
+import re
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from openpyxl import load_workbook
+
+# %% 1. CONFIGURACIÓN (lo único que normalmente se toca)
+CARPETA = Path(r"C:\Users\usuario\OneDrive\Desktop\AFP INTEGRA\Docs privados")
+RUTA_ZODA = CARPETA / "ZODA.xlsm"
+RUTA_QEST = Path(r"Z:\Benchmarking\QEST_BD.xlsm")
+RUTA_Z_VENTANAS = CARPETA / "Z_ventanas.csv"      # opcional
+CARPETA_SALIDA = CARPETA
+
+# Universo y orden de la tabla (equivale a Monitor!A9:A37)
+UNIVERSO = ["BAP", "IFS", "BBVA", "UNACEM", "PACAS", "AENZA", "FERREY", "CORARE", "BVN", "CVERDE",
+            "NEXAPE", "NEXAUS", "MINSUR", "VOLCAN", "ORYGEN", "PLUZEN", "ENGIE", "ALICORP", "INRETAIL",
+            "AUNA", "ELCOMEI", "HOC", "BVL", "IPSA", "IBOV", "MEXBOL", "COLCAP", "SCCO", "HBM"]
+REFERENCIA = {"HOC", "BVL", "IPSA", "IBOV", "MEXBOL", "COLCAP", "SCCO", "HBM"}   # burbuja fija si no hay posición
+INDICES = {"BVL", "IPSA", "IBOV", "MEXBOL", "COLCAP"}                            # solo tienen Z vs MXLA (sin columna BVL)
+FECHA_INICIAL = "ultima"          # "ultima" o "AAAA-MM-DD"
+MODO_INICIAL = "Basket"           # "Basket" o "Indice"
+REPLICAR_TOGGLE_MONITOR = False   # True = como el Excel (el toggle solo aplica a las primeras 20 filas)
+N_FILAS_ESCALA_C = 20             # el Excel parte la escala de color de la 3ra columna en 20 + 9 filas
+ESCALA_C_PARTIDA = True
+
+# Chart
+EJE_X = (-1.2, 3.0)               # rango base (Excel); se amplía solo si los datos lo necesitan
+EJE_Y = (-2.5, 4.0)
+Z_EXTREMO = 5.0                   # |Z| mayor => outlier: se dibuja en el borde (no deforma los ejes)
+REF_RATIO = 0.10                  # tamaño de las burbujas de referencia = 10% de la mayor posición
+COLOR_BURBUJA = "#00B0F0"
+COLOR_ESPECIAL = {"BVL": "#FF0000", "IPSA": "#000000", "IBOV": "#000000", "MEXBOL": "#000000", "COLCAP": "#000000"}
+
+# Validación de Z_ventanas.csv contra BD
+PESOS_Z_MOTOR = {"1Y": 0.33, "3Y": 0.33, "5Y": 0.33, "10Y": 0.0}
+TOL_Z_VENTANAS = 0.01
+
+
+# %% 2. LECTURA DE DATOS
+def _txt(v):
+    """Texto limpio de una celda; None si está vacía/NaN. Los enteros guardados como float se devuelven sin '.0'."""
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if np.isnan(v):
+            return None
+        if v.is_integer():
+            return str(int(v))
+    s = str(v).strip()
+    return s or None
+
+
+def _num(v):
+    """Celda -> float; texto, vacío, bool o error de Excel -> NaN."""
+    if isinstance(v, bool) or v is None:
+        return np.nan
+    if isinstance(v, (int, float, np.number)):
+        return float(v)
+    return np.nan
+
+
+def _celda(fila, j):
+    """Valor de la columna j de una fila (None si la fila es más corta)."""
+    return fila[j] if (fila is not None and j is not None and j < len(fila)) else None
+
+
+def _lista(a, nd=4):
+    """Array -> lista JSON: NaN/inf -> None, redondeo a nd decimales."""
+    return [None if not np.isfinite(v) else round(float(v), nd) for v in a]
+
+
+def leer_parametria(wb):
+    """Hoja Parametría (B:G desde la fila 5) -> DataFrame por ticker con columnas z, basket, indice, bbg, sbs."""
+    reg = []
+    for f in wb["Parametría"].iter_rows(min_row=5, max_row=150, min_col=2, max_col=7, values_only=True):
+        if _txt(f[0]) is None:
+            continue
+        reg.append(dict(ticker=_txt(f[0]), z=_txt(f[1]), basket=_txt(f[2]), indice=_txt(f[3]),
+                        bbg=_txt(f[4]), sbs=_txt(f[5])))
+    if not reg:
+        raise ValueError("Parametría vacía o con layout distinto al esperado (B5:G).")
+    df = pd.DataFrame(reg)
+    if df["ticker"].duplicated().any():
+        raise ValueError(f"Tickers duplicados en Parametría: {df.loc[df['ticker'].duplicated(), 'ticker'].tolist()}")
+    return df.set_index("ticker")
+
+
+def leer_bd(wb):
+    """Hoja BD -> DataFrame (índice = Fecha sin hora, columnas = series Z), float. Valida fechas únicas y válidas."""
+    it = wb["BD"].iter_rows(values_only=True)
+    cab = [_txt(c) for c in next(it)]
+    filas = [f for f in it if f and f[0] is not None]
+    df = pd.DataFrame(filas)
+    df = df.iloc[:, :len(cab)]
+    df.columns = cab[:df.shape[1]]
+    df = df.loc[:, [c for c in df.columns if c is not None]]
+    if df.columns.duplicated().any():
+        warnings.warn("BD tiene columnas duplicadas; se conserva la primera de cada una.")
+        df = df.loc[:, ~df.columns.duplicated()]
+    fechas = pd.to_datetime(df["Fecha"], errors="coerce")
+    if fechas.isna().any():
+        raise ValueError(f"BD tiene {int(fechas.isna().sum())} fechas no válidas en la columna A.")
+    if fechas.duplicated().any():
+        raise ValueError("BD tiene fechas duplicadas en la columna A.")
+    df = df.drop(columns="Fecha").apply(lambda s: s.map(_num)).astype(float)
+    df.index = fechas.dt.normalize()
+    return df.sort_index()
+
+
+def leer_baskets(wb):
+    """Hoja Baskets -> {ticker BBG: [comparables]} (solo informativo, para el hover)."""
+    out = {}
+    for f in wb["Baskets"].iter_rows(min_row=1, max_row=80, max_col=19, values_only=True):
+        if _txt(f[1]) is None or _txt(f[0]) is None:
+            continue
+        out.setdefault(_txt(f[1]), [c.replace(" Equity", "") for c in (_txt(x) for x in f[2:]) if c])
+    return out
+
+
+def leer_qest(ruta, codigos):
+    """Posiciones desde DQ_IN de QEST_BD.xlsm usando las filas %Fondo (con respaldo PxQ/PAT si faltara %Fondo).
+
+    Parámetros: ruta (xlsm), codigos ({ticker: código SBS}).
+    Retorna: ({'fechas': [ISO], 'bps': {'CON'|'F1'|'F2'|'F3': {ticker: [pbs por fecha]}}}, avisos).
+    Supuestos: cabecera con 'Fondo' en col. A y 'SBS' en la col. de claves; claves 'IN-FONDOx_%Fondo_dd/mm/aaaa';
+    PAT de cada fondo = columna VALFON de la fila PxQ. %Fondo es fracción (0.0293 = 293 pbs).
+    """
+    wb = load_workbook(ruta, read_only=True, data_only=True)
+    try:
+        if "DQ_IN" not in wb.sheetnames:
+            raise KeyError(f"QEST_BD no tiene hoja 'DQ_IN' (hojas: {wb.sheetnames}).")
+        filas = list(wb["DQ_IN"].iter_rows(values_only=True))
+    finally:
+        wb.close()
+    ih = next((i for i, f in enumerate(filas)
+               if f and _txt(f[0]) == "Fondo" and "SBS" in [_txt(c) for c in f[:8]]), None)
+    if ih is None:
+        raise ValueError("DQ_IN (QEST_BD): no se encontró la fila de cabecera (Fondo ... SBS).")
+    cab = [_txt(c) for c in filas[ih]]
+    c_clave = cab.index("SBS")
+    c_pat = cab.index("VALFON") if "VALFON" in cab else c_clave + 1
+    col = {}
+    for j, c in enumerate(cab):
+        if c and j > c_clave:
+            col.setdefault(c, j)
+    patron = re.compile(r"^IN-FONDO([123])_(%Fondo|PxQ)_(\d{2})/(\d{2})/(\d{4})$")
+    reg = {}
+    for f in filas:
+        k = _txt(_celda(f, c_clave))
+        m = patron.match(k) if k else None
+        if m:
+            reg[(int(m.group(1)), m.group(2), pd.Timestamp(int(m.group(5)), int(m.group(4)), int(m.group(3))))] = f
+    avisos, snaps = [], []
+    for d in sorted({k[2] for k in reg}):
+        if any((f, "PxQ", d) not in reg for f in (1, 2, 3)):
+            avisos.append(f"QEST_BD {d:%d/%m/%Y}: faltan filas PxQ de algún fondo; fecha omitida.")
+            continue
+        aum = [_num(_celda(reg[(f, "PxQ", d)], c_pat)) for f in (1, 2, 3)]
+        if not all(np.isfinite(a) and a > 0 for a in aum):
+            avisos.append(f"QEST_BD {d:%d/%m/%Y}: PAT (VALFON) inválido en algún fondo; fecha omitida.")
+            continue
+        snaps.append((d, aum))
+    if not snaps:
+        raise ValueError("DQ_IN (QEST_BD) no tiene fechas completas (PxQ de los 3 fondos).")
+    bps = {k: {} for k in ("CON", "F1", "F2", "F3")}
+    for t, c in codigos.items():
+        j = col.get(c) if c else None
+        if j is None:
+            avisos.append(f"{t}: código SBS {c} no está en DQ_IN de QEST_BD; sin posición.")
+        for k in bps:
+            bps[k][t] = []
+        for d, aum in snaps:
+            p = []
+            for fi, f in enumerate((1, 2, 3)):
+                if j is None:
+                    p.append(0.0)
+                    continue
+                v = _num(_celda(reg.get((f, "%Fondo", d)), j))
+                if not np.isfinite(v):                                   # respaldo: PxQ / PAT
+                    x = _num(_celda(reg[(f, "PxQ", d)], j))
+                    v = x / aum[fi] if np.isfinite(x) else 0.0
+                p.append(max(v, 0.0))
+            bps["CON"][t].append(round(sum(pi * ai for pi, ai in zip(p, aum)) / sum(aum) * 1e4, 2))
+            for fi in range(3):
+                bps["F%d" % (fi + 1)][t].append(round(p[fi] * 1e4, 2))
+    return {"fechas": [d.strftime("%Y-%m-%d") for d, _ in snaps], "bps": bps}, avisos
+
+
+def construir_series(bd, param, baskets):
+    """Arma, por ticker del UNIVERSO, las series Z (a = vs historia, b = vs Basket, i = vs BVL) y su metadata.
+
+    Retorna (Z, meta, avisos): Z[t] = {'a','b','i'} arrays alineados a bd.index (Z == 0 exacto se trata como faltante).
+    """
+    faltan = [t for t in UNIVERSO if t not in param.index]
+    if faltan:
+        raise KeyError(f"Tickers del UNIVERSO sin fila en Parametría: {faltan}")
+    Z, meta, avisos = {}, {}, []
+
+    def serie(c):
+        if c is None or c not in bd.columns:
+            return None
+        a = bd[c].to_numpy(float).copy()
+        a[a == 0] = np.nan
+        return a
+
+    for i, t in enumerate(UNIVERSO):
+        p = param.loc[t]
+        a = serie(p["z"])
+        if a is None:
+            raise KeyError(f"{t}: la columna Z '{p['z']}' no existe en BD.")
+        b = serie(p["basket"])
+        if b is None:
+            avisos.append(f"{t}: columna Basket '{p['basket']}' no existe en BD; sin Y.")
+            b = np.full(len(bd), np.nan)
+        iz = serie(p["indice"]) if (t not in INDICES and (not REPLICAR_TOGGLE_MONITOR or i < N_FILAS_ESCALA_C)) else None
+        Z[t] = {"a": a, "b": b, "i": iz}
+        meta[t] = {"ref": t in REFERENCIA, "hasIdx": iz is not None,
+                   "color": COLOR_ESPECIAL.get(t, COLOR_BURBUJA), "comps": baskets.get(p["bbg"], []) if p["bbg"] else []}
+    return Z, meta, avisos
+
+
+def leer_z_ventanas(ruta, fechas, Z):
+    """Lee Z_ventanas.csv y conserva solo las series que reproducen BD con los pesos del motor.
+
+    Retorna ({ticker: {'a'|'b'|'i': {'1Y': lista, ...}}} o None, avisos).
+    """
+    ruta = Path(ruta)
+    if not ruta.exists():
+        return None, [f"No existe {ruta.name}: pesos de Z fijos (los de BD)."]
+    df = pd.read_csv(ruta)
+    df.columns = [str(c).strip() for c in df.columns]
+    req = ["Fecha", "Ticker", "Marco", "Z_1Y", "Z_3Y", "Z_5Y", "Z_10Y"]
+    falt = [c for c in req if c not in df.columns]
+    if falt:
+        raise ValueError(f"{ruta.name}: faltan columnas {falt}.")
+    df["Fecha"] = pd.to_datetime(df["Fecha"]).dt.normalize()
+    marco = {"ABS": "a", "ABSOLUTO": "a", "BASKET": "b", "BVL": "i", "INDICE": "i"}
+    df["Marco"] = df["Marco"].astype(str).str.strip().str.upper().map(marco)
+    df["Ticker"] = df["Ticker"].astype(str).str.strip()
+    df = df[df["Marco"].notna()]
+    idx = pd.DatetimeIndex(fechas)
+    out, avisos = {}, []
+    for (t, fr), g in df.groupby(["Ticker", "Marco"]):
+        if t not in Z or Z[t].get(fr) is None:
+            continue
+        g = g.drop_duplicates("Fecha").set_index("Fecha").reindex(idx)
+        W = {k: pd.to_numeric(g["Z_" + k], errors="coerce").to_numpy(float) for k in PESOS_Z_MOTOR}
+        rec = sum(PESOS_Z_MOTOR[k] * W[k] for k in PESOS_Z_MOTOR if PESOS_Z_MOTOR[k] > 0)
+        ok = np.isfinite(rec) & np.isfinite(Z[t][fr])
+        if ok.sum() < 30:
+            avisos.append(f"Z_ventanas {t}/{fr}: sin traslape suficiente con BD; serie descartada.")
+            continue
+        ult = np.where(ok)[0][-250:]
+        dif = float(np.abs(rec[ult] - Z[t][fr][ult]).max())
+        if dif > TOL_Z_VENTANAS:
+            avisos.append(f"Z_ventanas {t}/{fr}: no reproduce BD (dif. máx. {dif:.3f} > {TOL_Z_VENTANAS}); descartada.")
+            continue
+        out.setdefault(t, {})[fr] = {k: _lista(W[k]) for k in W}
+    return (out or None), avisos
+
+
+# %% 3. PLANTILLA HTML (CSS + JS)
+PLANTILLA = r'''<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor Z Valuation RVL</title>
+<style>
+:root{--navy:#002060;--sky:#ABE3FF;--ok:#1B7F3B;--bad:#C00000;--bd:#7F7F7F}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:#000;font-family:"Aptos Narrow",Calibri,Arial,sans-serif;font-size:14px}
+.wrap{max-width:1680px;margin:0 auto;padding:14px 16px 28px}
+.b1{background:var(--navy);color:#fff;font-weight:700;font-size:20px;padding:6px 12px}
+.b2{background:var(--sky);font-weight:700;font-size:16px;padding:5px 12px}
+.ctl{display:flex;flex-wrap:wrap;gap:12px 26px;align-items:flex-start;margin:12px 0 10px}
+.g{display:flex;flex-direction:column;gap:4px;position:relative}
+.lb{font-weight:700;font-size:12px;color:#333}
+button{font-family:inherit;font-size:13px;cursor:pointer}
+.cal{display:flex;gap:4px;align-items:center}
+.nv{border:1px solid var(--bd);background:#fff;padding:5px 9px}
+.nv:disabled{opacity:.35;cursor:default}
+.dt{border:1px solid var(--bd);background:#fff;padding:5px 12px;font-weight:700;min-width:118px}
+.pop{position:absolute;top:56px;left:0;z-index:30;width:272px;background:#fff;border:1px solid var(--bd);
+ box-shadow:0 6px 18px rgba(0,0,0,.2);padding:8px}
+.pop[hidden]{display:none}
+.ch{display:flex;gap:4px;align-items:center;justify-content:space-between;margin-bottom:6px}
+.ch select{font-family:inherit;font-size:13px;padding:2px}
+.ch button{border:1px solid var(--bd);background:#fff;padding:3px 8px}
+.ch button:disabled{opacity:.3;cursor:default}
+.cw,.cg{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center}
+.cw span{font-size:11px;font-weight:700;color:#555;padding:2px 0}
+.cd{border:1px solid transparent;background:#fff;padding:5px 0}
+.cd:hover:not(:disabled){border-color:var(--navy);background:#EAF6FF}
+.cd.off{color:#BBB;background:#F4F4F4;cursor:not-allowed;text-decoration:line-through}
+.cd.sel{background:var(--navy);color:#fff;font-weight:700}
+.cf{margin-top:6px;text-align:right}
+.cf button{border:1px solid var(--bd);background:#fff;padding:3px 8px}
+.seg{display:flex}
+.seg button{border:1px solid var(--bd);background:#fff;padding:5px 12px;margin-left:-1px}
+.seg button.on{background:var(--navy);color:#fff;font-weight:700}
+.wrow{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.wrow label{display:flex;align-items:center;gap:4px;font-weight:700}
+.wrow input{width:78px;padding:4px 6px;font-family:inherit;font-size:13px;border:1px solid var(--bd);text-align:right}
+.wrow input:disabled{background:#EEE;color:#777}
+.wrow button{border:1px solid var(--bd);background:#fff;padding:4px 10px}
+.wrow button:disabled{opacity:.4;cursor:default}
+.tot{font-weight:700;padding:4px 8px;border:1px solid var(--bd)}
+.tot.ok{color:var(--ok);border-color:var(--ok)}
+.tot.bad{color:var(--bad);border-color:var(--bad)}
+.msg{font-size:12px;color:#444;max-width:520px}
+.msg.bad{color:var(--bad)}
+.main{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+.left{flex:0 0 auto}
+.right{flex:1 1 640px;min-width:0}
+#chart{width:100%;height:790px}
+table{border-collapse:collapse;font-size:13px}
+th,td{border:1px solid #BFBFBF;padding:4px 8px;text-align:center;white-space:nowrap}
+thead th{background:#fff;border-color:var(--bd);font-weight:700;padding:6px 8px}
+th.t{text-align:left;font-weight:700;min-width:92px;background:#fff}
+td{min-width:92px}
+#notas{font-size:12px;color:#444;margin-top:6px}
+#notas ul{margin:4px 0 0 18px;padding:0}
+</style></head><body>
+<div class="wrap">
+<div class="b1">Monitor Z Valuation RVL</div>
+<div class="b2">Valuation Relativo Acciones RVL</div>
+<div class="ctl">
+  <div class="g"><span class="lb">Fecha (solo días hábiles de BD)</span>
+    <div class="cal"><button class="nv" id="dPrev" title="Día hábil anterior">&#9664;</button>
+      <button class="dt" id="dBtn"></button>
+      <button class="nv" id="dNext" title="Día hábil siguiente">&#9654;</button></div>
+    <div class="pop" id="dPop" hidden></div></div>
+  <div class="g"><span class="lb">Benchmark RV (eje Y)</span>
+    <div class="seg" id="sModo"><button data-v="Basket">Basket</button><button data-v="Indice">Indice (BVL)</button></div></div>
+  <div class="g"><span class="lb">Tamaño de burbuja: exposición en pbs</span>
+    <div class="seg" id="sFondo"><button data-v="CON">Consolidado</button><button data-v="F1">Fondo 1</button>
+      <button data-v="F2">Fondo 2</button><button data-v="F3">Fondo 3</button></div></div>
+  <div class="g"><span class="lb">Weights of Z-Dist (%) &mdash; deben sumar exactamente 100%</span>
+    <div class="wrow">
+      <label>1Y <input type="number" id="w1Y" step="0.01" min="0" max="100"></label>
+      <label>3Y <input type="number" id="w3Y" step="0.01" min="0" max="100"></label>
+      <label>5Y <input type="number" id="w5Y" step="0.01" min="0" max="100"></label>
+      <label>10Y <input type="number" id="w10Y" step="0.01" min="0" max="100"></label>
+      <span class="tot" id="wTot"></span>
+      <button id="wNorm">Normalizar a 100%</button><button id="wReset">Restablecer</button></div>
+    <div class="msg" id="wMsg"></div></div>
+</div>
+<div class="main">
+  <div class="left"><table id="tbl"></table></div>
+  <div class="right"><div id="chart"></div><div id="notas"></div></div>
+</div>
+</div>
+<script type="application/json" id="datos">__DATOS__</script>
+__PLOTLY__
+<script>
+(function(){
+'use strict';
+const D=JSON.parse(document.getElementById('datos').textContent);
+const C=D.cfg, F=D.fechas, NF=F.length;
+const FONT='"Aptos Narrow",Calibri,Arial,sans-serif';
+const WIN=['1Y','3Y','5Y','10Y'];
+const DEFW={'1Y':100/3,'3Y':100/3,'5Y':100/3,'10Y':0};
+const LIVE=!!D.zw&&Object.keys(D.zw).length>0;
+const FSET=new Set(F);
+const FONDO_LBL={CON:'Consolidado',F1:'Fondo 1',F2:'Fondo 2',F3:'Fondo 3'};
+const MESES=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Setiembre','Octubre','Noviembre','Diciembre'];
+const $=id=>document.getElementById(id);
+const isNum=v=>typeof v==='number'&&isFinite(v);
+const dmy=iso=>iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4);
+const fx=v=>isNum(v)?v.toFixed(2)+'x':'n.d.';
+const S={idx:NF-1,modo:C.modo_inicial,fondo:'CON',W:Object.assign({},DEFW),def:true,dirty:false};
+{const k=F.indexOf(C.fecha_inicial); if(k>=0)S.idx=k;}
+
+/* ---------- cálculo ---------- */
+function posSnap(idx){
+  const P=D.pos; if(!P||!P.fechas.length) return {i:-1,tipo:'none'};
+  const d=F[idx]; let k=-1;
+  for(let i=0;i<P.fechas.length;i++){ if(P.fechas[i]<=d) k=i; }
+  if(k>=0) return {i:k,tipo:P.fechas[k]===d?'exacta':'previa'};
+  return {i:0,tipo:'posterior'};
+}
+function zLive(t,fr,idx){
+  const w=D.zw&&D.zw[t]&&D.zw[t][fr]; if(!w) return null;
+  let s=0;
+  for(const k of WIN){
+    const p=S.W[k]/100; if(p===0) continue;
+    const a=w[k]; const v=a?a[idx]:null;
+    if(!isNum(v)) return NaN;
+    s+=p*v;
+  }
+  return s;
+}
+function computeRows(){
+  const idx=S.idx, ps=posSnap(idx), P=D.pos, rows=[];
+  for(const t of D.tickers){
+    const m=D.meta[t], z=D.z[t];
+    const fr=(S.modo==='Indice'&&m.hasIdx)?'i':'b';
+    let x,y,noLive=false;
+    if(S.def||!LIVE){ x=z.a[idx]; y=z[fr][idx]; }
+    else { x=zLive(t,'a',idx); y=zLive(t,fr,idx); if(x===null||y===null){noLive=true;x=NaN;y=NaN;} }
+    if(!isNum(x)) x=NaN; if(!isNum(y)) y=NaN;
+    let bps=0;
+    if(P&&ps.i>=0&&P.bps[S.fondo]&&P.bps[S.fondo][t]) bps=P.bps[S.fondo][t][ps.i]||0;
+    rows.push({t:t,x:x,y:y,bps:bps,size:bps>0?bps:(m.ref?1:0),esRef:(bps<=0&&m.ref),noLive:noLive,
+               comps:m.comps,color:m.color,pin:false,dir:''});
+  }
+  return rows;
+}
+
+/* ---------- tabla ---------- */
+function colorScale(vals){
+  const v=vals.filter(isNum).sort((a,b)=>a-b);
+  if(!v.length) return vals.map(()=>'#fff');
+  const lo=v[0],hi=v[v.length-1];
+  const med=(v.length%2)?v[(v.length-1)/2]:(v[v.length/2-1]+v[v.length/2])/2;
+  const c1=[99,190,123],c2=[255,235,132],c3=[248,105,107];
+  return vals.map(x=>{
+    if(!isNum(x)) return '#fff';
+    let c;
+    if(hi===lo) c=c2;
+    else if(x<=med){const t=med===lo?0:(x-lo)/(med-lo); c=c1.map((a,i)=>a+(c2[i]-a)*t);}
+    else{const t=hi===med?1:(x-med)/(hi-med); c=c2.map((a,i)=>a+(c3[i]-a)*t);}
+    return 'rgb('+c.map(Math.round).join(',')+')';
+  });
+}
+function renderTable(rows){
+  const cx=colorScale(rows.map(r=>r.x));
+  const k=C.escala_c_partida?Math.min(C.n_filas_escala_c,rows.length):rows.length;
+  const cy=colorScale(rows.slice(0,k).map(r=>r.y)).concat(colorScale(rows.slice(k).map(r=>r.y)));
+  const enc=S.modo==='Indice'?'Stock/BVL':'Stock/Basket';
+  let h='<thead><tr><th class="t"></th><th>Stock</th><th>'+enc+'</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+='<tr><th class="t">'+r.t+'</th><td style="background:'+cx[i]+'">'+fx(r.x)+'</td><td style="background:'+cy[i]+'">'+fx(r.y)+'</td></tr>';
+  });
+  $('tbl').innerHTML=h+'</tbody>';
+}
+
+/* ---------- chart ---------- */
+const _cv=document.createElement('canvas').getContext('2d');
+_cv.font='12px Calibri, Arial, sans-serif';
+const tw=s=>_cv.measureText(s).width;
+
+function axisRange(base,vals){
+  let lo=base[0],hi=base[1];
+  if(vals.length){
+    const mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals),pad=Math.max(0.3,(mx-mn)*0.04);
+    lo=Math.min(lo,mn-pad); hi=Math.max(hi,mx+pad);
+  }
+  lo=Math.min(lo,0); hi=Math.max(hi,0);
+  const span=hi-lo, step=span<=9?0.5:(span<=18?1:2);
+  return {lo:Math.floor(lo/step+1e-9)*step, hi:Math.ceil(hi/step-1e-9)*step, step:step};
+}
+function hoverTxt(r){
+  const L=['<b>'+r.t+'</b>','Z stock: '+fx(r.x),'Z '+(S.modo==='Indice'&&D.meta[r.t].hasIdx?'BVL':'Basket')+': '+fx(r.y)];
+  L.push(r.esRef?'Burbuja de referencia (sin posición)':'Exposición: '+r.bps.toFixed(1)+' pbs ('+FONDO_LBL[S.fondo]+')');
+  if(r.pin) L.push('<i>Fuera de rango: dibujado en el borde '+r.dir+'</i>');
+  if(S.modo==='Basket'&&r.comps&&r.comps.length){
+    L.push('<i>Comparables:</i>');
+    for(let i=0;i<r.comps.length;i+=4) L.push(r.comps.slice(i,i+4).join(', '));
+  }
+  return L.join('<br>');
+}
+function placeLabels(items,pw,ph){
+  const placed=[], out={};
+  const dirs=[[0,1],[0,-1],[1,0],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]];
+  const rings=[0,12,26,44,66];
+  const order=items.slice().sort((a,b)=>b.r-a.r);
+  for(const it of order){
+    const w=tw(it.txt)+4, h=15; let best=null;
+    for(let ri=0;ri<rings.length&&!(best&&best.coll===0);ri++){
+      for(const dd of dirs){
+        const n=Math.hypot(dd[0],dd[1]), d=it.r+3+rings[ri];
+        const cx=it.X+dd[0]/n*d+(dd[0]!==0?Math.sign(dd[0])*w/2:0);
+        const cy=it.Y+dd[1]/n*d+(dd[1]!==0?Math.sign(dd[1])*h/2:0);
+        const rc={x0:cx-w/2,x1:cx+w/2,y0:cy-h/2,y1:cy+h/2};
+        let coll=50*(Math.max(0,-rc.x0)+Math.max(0,rc.x1-pw)+Math.max(0,-rc.y0)+Math.max(0,rc.y1-ph));
+        for(const p of placed){
+          const ox=Math.min(rc.x1,p.x1)-Math.max(rc.x0,p.x0), oy=Math.min(rc.y1,p.y1)-Math.max(rc.y0,p.y0);
+          if(ox>-2&&oy>-1) coll+=500+Math.max(0,ox)*Math.max(0,oy);
+        }
+        for(const o of items){
+          if(o===it) continue;
+          const nx=Math.max(rc.x0,Math.min(o.X,rc.x1)), ny=Math.max(rc.y0,Math.min(o.Y,rc.y1));
+          if(Math.hypot(o.X-nx,o.Y-ny)<o.r) coll+=400;
+        }
+        const cost=coll+ri*0.5;
+        if(!best||cost<best.cost) best={cost:cost,coll:coll,cx:cx,cy:cy,rc:rc,leader:ri>0};
+        if(coll===0) break;
+      }
+    }
+    placed.push(best.rc); out[it.key]=best;
+  }
+  return out;
+}
+function drawChart(rows){
+  const div=$('chart');
+  const W=Math.max(560,div.clientWidth), H=Math.max(560,div.clientHeight);
+  const M={l:68,r:28,t:84,b:66}, pw=W-M.l-M.r, ph=H-M.t-M.b;
+  const pts=rows.filter(r=>isNum(r.x)&&isNum(r.y)&&r.size>0);
+  const ZE=C.z_extremo;
+  pts.forEach(r=>{ r.ext=Math.abs(r.x)>ZE||Math.abs(r.y)>ZE; });
+  const normal=pts.filter(r=>!r.ext);
+  const reales=pts.filter(r=>!r.esRef).map(r=>r.size);
+  const realMax=reales.length?Math.max.apply(null,reales):100;
+  pts.forEach(r=>{ r.sz=r.esRef?C.ref_ratio*realMax:r.size; });
+  const maxSz=Math.max(1,Math.max.apply(null,pts.map(r=>r.sz).concat([1])));
+  const Dmax=Math.max(36,Math.min(92,0.11*Math.min(pw,ph)));
+  const MINR=3.5;
+  pts.forEach(r=>{ r.r=Math.max(MINR,Dmax*Math.sqrt(r.sz/maxSz)/2); });
+  let xr=axisRange(C.eje_x,normal.map(r=>r.x)), yr=axisRange(C.eje_y,normal.map(r=>r.y));
+  for(let it=0;it<3;it++){
+    const sx=pw/(xr.hi-xr.lo), sy=ph/(yr.hi-yr.lo);
+    let e0=0,e1=0,e2=0,e3=0;
+    normal.forEach(r=>{
+      const px=(r.x-xr.lo)*sx, py=(r.y-yr.lo)*sy;
+      e0=Math.max(e0,r.r+6-px); e1=Math.max(e1,r.r+6-(pw-px));
+      e2=Math.max(e2,r.r+6-py); e3=Math.max(e3,r.r+6-(ph-py));
+    });
+    if(e0<=0&&e1<=0&&e2<=0&&e3<=0) break;
+    xr={lo:xr.lo-Math.ceil(e0/sx/xr.step)*xr.step, hi:xr.hi+Math.ceil(e1/sx/xr.step)*xr.step, step:xr.step};
+    yr={lo:yr.lo-Math.ceil(e2/sy/yr.step)*yr.step, hi:yr.hi+Math.ceil(e3/sy/yr.step)*yr.step, step:yr.step};
+  }
+  const sx=pw/(xr.hi-xr.lo), sy=ph/(yr.hi-yr.lo), ins=0.045;
+  const xa=xr.lo+ins*(xr.hi-xr.lo), xb=xr.hi-ins*(xr.hi-xr.lo), ya=yr.lo+ins*(yr.hi-yr.lo), yb=yr.hi-ins*(yr.hi-yr.lo);
+  pts.forEach(r=>{
+    r.xp=r.x; r.yp=r.y; r.pin=false; r.dir='';
+    if(r.ext){
+      if(r.x>xb){r.xp=xb;r.dir+='→';} else if(r.x<xa){r.xp=xa;r.dir+='←';}
+      if(r.y>yb){r.yp=yb;r.dir+='↑';} else if(r.y<ya){r.yp=ya;r.dir+='↓';}
+      r.pin=r.dir!=='';
+    }
+    r.X=(r.xp-xr.lo)*sx; r.Y=ph-(r.yp-yr.lo)*sy;
+    r.key=r.t; r.txt=r.t+(r.pin?' '+r.dir:'');
+  });
+  const lab=placeLabels(pts,pw,ph);
+  const ann=pts.map(r=>{
+    const b=lab[r.key];
+    const base={x:r.xp,y:r.yp,text:r.txt,xanchor:'center',yanchor:'middle',font:{family:FONT,size:12,color:r.pin?'#C00000':'#000'}};
+    if(b.leader){
+      return Object.assign(base,{showarrow:true,ax:b.cx-r.X,ay:b.cy-r.Y,axref:'pixel',ayref:'pixel',arrowhead:0,
+                                 arrowwidth:0.8,arrowcolor:'#7F7F7F',standoff:Math.round(r.r)});
+    }
+    return Object.assign(base,{showarrow:false,xshift:b.cx-r.X,yshift:-(b.cy-r.Y)});
+  });
+  if(!pts.length) ann.push({xref:'paper',yref:'paper',x:0.5,y:0.5,text:'Sin datos para la fecha seleccionada',showarrow:false,font:{family:FONT,size:16}});
+  const sorted=pts.slice().sort((a,b)=>b.sz-a.sz);
+  const trace={type:'scatter',mode:'markers',x:sorted.map(r=>r.xp),y:sorted.map(r=>r.yp),
+    marker:{size:sorted.map(r=>r.sz),sizemode:'area',sizeref:2*maxSz/(Dmax*Dmax),sizemin:MINR,
+            color:sorted.map(r=>r.color),symbol:sorted.map(r=>r.pin?'diamond':'circle'),opacity:0.9,
+            line:{color:'#ffffff',width:1}},
+    customdata:sorted.map(hoverTxt),hovertemplate:'%{customdata}<extra></extra>',cliponaxis:false};
+  const ax=(rg,tit)=>({range:[rg.lo,rg.hi],tick0:0,dtick:rg.step,showgrid:false,zeroline:true,zerolinecolor:'#BFBFBF',
+    zerolinewidth:1,showline:false,ticks:'',ticksuffix:'x',tickformat:'.1f',automargin:false,
+    tickfont:{family:FONT,size:13,color:'#000'},title:{text:tit,font:{family:FONT,size:15,color:'#000'},standoff:12}});
+  const layout={width:W,height:H,margin:M,paper_bgcolor:'#fff',plot_bgcolor:'#fff',showlegend:false,hovermode:'closest',
+    title:{text:'<b>Valuation Relativo Acciones RVL<br>(Z-scores: PE, PB, PS, EV/EBITDA)</b>',x:0.5,xanchor:'center',
+           y:0.975,yanchor:'top',font:{family:FONT,size:18,color:'#000'}},
+    xaxis:ax(xr,'Valuation relativo stock'),
+    yaxis:ax(yr,'Valuation relativo '+(S.modo==='Indice'?'Indice':'Basket')),
+    annotations:ann,hoverlabel:{align:'left',font:{family:FONT,size:13}}};
+  Plotly.react(div,[trace],layout,{displaylogo:false,displayModeBar:'hover',responsive:false,
+    modeBarButtonsToRemove:['lasso2d','select2d'],toImageButtonOptions:{format:'png',filename:'Monitor_Z_Valuation',scale:2}});
+}
+
+/* ---------- notas ---------- */
+function renderNotes(rows){
+  const n=[], ps=posSnap(S.idx), P=D.pos;
+  if(ps.tipo==='none') n.push('QEST_BD sin posiciones: no hay burbujas de exposición.');
+  else{
+    const f=dmy(P.fechas[ps.i]);
+    if(ps.tipo==='exacta') n.push('Posiciones QEST_BD al '+f+' ('+FONDO_LBL[S.fondo]+').');
+    else if(ps.tipo==='previa') n.push('Posiciones QEST_BD del '+f+' (última carga disponible a la fecha) — '+FONDO_LBL[S.fondo]+'.');
+    else n.push('<b>No hay carga de QEST_BD anterior a la fecha elegida:</b> se muestran las posiciones del '+f+' (posterior).');
+  }
+  const sinZ=rows.filter(r=>!r.noLive&&(!isNum(r.x)||!isNum(r.y))).map(r=>r.t);
+  if(sinZ.length) n.push('Sin dato de Z en la fecha (no se dibujan): '+sinZ.join(', ')+'.');
+  const nl=rows.filter(r=>r.noLive).map(r=>r.t);
+  if(nl.length) n.push('Sin Z por ventana para recalcular con los pesos elegidos (n.d.): '+nl.join(', ')+'.');
+  const ceros=rows.filter(r=>isNum(r.x)&&isNum(r.y)&&r.size<=0&&!r.esRef).map(r=>r.t);
+  if(ceros.length) n.push('Sin posición en la fecha (aparecen en la tabla, sin burbuja): '+ceros.join(', ')+'.');
+  const pins=rows.filter(r=>r.pin).map(r=>r.t+' (X '+fx(r.x)+', Y '+fx(r.y)+')');
+  if(pins.length) n.push('Valores fuera de rango, dibujados en el borde (&diams;, texto rojo): '+pins.join('; ')+'.');
+  if(!S.def&&LIVE) n.push('Pesos de Z personalizados: '+WIN.map(k=>k+' '+S.W[k].toFixed(2)+'%').join(' · ')+'.');
+  if(S.def) n.push('Z mostrado: BD con pesos del motor (1Y 33% · 3Y 33% · 5Y 33% · 10Y 0%).');
+  if(D.avisos&&D.avisos.length) D.avisos.forEach(a=>n.push(a));
+  $('notas').innerHTML='<b>Notas</b><ul>'+n.map(x=>'<li>'+x+'</li>').join('')+'</ul>';
+}
+
+/* ---------- pesos ---------- */
+function readDraft(){
+  if(!S.dirty) return Object.assign({},DEFW);
+  const d={}; WIN.forEach(k=>{const v=parseFloat($('w'+k).value); d[k]=isFinite(v)?v:NaN;}); return d;
+}
+function showDefaultInputs(){ WIN.forEach(k=>{$('w'+k).value=DEFW[k].toFixed(2);}); }
+function onWeightInput(){
+  S.dirty=true;
+  const d=readDraft(), tot=$('wTot'), msg=$('wMsg');
+  const bad=WIN.some(k=>!isFinite(d[k])||d[k]<0||d[k]>100);
+  const dec=WIN.some(k=>isFinite(d[k])&&Math.abs(d[k]*100-Math.round(d[k]*100))>1e-6);
+  const cents=WIN.reduce((s,k)=>s+(isFinite(d[k])?Math.round(d[k]*100):0),0);
+  tot.textContent='Σ = '+(cents/100).toFixed(2)+'%';
+  if(bad||dec||cents!==10000){
+    tot.className='tot bad'; msg.className='msg bad';
+    msg.textContent=bad?'Cada peso debe ser un número entre 0 y 100.':(dec?'Máximo 2 decimales por peso.':
+      (cents<10000?'Faltan '+((10000-cents)/100).toFixed(2)+'% para llegar a 100%.':'Sobran '+((cents-10000)/100).toFixed(2)+'% sobre 100%.'))+
+      ' Se mantienen los últimos pesos válidos.';
+    return;
+  }
+  tot.className='tot ok'; msg.className='msg'; msg.textContent='Pesos válidos (100.00%): el dashboard se actualizó en vivo.';
+  S.W={}; WIN.forEach(k=>{S.W[k]=d[k];});
+  S.def=WIN.every(k=>Math.abs(S.W[k]-DEFW[k])<1e-9);
+  renderAll();
+}
+function normalizar(){
+  const d=readDraft(), v=WIN.map(k=>(isFinite(d[k])&&d[k]>0)?d[k]:0), s=v.reduce((a,b)=>a+b,0);
+  if(s<=0) return;
+  const c=v.map(x=>Math.round(x/s*10000));
+  c[c.indexOf(Math.max.apply(null,c))]+=10000-c.reduce((a,b)=>a+b,0);
+  WIN.forEach((k,i)=>{$('w'+k).value=(c[i]/100).toFixed(2);});
+  onWeightInput();
+}
+function resetWeights(){
+  S.dirty=false; S.W=Object.assign({},DEFW); S.def=true; showDefaultInputs();
+  $('wTot').textContent='Σ = 100.00%'; $('wTot').className='tot ok'; $('wMsg').className='msg';
+  $('wMsg').textContent='Pesos por defecto del motor.'; renderAll();
+}
+function initWeights(){
+  showDefaultInputs();
+  $('wTot').textContent='Σ = 100.00%'; $('wTot').className='tot ok';
+  if(!LIVE){
+    WIN.forEach(k=>{$('w'+k).disabled=true;}); $('wNorm').disabled=true; $('wReset').disabled=true;
+    $('wMsg').textContent='Edición bloqueada: falta Z_ventanas.csv (Z por ventana) validado contra BD. Se muestra el Z de BD con pesos 33/33/33/0.';
+    return;
+  }
+  $('wMsg').textContent='Pesos por defecto del motor. Edita cualquier casillero: se recalcula en vivo cuando la suma es exactamente 100%.';
+  WIN.forEach(k=>$('w'+k).addEventListener('input',onWeightInput));
+  $('wNorm').addEventListener('click',normalizar); $('wReset').addEventListener('click',resetWeights);
+}
+
+/* ---------- calendario ---------- */
+const cal={vy:0,vm:0};
+const ymKey=(y,m)=>y*12+m;
+function drawCal(){
+  const y=cal.vy,m=cal.vm,minY=+F[0].slice(0,4),minM=+F[0].slice(5,7)-1,maxY=+F[NF-1].slice(0,4),maxM=+F[NF-1].slice(5,7)-1;
+  let h='<div class="ch"><button data-a="pm"'+(ymKey(y,m)<=ymKey(minY,minM)?' disabled':'')+'>&#9664;</button>';
+  h+='<select id="cMes">'+MESES.map((n,i)=>'<option value="'+i+'"'+(i===m?' selected':'')+'>'+n+'</option>').join('')+'</select>';
+  h+='<select id="cAnio">';
+  for(let a=minY;a<=maxY;a++) h+='<option value="'+a+'"'+(a===y?' selected':'')+'>'+a+'</option>';
+  h+='</select><button data-a="nm"'+(ymKey(y,m)>=ymKey(maxY,maxM)?' disabled':'')+'>&#9654;</button></div>';
+  h+='<div class="cw">'+['L','M','M','J','V','S','D'].map(x=>'<span>'+x+'</span>').join('')+'</div><div class="cg">';
+  const off=(new Date(Date.UTC(y,m,1)).getUTCDay()+6)%7, dim=new Date(Date.UTC(y,m+1,0)).getUTCDate();
+  for(let i=0;i<off;i++) h+='<span></span>';
+  for(let d=1;d<=dim;d++){
+    const iso=y+'-'+String(m+1).padStart(2,'0')+'-'+String(d).padStart(2,'0'), en=FSET.has(iso);
+    h+='<button class="cd'+(en?'':' off')+(iso===F[S.idx]?' sel':'')+'"'+(en?' data-d="'+iso+'"':' disabled')+'>'+d+'</button>';
+  }
+  h+='</div><div class="cf"><button data-a="last">Última fecha</button></div>';
+  $('dPop').innerHTML=h;
+}
+function openCal(){ const d=F[S.idx]; cal.vy=+d.slice(0,4); cal.vm=+d.slice(5,7)-1; drawCal(); $('dPop').hidden=false; }
+function closeCal(){ $('dPop').hidden=true; }
+function setIdx(i){ if(i<0||i>=NF) return; S.idx=i; renderAll(); }
+function initCal(){
+  $('dBtn').addEventListener('click',()=>{ $('dPop').hidden?openCal():closeCal(); });
+  $('dPrev').addEventListener('click',()=>setIdx(S.idx-1));
+  $('dNext').addEventListener('click',()=>setIdx(S.idx+1));
+  $('dPop').addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b||b.disabled) return;
+    const a=b.getAttribute('data-a'), d=b.getAttribute('data-d');
+    if(d){ setIdx(F.indexOf(d)); closeCal(); return; }
+    if(a==='pm'){ cal.vm--; if(cal.vm<0){cal.vm=11;cal.vy--;} drawCal(); }
+    else if(a==='nm'){ cal.vm++; if(cal.vm>11){cal.vm=0;cal.vy++;} drawCal(); }
+    else if(a==='last'){ setIdx(NF-1); closeCal(); }
+  });
+  $('dPop').addEventListener('change',e=>{
+    if(e.target.id==='cMes') cal.vm=+e.target.value; else if(e.target.id==='cAnio') cal.vy=+e.target.value; else return;
+    const minK=ymKey(+F[0].slice(0,4),+F[0].slice(5,7)-1), maxK=ymKey(+F[NF-1].slice(0,4),+F[NF-1].slice(5,7)-1);
+    const k=Math.max(minK,Math.min(maxK,ymKey(cal.vy,cal.vm))); cal.vy=Math.floor(k/12); cal.vm=k%12; drawCal();
+  });
+  document.addEventListener('click',e=>{ if(!$('dPop').hidden&&!$('dPop').contains(e.target)&&e.target!==$('dBtn')) closeCal(); });
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeCal(); });
+}
+
+/* ---------- orquestación ---------- */
+function segInit(id,key){
+  $(id).addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; S[key]=b.getAttribute('data-v'); renderAll(); });
+}
+function renderAll(){
+  $('dBtn').textContent=dmy(F[S.idx]);
+  $('dPrev').disabled=S.idx<=0; $('dNext').disabled=S.idx>=NF-1;
+  document.querySelectorAll('#sModo button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===S.modo));
+  document.querySelectorAll('#sFondo button').forEach(b=>b.classList.toggle('on',b.getAttribute('data-v')===S.fondo));
+  const rows=computeRows();
+  renderTable(rows); drawChart(rows); renderNotes(rows);
+}
+initCal(); initWeights(); segInit('sModo','modo'); segInit('sFondo','fondo');
+let _t=null;
+window.addEventListener('resize',()=>{ clearTimeout(_t); _t=setTimeout(renderAll,150); });
+renderAll();
+})();
+</script>
+</body></html>
+'''
+
+
+# %% 4. GENERACIÓN
+def generar_dashboard():
+    """Pipeline completo: lee ZODA y QEST_BD, arma los datos y escribe el HTML autónomo.
+
+    Retorna la ruta del HTML. Lanza excepciones explícitas si falta un archivo, hoja, columna o fecha.
+    """
+    for r in (RUTA_ZODA, RUTA_QEST):
+        if not Path(r).exists():
+            raise FileNotFoundError(f"No se encontró: {r}")
+    avisos = []
+    print("Leyendo ZODA (BD, Parametría, Baskets)…")
+    wb = load_workbook(RUTA_ZODA, read_only=True, data_only=True)
+    try:
+        faltan = [h for h in ("BD", "Parametría") if h not in wb.sheetnames]
+        if faltan:
+            raise KeyError(f"Faltan hojas en {Path(RUTA_ZODA).name}: {faltan}")
+        param = leer_parametria(wb)
+        bd = leer_bd(wb)
+        baskets = leer_baskets(wb) if "Baskets" in wb.sheetnames else {}
+    finally:
+        wb.close()
+    fechas = bd.index
+    print(f"  BD: {len(fechas)} fechas ({fechas.min():%d/%m/%Y} a {fechas.max():%d/%m/%Y})")
+
+    Z, meta, av = construir_series(bd, param, baskets)
+    avisos += av
+
+    print("Leyendo posiciones (QEST_BD · DQ_IN · %Fondo)…")
+    pos, av = leer_qest(RUTA_QEST, {t: param.loc[t, "sbs"] for t in UNIVERSO})
+    avisos += av
+    print(f"  QEST_BD: cargas de posiciones al {', '.join(pd.Timestamp(d).strftime('%d/%m/%Y') for d in pos['fechas'])}")
+
+    zw, av = leer_z_ventanas(RUTA_Z_VENTANAS, fechas, Z)
+    avisos += av
+    print("  Pesos de Z en vivo: " + ("ACTIVOS" if zw else "bloqueados (sin Z_ventanas.csv válido)"))
+
+    fecha_ini = fechas.max() if str(FECHA_INICIAL).lower() == "ultima" else pd.Timestamp(FECHA_INICIAL)
+    if fecha_ini not in fechas:
+        previas = fechas[fechas <= fecha_ini]
+        if len(previas) == 0:
+            raise ValueError(f"FECHA_INICIAL {fecha_ini:%d/%m/%Y} es anterior a toda la BD.")
+        avisos.append(f"FECHA_INICIAL {fecha_ini:%d/%m/%Y} no es día hábil de BD; se usó {previas.max():%d/%m/%Y}.")
+        fecha_ini = previas.max()
+
+    datos = {
+        "fechas": [d.strftime("%Y-%m-%d") for d in fechas],
+        "tickers": UNIVERSO,
+        "meta": meta,
+        "z": {t: {"a": _lista(Z[t]["a"]), "b": _lista(Z[t]["b"]),
+                  "i": (_lista(Z[t]["i"]) if Z[t]["i"] is not None else None)} for t in UNIVERSO},
+        "zw": zw,
+        "pos": pos,
+        "avisos": avisos,
+        "cfg": {"modo_inicial": MODO_INICIAL, "fecha_inicial": fecha_ini.strftime("%Y-%m-%d"),
+                "eje_x": list(EJE_X), "eje_y": list(EJE_Y), "z_extremo": Z_EXTREMO, "ref_ratio": REF_RATIO,
+                "escala_c_partida": ESCALA_C_PARTIDA, "n_filas_escala_c": N_FILAS_ESCALA_C},
+    }
+    js = json.dumps(datos, ensure_ascii=False, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
+    try:
+        from plotly.offline import get_plotlyjs
+        plotly_tag = "<script>" + get_plotlyjs() + "</script>"
+    except Exception as exc:
+        warnings.warn(f"No se pudo incrustar plotly.js ({exc}); se usará CDN (requiere internet).")
+        plotly_tag = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
+    html = PLANTILLA.replace("__DATOS__", js).replace("__PLOTLY__", plotly_tag)
+    Path(CARPETA_SALIDA).mkdir(parents=True, exist_ok=True)
+    ruta = Path(CARPETA_SALIDA) / f"Monitor_ZODA_Dashboard_{fechas.max():%Y%m%d}.html"
+    ruta.write_text(html, encoding="utf-8")
+    print(f"[OK] HTML: {ruta}")
+    for a in avisos:
+        print("  *", a)
+    return ruta
+
+
+# %% 5. EJECUCIÓN
+if __name__ == "__main__":
+    generar_dashboard()
