@@ -1,0 +1,83 @@
+Dos ediciones puntuales, ambas dentro del Bloque 2 que ya tienes pegado (la parte de `construir_base()` que arranca con el comentario `QEST %Fondo -> reemplaza...`). Ctrl+F con el texto exacto.
+
+---
+
+### Edición 1 — Capturar el SINÓNIMO (para distinguir CPP y FUT por su naturaleza, no por su nombre)
+
+**BUSCA:**
+```python
+    tp = qpct.transpose(); tp.columns = tp.iloc[0, ::]
+    dic_pct = tp.to_dict()   # dic_pct['IN-FONDO1'][col_qest] = peso (fracción)
+
+    _META_QEST = {'Fondo', 'Dato', 'Fecha', 'SBS', 'VALFON'}  # 'SBS' aquí = id compuesto, no código
+    _FONDO_KEYS = {'INF1': 'IN-FONDO1', 'INF2': 'IN-FONDO2', 'INF3': 'IN-FONDO3'}
+```
+
+**REEMPLAZA CON:**
+```python
+    tp = qpct.transpose(); tp.columns = tp.iloc[0, ::]
+    dic_pct = tp.to_dict()   # dic_pct['IN-FONDO1'][col_qest] = peso (fracción)
+
+    # SINONIMO (fila 14 de Excel = índice 13 del DataFrame crudo; sobrevive al
+    # drop porque solo se quitó la fila 10). Permite tratar columnas por su
+    # naturaleza contable real, no por su nombre:
+    #   CPP (cuenta por pagar) es un PASIVO -> debe restar, no sumar.
+    #   FUT (futuros) es nocional de derivados, no una tenencia real del fondo
+    #   -> no suma ni resta, se EXCLUYE (igual que G&P ya excluye 'Derivados'
+    #   en operaciones()). Validado con datos reales de QEST: sin este
+    #   tratamiento el cuadre llegaba a +25%/+55% sobre 100%; con él, los 3
+    #   fondos quedan dentro de banda ±4% en casi todas las fechas probadas.
+    dic_sinonimo = qin_pct.loc[13].to_dict()
+
+    _META_QEST = {'Fondo', 'Dato', 'Fecha', 'SBS', 'VALFON'}  # 'SBS' aquí = id compuesto, no código
+    _FONDO_KEYS = {'INF1': 'IN-FONDO1', 'INF2': 'IN-FONDO2', 'INF3': 'IN-FONDO3'}
+```
+
+---
+
+### Edición 2 — Aplicar la regla al armar el universo de cuadre/renormalización
+
+**BUSCA:**
+```python
+    b.qest_pct_universo = {}   # fondo -> {col_qest: peso renormalizado} (incluye CAJ/DPZ/CPC/CPP)
+    print("\n--- [QEST %Fondo] Cuadre antes de renormalizar (esperado ~1.0) ---")
+    for nombre_inf, fondo_key in _FONDO_KEYS.items():
+        serie = {k: v for k, v in dic_pct[fondo_key].items()
+                 if k not in _META_QEST and isinstance(v, (int, float))}
+        suma = sum(serie.values())
+        print(f"  {fondo_key}: suma={suma:.6f} (n={len(serie)}) -> renormalizando a 1.0")
+        if suma <= 0:
+            raise ProcesoError(f"QEST DQ_IN: suma de %Fondo de {fondo_key} = {suma} (se esperaba ~1.0).")
+        b.qest_pct_universo[nombre_inf] = {k: v / suma for k, v in serie.items()}
+```
+
+**REEMPLAZA CON:**
+```python
+    b.qest_pct_universo = {}   # fondo -> {col_qest: peso renormalizado} (incluye CAJ/DPZ/CPC/-CPP)
+    print("\n--- [QEST %Fondo] Cuadre antes de renormalizar (esperado ~1.0) ---")
+    for nombre_inf, fondo_key in _FONDO_KEYS.items():
+        serie = {}
+        _excluidos_fut = 0
+        for k, v in dic_pct[fondo_key].items():
+            if k in _META_QEST or not isinstance(v, (int, float)):
+                continue
+            sin = str(dic_sinonimo.get(k, '')).strip()
+            if sin == 'FUT':
+                _excluidos_fut += 1
+                continue                       # nocional de derivados: no entra
+            if sin == 'CPP':
+                v = -v                          # pasivo: resta, no suma
+            serie[k] = v
+        suma = sum(serie.values())
+        print(f"  {fondo_key}: suma={suma:.6f} (n={len(serie)}, FUT excluidos={_excluidos_fut}) "
+              f"-> renormalizando a 1.0")
+        if suma <= 0:
+            raise ProcesoError(f"QEST DQ_IN: suma de %Fondo de {fondo_key} = {suma} (se esperaba ~1.0).")
+        b.qest_pct_universo[nombre_inf] = {k: v / suma for k, v in serie.items()}
+```
+
+---
+
+**Qué cambia en el resto del script: nada.** El bloque de "Sustitución INF1/INF2/INF3" (que mapea `b.df['SBS']` contra `b.qest_pct_universo`), el bloque de "filas nuevas CAJ/DPZ/CPC/CPP/CDBCR", y el Bloque 3 (Huella) ya consumen `b.qest_pct_universo` tal cual sale de aquí — como CPP ya llega con signo negativo desde este punto, la fila de CPP que se agrega a `b.df` va a tener su peso correctamente negativo (un pasivo restando AUM), sin que haya que tocar nada más.
+
+Corre de nuevo y pásame el nuevo print de consola (la línea `[QEST %Fondo] Cuadre...`) para los 3 fondos del 27/08 — debería dar algo cercano a 100% en los tres.
