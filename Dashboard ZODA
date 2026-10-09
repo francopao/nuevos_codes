@@ -1,0 +1,601 @@
+# -*- coding: utf-8 -*-
+"""
+ZODA_Monitor_replica.py
+=======================
+Réplica en Python (HTML Plotly autónomo) de la hoja "Monitor" de ZODA - charts.xlsm.
+
+Genera dos piezas en un solo HTML, igual que la hoja:
+  1) Tabla (cols A:C de Monitor): Stock | Z Stock | Z Stock/Basket (o Stock/BVL),
+     con la misma escala de color verde -> amarillo -> rojo del formato condicional.
+  2) Bubble chart "Valuation Relativo Acciones RVL":
+        X = Z del stock          (Monitor!B)  <- BD
+        Y = Z vs Basket / Indice (Monitor!C)  <- BD
+        Tamaño = posición Fondos 1+2+3 (PxQ) / 100,000 (Monitor!AB) <- DQ_IN
+
+Flujo de datos (equivale a las fórmulas INDEX/MATCH de Monitor):
+    Parametría  -> diccionario ticker -> columna de BD (Z, Basket, Indice) y código SBS
+    BD          -> fila de la fecha elegida -> Z (X) y Z Basket/Indice (Y)
+    DQ_IN       -> filas IN-FONDO{1,2,3}_PxQ_<fecha-3d> en la columna del código SBS -> tamaño
+    Baskets     -> (solo informativo) comparables de cada stock para el hover
+
+Uso en Spyder: ajustar la sección "CONFIGURACIÓN" y ejecutar el archivo completo.
+Uso en consola:  python zoda_monitor_replica.py --fecha 2026-10-02 --modo Basket
+
+Dependencias: pandas, numpy, openpyxl, plotly (kaleido solo si EXPORTAR_PNG=True).
+Excel se lee exclusivamente con openpyxl (sin xlwings).
+"""
+
+# %% 0. IMPORTS
+import argparse
+import html as _html
+import re
+import sys
+import warnings
+from datetime import timedelta
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from openpyxl import load_workbook
+
+# %% 1. CONFIGURACIÓN (lo único que normalmente se toca)
+
+# Libro que contiene las hojas BD, Baskets, DQ_IN, Parametría y Monitor
+RUTA_XLSM = Path(r"C:\Users\usuario\OneDrive\Desktop\AFP INTEGRA\Docs privados\ZODA - charts.xlsm")
+
+# Fecha del Monitor (equivale a Monitor!B6):
+#   "monitor" -> usa la fecha que tiene guardada la hoja Monitor
+#   "ultima"  -> última fecha disponible en BD
+#   "AAAA-MM-DD" -> fecha explícita
+FECHA = "monitor"
+
+# Benchmark del eje Y (equivale a Monitor!C44): "monitor" | "Basket" | "Indice"
+MODO = "monitor"
+
+# Si la fecha no existe en BD (fin de semana / feriado) Excel da #N/A.
+# True = usar la última fecha anterior disponible y avisarlo en el HTML.
+RETROCEDER_FECHA_BD = True
+
+# Rezago de la fecha de posición: Monitor!AB8 = B6 - 3 (días calendario)
+DIAS_REZAGO_POSICION = 3
+# True = si ese día no tiene posiciones cargadas (hueco o todo cero), usar el último día anterior con datos
+FALLBACK_POSICION = True
+# Una fecha de posiciones es "completa" si su nº de posiciones > 0 es >= COBERTURA_MIN x la mediana de las
+# VENTANA_COBERTURA fechas previas (salvaguarda contra cargas parciales; con los datos actuales no se activa)
+COBERTURA_MIN = 0.95
+VENTANA_COBERTURA = 10
+
+# True = reproduce tal cual el Excel (filas 29-37 siempre usan columna "Basket" aunque el toggle sea Indice).
+# False = en modo Indice esas filas usan la columna "Indice" si Parametría la tiene (ELCOMEI, HOC, SCCO, HBM).
+REPLICA_EXACTA_TOGGLE = True
+
+# Valores escritos a mano en Monitor!AB (tamaño de burbuja fijo)
+TAMANO_FIJO = {"CORARE": 0, "HOC": 1500, "BVL": 1500, "IPSA": 1500, "IBOV": 1500,
+               "MEXBOL": 1500, "COLCAP": 1500, "SCCO": 1500, "HBM": 1500}
+
+# Filas de Monitor (por posición 0-based dentro de A9:A37) donde Y usa solo la columna "Basket" (C29:C37 del Excel)
+N_FILAS_Y_CON_TOGGLE = 20          # A9:A28 respetan el toggle; A29:A37 no
+DIVISOR_TAMANO = 100_000           # Monitor!AB = suma PxQ / 100000
+
+# --- Formato del chart (leído del XML del chart original) ---
+EJE_X = dict(rango=(-1.2, 3.0), tick0=-1.2, dtick=0.5)   # min/max fijos; dtick = supuesto (auto de Excel)
+EJE_Y = dict(rango=(-2.5, 4.0), tick0=-2.5, dtick=0.5)
+BUBBLE_SCALE = 30                  # c:bubbleScale del chart original
+FIG_ANCHO, FIG_ALTO = 1050, 780    # tamaño aprox. del gráfico anclado en D5:S45
+PLOT_AREA = dict(x=0.0909, y=0.0877, w=0.8886, h=0.8264)  # c:manualLayout (fracción del gráfico)
+COLOR_BURBUJA = "#00B0F0"
+COLOR_POR_TICKER = {"BVL": "#FF0000", "IPSA": "#000000", "IBOV": "#000000",
+                    "MEXBOL": "#000000", "COLCAP": "#000000"}
+# Grosor de borde (pt) de ciertas burbujas en el original (c:dPt); borde del mismo color que el relleno
+BORDE_PT = {"BAP": 3, "BVN": 3, "NEXAPE": 1.5, "MINSUR": 4.5, "ENGIE": 1.5,
+            "AUNA": 2.25, "ELCOMEI": 1.5, "SCCO": 1.5}
+REPLICAR_BORDES = True
+FUENTE = "Aptos Narrow, Calibri, Arial, sans-serif"
+
+# Escala de color del formato condicional de Excel (mín / percentil 50 / máx)
+COLORES_ESCALA = ("#63BE7B", "#FFEB84", "#F8696B")
+ALTO_FILA_TABLA = 31               # px que Plotly le da a cada fila de la tabla con fuente 13
+
+# --- Salidas ---
+CARPETA_SALIDA = None              # None = misma carpeta del libro
+PLOTLY_JS = True                   # True = HTML 100% offline (~4.5 MB); "cdn" = liviano pero requiere internet
+EXPORTAR_PNG = False               # requiere kaleido (+ Chrome); útil para pegar en PowerPoint
+VALIDAR_CONTRA_EXCEL = True        # compara contra los valores guardados en Monitor (si fecha y modo coinciden)
+
+# %% 2. LECTURA DE HOJAS
+
+
+def _a_float(v):
+    """Convierte una celda a float; texto, vacío o errores de Excel (#N/A) -> NaN. Un 0 NO se toca aquí."""
+    if isinstance(v, bool) or v is None:
+        return np.nan
+    if isinstance(v, (int, float, np.number)):
+        return float(v)
+    return np.nan
+
+
+def _texto(v):
+    """Devuelve el texto limpio de una celda o None si está vacía/NaN (evita que un NaN cuente como 'verdadero')."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def leer_monitor(wb):
+    """Lee de la hoja Monitor: universo (A9:A37), fecha (B6), toggle (C44), pesos (C40:C43) y valores cacheados.
+
+    Parámetros: wb (Workbook openpyxl abierto con read_only=True, data_only=True).
+    Retorna: dict con 'universo', 'fecha', 'modo', 'pesos', 'cache' (DataFrame B, C, AB por ticker).
+    Supuestos: la hoja conserva su layout (tickers en A9:A37, fecha en B6, toggle en C44).
+    """
+    if "Monitor" not in wb.sheetnames:
+        raise KeyError("No existe la hoja 'Monitor' en el libro.")
+    filas = list(wb["Monitor"].iter_rows(min_row=1, max_row=46, min_col=1, max_col=28, values_only=True))
+    universo = [str(f[0]).strip() for f in filas[8:37] if f[0] is not None]
+    if len(universo) < 5:
+        raise ValueError("No se pudo leer el universo de Monitor!A9:A37.")
+    fecha = filas[5][1]
+    modo = filas[43][2]
+    pesos = {str(filas[i][1]): _a_float(filas[i][2]) for i in range(39, 43)}
+    cache = pd.DataFrame(
+        [(str(f[0]).strip(), _a_float(f[1]), _a_float(f[2]), _a_float(f[27])) for f in filas[8:37] if f[0] is not None],
+        columns=["ticker", "x", "y", "tamano"]).set_index("ticker")
+    return dict(universo=universo, fecha=pd.Timestamp(fecha) if fecha is not None else None,
+                modo=str(modo).strip() if modo else "Basket", pesos=pesos, cache=cache)
+
+
+def leer_parametria(wb):
+    """Lee Parametría (B:G desde fila 5) -> DataFrame indexado por ticker.
+
+    Columnas: z, basket, indice, bbg, sbs (str). Celdas vacías quedan como None.
+    """
+    filas = list(wb["Parametría"].iter_rows(min_row=5, max_row=80, min_col=2, max_col=7, values_only=True))
+    reg = []
+    for f in filas:
+        if f[0] is None:
+            continue
+        reg.append(dict(ticker=str(f[0]).strip(), z=f[1], basket=f[2], indice=f[3], bbg=f[4],
+                        sbs=(str(f[5]).strip() if f[5] is not None else None)))
+    if not reg:
+        raise ValueError("Parametría vacía o con layout distinto al esperado (B5:G).")
+    df = pd.DataFrame(reg)
+    if df["ticker"].duplicated().any():
+        raise ValueError(f"Tickers duplicados en Parametría: {df.loc[df['ticker'].duplicated(), 'ticker'].tolist()}")
+    return df.set_index("ticker")
+
+
+def leer_bd(wb):
+    """Lee la hoja BD -> DataFrame (índice = Fecha, columnas = series Z / índices), todo float.
+
+    Valida: fechas válidas y únicas. Columnas duplicadas: se conserva la primera.
+    """
+    it = wb["BD"].iter_rows(values_only=True)
+    cab = [str(c).strip() if c is not None else None for c in next(it)]
+    filas = [f for f in it if f and f[0] is not None]
+    df = pd.DataFrame(filas, columns=range(len(cab)))
+    df = df.loc[:, [i for i, c in enumerate(cab) if c is not None]]
+    df.columns = [cab[i] for i in df.columns]
+    if df.columns.duplicated().any():
+        warnings.warn("BD tiene columnas duplicadas; se conserva la primera de cada una.")
+        df = df.loc[:, ~df.columns.duplicated()]
+    fechas = pd.to_datetime(df["Fecha"], errors="coerce")
+    if fechas.isna().any():
+        raise ValueError(f"BD tiene {int(fechas.isna().sum())} fechas no válidas en la columna 'Fecha'.")
+    if fechas.duplicated().any():
+        raise ValueError("BD tiene fechas duplicadas; el cruce por fecha sería ambiguo.")
+    df = df.drop(columns="Fecha").apply(lambda s: s.map(_a_float)).astype(float)
+    df.index = fechas.dt.normalize()
+    return df.sort_index()
+
+
+def leer_dq_in(wb, codigos_sbs):
+    """Lee de DQ_IN las filas IN-FONDO{1,2,3}_PxQ_<dd/mm/aaaa> para los códigos SBS pedidos.
+
+    Parámetros: codigos_sbs (iterable de str con los códigos de Parametría).
+    Retorna: (pxq, faltantes) donde pxq es DataFrame con índice (fecha, fondo) y una columna por código
+             SBS encontrado, y faltantes la lista de códigos que no existen en el encabezado de DQ_IN.
+    Supuestos: la clave está en la columna E y los códigos SBS en la fila 1 (igual que los MATCH del Excel).
+    Se lee en streaming (hoja de ~12,500 filas x 1,250 columnas) y solo hasta la última columna necesaria.
+    """
+    ws = wb["DQ_IN"]
+    cab = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    pos = {}
+    for i, c in enumerate(cab):
+        if c is not None:
+            pos.setdefault(str(c).strip(), i)
+    codigos = [c for c in dict.fromkeys(codigos_sbs) if c]
+    faltantes = [c for c in codigos if c not in pos]
+    usar = {c: pos[c] for c in codigos if c in pos}
+    if not usar:
+        raise ValueError("Ningún código SBS de Parametría aparece en la fila 1 de DQ_IN.")
+    max_col = max(usar.values()) + 1
+    patron = re.compile(r"^IN-FONDO([123])_PxQ_(\d{2})/(\d{2})/(\d{4})$")
+    registros = []
+    for f in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+        clave = f[4] if len(f) > 4 else None
+        if not isinstance(clave, str):
+            continue
+        m = patron.match(clave.strip())
+        if not m:
+            continue
+        fecha = pd.Timestamp(int(m.group(4)), int(m.group(3)), int(m.group(2)))
+        registros.append([fecha, int(m.group(1))] + [_a_float(f[j]) for j in usar.values()])
+    if not registros:
+        raise ValueError("DQ_IN no tiene filas con clave 'IN-FONDOx_PxQ_dd/mm/aaaa'.")
+    pxq = pd.DataFrame(registros, columns=["fecha", "fondo"] + list(usar.keys())).set_index(["fecha", "fondo"])
+    return pxq.sort_index(), faltantes
+
+
+def leer_baskets(wb):
+    """Lee Baskets (A1:S60) -> dict {ticker_bbg_o_nombre: [comparables]}. Solo se usa para el hover."""
+    out = {}
+    for f in wb["Baskets"].iter_rows(min_row=1, max_row=60, max_col=19, values_only=True):
+        if f[1] is None or f[0] is None:
+            continue
+        comps = [str(c).strip() for c in f[2:] if isinstance(c, str) and c.strip()]
+        out.setdefault(str(f[1]).strip(), comps)
+    return out
+
+
+# %% 3. LÓGICA DEL MONITOR
+
+
+def resolver_fecha_bd(bd, fecha, retroceder, alertas):
+    """Devuelve la fecha de BD a usar. Si no existe: retrocede (con alerta) o lanza ValueError."""
+    fecha = pd.Timestamp(fecha).normalize()
+    if fecha in bd.index:
+        return fecha
+    previas = bd.index[bd.index <= fecha]
+    if not retroceder or len(previas) == 0:
+        raise ValueError(f"La fecha {fecha:%d/%m/%Y} no existe en BD (Excel daría #N/A). "
+                         f"Última disponible: {bd.index.max():%d/%m/%Y}.")
+    usada = previas.max()
+    alertas.append(f"La fecha {fecha:%d/%m/%Y} no existe en BD; se usó {usada:%d/%m/%Y}.")
+    return usada
+
+
+def resolver_fecha_posicion(pxq, fecha_monitor, columnas, alertas):
+    """Fecha de DQ_IN para el tamaño: fecha_monitor - DIAS_REZAGO_POSICION (Monitor!AB8) con fallback opcional.
+
+    Una fecha es válida si están los 3 fondos (Excel falla con #N/A si falta alguno) y su cobertura es
+    normal (ver COBERTURA_MIN): evita usar días con posiciones cargadas a medias.
+    """
+    objetivo = (fecha_monitor - timedelta(days=DIAS_REZAGO_POSICION)).normalize()
+    fechas = pxq.index.get_level_values("fecha").unique()
+    completas = sorted(d for d in fechas if all((d, k) in pxq.index for k in (1, 2, 3)))
+    # Cobertura = nº de códigos del universo con posición > 0 (suma de los 3 fondos) en cada fecha.
+    # Una carga parcial (algunos códigos cargados y otros no) tiene cobertura menor a la habitual.
+    cobertura = pd.Series(
+        {d: int(((pxq.loc[(d, 1), columnas].fillna(0) + pxq.loc[(d, 2), columnas].fillna(0)
+                  + pxq.loc[(d, 3), columnas].fillna(0)) > 0).sum()) for d in completas}, dtype=float)
+    referencia = cobertura.shift(1).rolling(VENTANA_COBERTURA, min_periods=1).median().fillna(cobertura)
+    valida = (cobertura > 0) & (cobertura >= COBERTURA_MIN * referencia)
+    if objetivo in valida.index and valida[objetivo]:
+        return objetivo
+    if not FALLBACK_POSICION:
+        raise ValueError(f"DQ_IN no tiene posiciones válidas el {objetivo:%d/%m/%Y} (Monitor!AB8).")
+    candidatas = [d for d in valida.index if d <= objetivo and valida[d]]
+    if not candidatas:
+        raise ValueError(f"DQ_IN no tiene ninguna fecha con posiciones <= {objetivo:%d/%m/%Y}.")
+    usada = max(candidatas)
+    motivo = ("no existe" if objetivo not in valida.index else
+              f"tiene carga incompleta ({int(cobertura[objetivo])} de ~{int(referencia[objetivo])} posiciones habituales)")
+    alertas.append(f"Fecha de posición {objetivo:%d/%m/%Y} (B6-{DIAS_REZAGO_POSICION}) {motivo} en DQ_IN; "
+                   f"se usó {usada:%d/%m/%Y}. El tamaño de las burbujas es de esa fecha.")
+    return usada
+
+
+def construir_monitor(bd, param, pxq, universo, fecha_bd, fecha_pos, modo, baskets, alertas):
+    """Construye la tabla del Monitor (una fila por ticker del universo).
+
+    Retorna DataFrame con: x (Z stock), y (Z vs Basket/Indice), tamano, col_y, origen_tamano, comparables.
+    Reglas replicadas del Excel: Y de las filas >= N_FILAS_Y_CON_TOGGLE siempre usa 'Basket' si
+    REPLICA_EXACTA_TOGGLE; tamaño fijo para TAMANO_FIJO; Z == 0 exacto se trata como dato faltante (NaN).
+    """
+    sin_param = [t for t in universo if t not in param.index]
+    if sin_param:
+        raise KeyError(f"Tickers del Monitor sin fila en Parametría: {sin_param}")
+    fila = bd.loc[fecha_bd]
+    filas = []
+    for i, t in enumerate(universo):   # 29 filas, lookup por fila: un loop es más claro que vectorizar
+        p = param.loc[t]
+        col_x = p["z"]
+        usa_toggle = (i < N_FILAS_Y_CON_TOGGLE) or (not REPLICA_EXACTA_TOGGLE)
+        col_indice = _texto(p["indice"])   # Parametría deja NaN en las celdas vacías (p. ej. índices bursátiles)
+        if modo == "Indice" and usa_toggle and col_indice:
+            col_y = col_indice
+        else:
+            col_y = p["basket"]
+        for c in (col_x, col_y):
+            if c not in bd.columns:
+                raise KeyError(f"La columna '{c}' (Parametría, ticker {t}) no existe en BD.")
+        x, y = fila[col_x], fila[col_y]
+        for nombre, v in (("X", x), ("Y", y)):
+            if v == 0:
+                alertas.append(f"{t}: Z {nombre} = 0 exacto en BD; se trata como dato faltante.")
+        x = np.nan if x == 0 else x
+        y = np.nan if y == 0 else y
+        if t in TAMANO_FIJO:
+            tam, origen = float(TAMANO_FIJO[t]), "fijo (hardcode Excel)"
+        elif p["sbs"] in pxq.columns:
+            tam = sum(np.nan_to_num(pxq.loc[(fecha_pos, k), p["sbs"]]) for k in (1, 2, 3)) / DIVISOR_TAMANO
+            origen = "DQ_IN"
+        else:
+            tam, origen = 0.0, "sin código SBS en DQ_IN"
+            alertas.append(f"{t}: código SBS {p['sbs']} no está en DQ_IN; tamaño = 0 (sin burbuja).")
+        comps = baskets.get(p["bbg"]) or baskets.get(t) or []
+        filas.append(dict(ticker=t, x=x, y=y, tamano=tam, col_x=col_x, col_y=col_y,
+                          origen_tamano=origen, comparables=comps))
+    df = pd.DataFrame(filas).set_index("ticker")
+    return df
+
+
+def validar_contra_excel(df, cache, tol_z=1e-8, tol_tam=1e-6):
+    """Compara x, y y tamaño contra los valores guardados en Monitor (B9:C37, AB9:AB37).
+
+    Lanza AssertionError si alguna diferencia supera la tolerancia. Retorna dict con las diferencias máximas.
+    """
+    comun = df.index.intersection(cache.index)
+    if len(comun) != len(df):
+        raise AssertionError("El universo calculado no coincide con A9:A37 de Monitor.")
+    d = {}
+    for col, tol in (("x", tol_z), ("y", tol_z), ("tamano", tol_tam)):
+        a, b = df.loc[comun, col], cache.loc[comun, col]
+        dif = (a - b).abs()
+        ambos_nan = a.isna() & b.isna()
+        dif = dif.where(~ambos_nan, 0.0)
+        d[col] = float(dif.max())
+        mal = dif[(dif > tol) | dif.isna()]
+        assert mal.empty, f"Diferencias en '{col}' vs Excel: {mal.to_dict()}"
+    return d
+
+
+# %% 4. ESCALA DE COLOR (réplica del formato condicional de Excel)
+
+
+def _hex_a_rgb(h):
+    h = h.lstrip("#")
+    return np.array([int(h[i:i + 2], 16) for i in (0, 2, 4)], dtype=float)
+
+
+def colores_escala(valores):
+    """Color por celda con escala de 3 colores (mín -> percentil 50 -> máx), interpolando en RGB como Excel.
+
+    Parámetros: valores (Serie/array con posibles NaN). NaN -> blanco. Si mín == máx -> color medio.
+    Retorna lista de hex '#RRGGBB'.
+    """
+    v = np.asarray(valores, dtype=float)
+    ok = ~np.isnan(v)
+    if not ok.any():
+        return ["#FFFFFF"] * len(v)
+    c_min, c_mid, c_max = (_hex_a_rgb(c) for c in COLORES_ESCALA)
+    lo, mid, hi = v[ok].min(), np.percentile(v[ok], 50), v[ok].max()
+    out = []
+    for x in v:
+        if np.isnan(x):
+            out.append("#FFFFFF")
+            continue
+        if hi == lo:
+            c = c_mid
+        elif x <= mid:
+            t = 0.0 if mid == lo else (x - lo) / (mid - lo)
+            c = c_min + (c_mid - c_min) * t
+        else:
+            t = 1.0 if hi == mid else (x - mid) / (hi - mid)
+            c = c_mid + (c_max - c_mid) * t
+        out.append("#%02X%02X%02X" % tuple(int(round(k)) for k in c))
+    return out
+
+
+# %% 5. FIGURAS
+
+
+def _fx(v):
+    """Formato Excel '0.00\\x' -> '1.15x'; NaN -> 'n.d.'."""
+    return "n.d." if pd.isna(v) else f"{v:.2f}x"
+
+
+def figura_tabla(df, modo):
+    """Tabla estilo Monitor!A8:C37 con escalas de color: B (todo), C (filas 1-20) y C (filas 21-29) por separado."""
+    n = len(df)
+    col_b = colores_escala(df["x"])
+    k = min(N_FILAS_Y_CON_TOGGLE, n)
+    col_c = colores_escala(df["y"].iloc[:k]) + colores_escala(df["y"].iloc[k:])
+    enc_c = "Stock/BVL" if modo == "Indice" else "Stock/Basket"
+    fig = go.Figure(go.Table(
+        columnwidth=[95, 85, 110],
+        header=dict(values=["", "<b>Stock</b>", f"<b>{enc_c}</b>"], fill_color="white", align="center",
+                    line=dict(color="#7F7F7F", width=1), height=26, font=dict(family=FUENTE, size=14, color="black")),
+        cells=dict(values=[[f"<b>{t}</b>" for t in df.index], [_fx(v) for v in df["x"]], [_fx(v) for v in df["y"]]],
+                   fill_color=[["white"] * n, col_b, col_c], align=["left", "center", "center"],
+                   line=dict(color="#BFBFBF", width=1), height=22, font=dict(family=FUENTE, size=13, color="black")),
+    ))
+    # Plotly fija la altura mínima de fila en ~31 px para fuente 13 (cells.height se ignora si es menor);
+    # si la figura es más baja que header + n filas, las últimas filas se cortan.
+    fig.update_layout(width=330, height=ALTO_FILA_TABLA * (n + 1) + 8, margin=dict(l=0, r=0, t=0, b=0),
+                      paper_bgcolor="white")
+    return fig
+
+
+def figura_bubble(df, modo):
+    """Bubble chart replicando el chart de Monitor (ejes fijos, cruce en 0, etiquetas abajo, colores por punto).
+
+    Burbujas con tamaño 0 o con X/Y faltante no se dibujan (Excel tampoco dibuja las de tamaño 0).
+    Escala: el área de cada burbuja es proporcional al tamaño; la más grande mide
+    25% x (lado menor del área de trazado) x BUBBLE_SCALE/100, como en Excel.
+    """
+    d = df[(df["tamano"] > 0) & df["x"].notna() & df["y"].notna()]
+    pw, ph = FIG_ANCHO * PLOT_AREA["w"], FIG_ALTO * PLOT_AREA["h"]
+    diam_max = 0.25 * min(pw, ph) * BUBBLE_SCALE / 100.0
+    sizeref = 2.0 * df["tamano"].max() / (diam_max ** 2)
+    colores = [COLOR_POR_TICKER.get(t, COLOR_BURBUJA) for t in d.index]
+    grosor = [BORDE_PT.get(t, 0) * 96 / 72 if REPLICAR_BORDES and colores[i] == COLOR_BURBUJA else 0
+              for i, t in enumerate(d.index)]
+    hover = []
+    for t, r in d.iterrows():
+        comps = [c.replace(" Equity", "") for c in r["comparables"]]
+        lineas = "<br>".join(", ".join(comps[i:i + 4]) for i in range(0, len(comps), 4)) if comps else "—"
+        hover.append(f"<b>{t}</b><br>Z stock: {r['x']:.2f}x<br>Z {modo}: {r['y']:.2f}x<br>"
+                     f"Tamaño (PxQ/1e5): {r['tamano']:,.0f} · {r['origen_tamano']}<br>"
+                     f"<i>Comparables:</i><br>{lineas}")
+    fig = go.Figure(go.Scatter(
+        x=d["x"], y=d["y"], mode="markers+text", text=list(d.index), textposition="bottom center",
+        textfont=dict(family=FUENTE, size=13, color="black"),
+        marker=dict(size=d["tamano"], sizemode="area", sizeref=sizeref, sizemin=0, color=colores,
+                    line=dict(width=grosor, color=colores)),
+        hovertext=hover, hoverinfo="text", cliponaxis=False, showlegend=False))
+    eje = dict(showgrid=False, showline=False, zeroline=True, zerolinecolor="#BFBFBF", zerolinewidth=1,
+               ticks="", ticksuffix="x", tickformat=".1f", tickfont=dict(family=FUENTE, size=14, color="black"),
+               title_font=dict(family=FUENTE, size=16, color="black"))
+    y0 = 1 - PLOT_AREA["y"] - PLOT_AREA["h"]
+    fig.update_layout(
+        width=FIG_ANCHO, height=FIG_ALTO, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="white", plot_bgcolor="white",
+        title=dict(text="<b>Valuation Relativo Acciones RVL<br>(Z-scores: PE, PB, PS, EV/EBITDA)</b>",
+                   x=0.5, xanchor="center", y=0.975, yanchor="top", font=dict(family=FUENTE, size=19, color="black")),
+        # En X se usan marcas invisibles de 12 px solo para bajar las etiquetas y que no se pisen con las de Y
+        xaxis=dict(range=list(EJE_X["rango"]), tick0=EJE_X["tick0"], dtick=EJE_X["dtick"],
+                   domain=[PLOT_AREA["x"], PLOT_AREA["x"] + PLOT_AREA["w"]],
+                   title=dict(text="Valuation relativo stock", standoff=10),
+                   **{**eje, "ticks": "outside", "ticklen": 12, "tickcolor": "rgba(0,0,0,0)"}),
+        yaxis=dict(range=list(EJE_Y["rango"]), tick0=EJE_Y["tick0"], dtick=EJE_Y["dtick"],
+                   domain=[y0, y0 + PLOT_AREA["h"]],
+                   title=dict(text=f"Valuation relativo {modo}", standoff=10), **eje),
+        hoverlabel=dict(font=dict(family=FUENTE, size=13)))
+    return fig
+
+
+# %% 6. HTML AUTÓNOMO
+
+
+def construir_html(fig_tabla, fig_bubble, meta, alertas):
+    """Ensambla la página (banners del Excel + tabla a la izquierda + chart a la derecha + notas de calidad)."""
+    cfg = dict(displaylogo=False, displayModeBar="hover", responsive=False)
+    js1 = PLOTLY_JS if PLOTLY_JS in (True, "cdn") else True
+    h_tab = fig_tabla.to_html(full_html=False, include_plotlyjs=js1, config=cfg, div_id="tabla_monitor")
+    h_bub = fig_bubble.to_html(full_html=False, include_plotlyjs=False, config=cfg, div_id="bubble_monitor")
+    pesos = " &nbsp;·&nbsp; ".join(f"{k}: {v:.0%}" for k, v in meta["pesos"].items() if not np.isnan(v))
+    notas = "".join(f"<li>{_html.escape(a)}</li>" for a in alertas) or "<li>Sin alertas de calidad de datos.</li>"
+    e = _html.escape
+    return f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<title>Monitor Z Valuation RVL</title>
+<style>
+ body {{ margin:16px; background:#fff; font-family:{FUENTE}; color:#000; }}
+ .b1 {{ background:#002060; color:#fff; font-weight:700; font-size:20px; padding:6px 12px; }}
+ .b2 {{ background:#ABE3FF; font-weight:700; font-size:16px; padding:5px 12px; margin-bottom:10px; }}
+ .fila {{ display:flex; gap:20px; align-items:flex-start; }}
+ .fecha {{ border:1px solid #7F7F7F; display:inline-flex; margin-bottom:8px; font-weight:700; }}
+ .fecha span {{ padding:3px 12px; }} .fecha span+span {{ border-left:1px solid #7F7F7F; }}
+ .pie {{ font-size:12px; color:#444; margin-top:8px; }} .pie ul {{ margin:4px 0 0 18px; padding:0; }}
+</style></head><body>
+<div class="b1">Monitor Z Valuation RVL</div>
+<div class="b2">Valuation Relativo Acciones RVL</div>
+<div class="fila">
+  <div>
+    <div class="fecha"><span>Fecha</span><span>{meta['fecha']:%d/%m/%Y}</span></div>
+    {h_tab}
+    <div class="pie"><b>Weights of Z-Dist</b> (informativo): {pesos}<br>
+    <b>Benchmark RV</b>: {e(meta['modo'])}</div>
+  </div>
+  <div>{h_bub}</div>
+</div>
+<div class="pie">
+  Posiciones (tamaño de burbuja) al {meta['fecha_pos']:%d/%m/%Y} · Tamaño = (Fondo1+Fondo2+Fondo3 PxQ)/{DIVISOR_TAMANO:,}.
+  <br><b>Notas de calidad de datos</b><ul>{notas}</ul>
+</div>
+</body></html>"""
+
+
+# %% 7. ORQUESTADOR
+
+
+def generar_monitor(ruta_xlsm=RUTA_XLSM, fecha=FECHA, modo=MODO, validar=VALIDAR_CONTRA_EXCEL):
+    """Pipeline completo: lee el libro, calcula el Monitor, valida contra Excel y escribe el HTML.
+
+    Parámetros: ruta_xlsm (Path), fecha ('monitor' | 'ultima' | 'AAAA-MM-DD'), modo ('monitor' | 'Basket' | 'Indice'),
+                validar (bool).
+    Retorna: (ruta_html, df_monitor). Lanza excepciones explícitas ante datos o mapeos inconsistentes.
+    """
+    ruta_xlsm = Path(ruta_xlsm)
+    if not ruta_xlsm.exists():
+        raise FileNotFoundError(f"No se encontró el libro: {ruta_xlsm}")
+    alertas = []
+    print(f"Leyendo {ruta_xlsm.name} (puede tardar por DQ_IN)…")
+    wb = load_workbook(ruta_xlsm, read_only=True, data_only=True)
+    try:
+        faltan = [h for h in ("Monitor", "Parametría", "BD", "DQ_IN", "Baskets") if h not in wb.sheetnames]
+        if faltan:
+            raise KeyError(f"Faltan hojas en el libro: {faltan}")
+        mon = leer_monitor(wb)
+        param = leer_parametria(wb)
+        bd = leer_bd(wb)
+        sbs = [param.loc[t, "sbs"] for t in mon["universo"] if t in param.index and t not in TAMANO_FIJO]
+        pxq, sin_sbs = leer_dq_in(wb, sbs)
+        baskets = leer_baskets(wb)
+    finally:
+        wb.close()
+
+    modo_ef = mon["modo"] if str(modo).lower() == "monitor" else str(modo).capitalize()
+    if modo_ef not in ("Basket", "Indice"):
+        raise ValueError(f"MODO debe ser 'Basket' o 'Indice' (recibido: {modo_ef!r}).")
+    if str(fecha).lower() == "monitor":
+        if mon["fecha"] is None:
+            raise ValueError("Monitor!B6 está vacío; indique FECHA explícita.")
+        f_sol = mon["fecha"]
+    elif str(fecha).lower() == "ultima":
+        f_sol = bd.index.max()
+    else:
+        f_sol = pd.Timestamp(fecha)
+    fecha_bd = resolver_fecha_bd(bd, f_sol, RETROCEDER_FECHA_BD, alertas)
+    cols_sbs = [c for c in pxq.columns]
+    fecha_pos = resolver_fecha_posicion(pxq, fecha_bd, cols_sbs, alertas)
+
+    df = construir_monitor(bd, param, pxq, mon["universo"], fecha_bd, fecha_pos, modo_ef, baskets, alertas)
+
+    # Calidad de datos
+    for t in df.index[df["x"].isna() | df["y"].isna()]:
+        alertas.append(f"{t}: sin Z válido en la fecha; no se dibuja en el chart y aparece como n.d. en la tabla.")
+    for t in df.index[(df["tamano"] == 0) & ~df.index.isin(TAMANO_FIJO)]:
+        alertas.append(f"{t}: sin posición en DQ_IN a esa fecha; no se dibuja la burbuja.")
+    fuera = df[((df["x"] < EJE_X["rango"][0]) | (df["x"] > EJE_X["rango"][1]) |
+                (df["y"] < EJE_Y["rango"][0]) | (df["y"] > EJE_Y["rango"][1]))]
+    for t in fuera.index:
+        alertas.append(f"{t} está fuera de los ejes fijos del chart (X {EJE_X['rango']}, Y {EJE_Y['rango']}): no se ve.")
+
+    if validar:
+        if fecha_bd == mon["fecha"] and modo_ef == mon["modo"]:
+            d = validar_contra_excel(df, mon["cache"])
+            print(f"✔ Validación vs Excel OK (dif. máx.: X {d['x']:.1e} · Y {d['y']:.1e} · tamaño {d['tamano']:.1e})")
+        else:
+            print("ℹ Validación vs Excel omitida: fecha/modo distintos a los guardados en Monitor.")
+
+    meta = dict(fecha=fecha_bd, fecha_pos=fecha_pos, modo=modo_ef, pesos=mon["pesos"])
+    fig_t, fig_b = figura_tabla(df, modo_ef), figura_bubble(df, modo_ef)
+    carpeta = Path(CARPETA_SALIDA) if CARPETA_SALIDA else ruta_xlsm.parent
+    base = carpeta / f"Monitor_Replica_{fecha_bd:%Y%m%d}_{modo_ef}"
+    ruta_html = base.with_suffix(".html")
+    ruta_html.write_text(construir_html(fig_t, fig_b, meta, alertas), encoding="utf-8")
+    print(f"✔ HTML: {ruta_html}")
+    if EXPORTAR_PNG:
+        try:
+            fig_b.write_image(str(base) + "_bubble.png", scale=2)
+            fig_t.write_image(str(base) + "_tabla.png", scale=2)
+            print("✔ PNG exportados.")
+        except Exception as exc:   # kaleido/Chrome no disponible: no es crítico
+            print(f"⚠ No se pudieron exportar PNG ({exc}).")
+    for a in alertas:
+        print("  •", a)
+    return ruta_html, df
+
+
+# %% 8. EJECUCIÓN
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Réplica HTML de la hoja Monitor de ZODA.")
+    ap.add_argument("--xlsm", default=str(RUTA_XLSM))
+    ap.add_argument("--fecha", default=FECHA, help="'monitor' | 'ultima' | AAAA-MM-DD")
+    ap.add_argument("--modo", default=MODO, help="'monitor' | Basket | Indice")
+    ap.add_argument("--sin-validar", action="store_true")
+    a, _ = ap.parse_known_args(sys.argv[1:])     # parse_known_args: tolera los argumentos extra de Spyder
+    generar_monitor(a.xlsm, a.fecha, a.modo, validar=not a.sin_validar)
