@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+"""
+Descarga automática de los informes mensuales "Ipsos CCI - Índice de Confianza
+del Consumidor" detectando los meses MMYYYY faltantes en la carpeta local.
+
+La página https://www.ipsos.com/es-cl/ipsos-cci-indice-de-confianza-del-consumidor
+trae en el HTML inicial (sin JS) todos los enlaces de descarga desde 2021 hasta
+la fecha, por lo que basta con requests + BeautifulSoup (no hace falta
+Selenium/webdriver).
+
+Para correr en Spyder: selecciona todo (Ctrl+A) y ejecuta (F5 / F9).
+
+Dependencias (ya vienen con Anaconda; si faltan: pip install requests beautifulsoup4):
+    requests, beautifulsoup4
+"""
+
+import os
+import re
+import unicodedata
+import requests
+from bs4 import BeautifulSoup
+
+# ----------------------------------------------------------------------
+# PARÁMETROS
+# ----------------------------------------------------------------------
+RUTA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Consumo\BD\Ipsos"
+URL_PAGINA = "https://www.ipsos.com/es-cl/ipsos-cci-indice-de-confianza-del-consumidor"
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+MESES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+         "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+         "noviembre": 11, "diciembre": 12}
+
+
+def quitar_tildes(txt):
+    return "".join(c for c in unicodedata.normalize("NFD", txt) if unicodedata.category(c) != "Mn")
+
+
+# ----------------------------------------------------------------------
+# 1. MESES YA PRESENTES EN LA CARPETA LOCAL
+# ----------------------------------------------------------------------
+def meses_existentes(ruta):
+    encontrados = set()
+    patron = re.compile(r"^(\d{2})(\d{4})$")
+    for nombre in os.listdir(ruta):
+        base, ext = os.path.splitext(nombre)
+        if ext.lower() != ".pdf":
+            continue
+        m = patron.match(base)
+        if m:
+            mes, anio = int(m.group(1)), int(m.group(2))
+            if 1 <= mes <= 12:
+                encontrados.add((anio, mes))
+    return encontrados
+
+
+# ----------------------------------------------------------------------
+# 2. SCRAPING DE LA PÁGINA DE IPSOS (lista completa de descargas)
+# ----------------------------------------------------------------------
+def meses_disponibles_ipsos():
+    r = requests.get(URL_PAGINA, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    disponibles = {}
+    for bloque in soup.find_all("div", class_="publication-document"):
+        desc = bloque.find("div", class_="publication-document__description")
+        link = bloque.find("a", class_="download-link")
+        if not desc or not link or not link.get("href"):
+            continue
+
+        texto = quitar_tildes(desc.get_text(strip=True)).lower()
+        m = re.match(r"([a-z]+)\s+(\d{4})", texto)
+        if not m:
+            continue
+        nombre_mes, anio = m.group(1), int(m.group(2))
+        if nombre_mes not in MESES:
+            continue
+        mes = MESES[nombre_mes]
+
+        href = link["href"]
+        if href.startswith("/"):
+            href = "https://www.ipsos.com" + href
+
+        disponibles.setdefault((anio, mes), href)  # se queda con el primero si hay duplicados
+
+    return disponibles
+
+
+# ----------------------------------------------------------------------
+# 3. DESCARGA DE LOS MESES FALTANTES
+# ----------------------------------------------------------------------
+def es_pdf(response):
+    ct = response.headers.get("Content-Type", "").lower()
+    return response.status_code == 200 and ("application/pdf" in ct or response.content[:4] == b"%PDF")
+
+
+existentes = meses_existentes(RUTA)
+disponibles = meses_disponibles_ipsos()
+
+faltantes = sorted(set(disponibles) - existentes)
+
+if not faltantes:
+    print("La carpeta ya está al día; no hay meses nuevos disponibles en Ipsos para descargar.")
+else:
+    print(f"Meses faltantes encontrados en Ipsos: {[f'{m:02d}{a}' for a, m in faltantes]}")
+
+    exitosos, fallidos = [], []
+
+    for anio, mes in faltantes:
+        mmyyyy = f"{mes:02d}{anio}"
+        destino = os.path.join(RUTA, f"{mmyyyy}.pdf")
+        url = disponibles[(anio, mes)]
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            if es_pdf(r):
+                with open(destino, "wb") as f:
+                    f.write(r.content)
+                print(f"[OK] {mmyyyy} descargado -> {url}")
+                exitosos.append(mmyyyy)
+            else:
+                print(f"[ERROR] {mmyyyy}: la respuesta no fue un PDF válido ({url})")
+                fallidos.append(mmyyyy)
+        except requests.RequestException as e:
+            print(f"[ERROR] {mmyyyy}: fallo de conexión ({e})")
+            fallidos.append(mmyyyy)
+
+    print("\n--- RESUMEN ---")
+    print(f"Meses actualizados ({len(exitosos)}): {exitosos}")
+    print(f"Meses fallidos ({len(fallidos)}): {fallidos}")
