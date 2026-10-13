@@ -1,0 +1,188 @@
+# -*- coding: utf-8 -*-
+"""
+Descarga automática de reportes "Seguimiento al consumo con datos en tiempo real"
+(BBVA Research - Perú), detectando los meses faltantes en la carpeta local.
+
+Para correr en Spyder: selecciona todo (Ctrl+A) y ejecuta (F5 / F9).
+
+Dependencias (ya vienen con Anaconda; si faltan: pip install requests beautifulsoup4):
+    requests, beautifulsoup4
+"""
+
+import os
+import re
+import requests
+from datetime import date
+from bs4 import BeautifulSoup
+
+# ----------------------------------------------------------------------
+# PARÁMETROS
+# ----------------------------------------------------------------------
+RUTA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Consumo\BD\Big Data BBVA"
+
+# Para forzar un intervalo específico define aquí "MMYYYY" (ej. "042026").
+# Si los dejas en None, el script detecta solo los meses faltantes.
+INICIO_MANUAL = None   # ej: "042026"
+FINAL_MANUAL  = None   # ej: "092026"
+
+MESES_ABR = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+             7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+
+MESES_NOMBRE = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+                7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre",
+                11: "noviembre", 12: "diciembre"}
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+BASE_PUBLICACION = ("https://www.bbvaresearch.com/publicaciones/"
+                     "peru-seguimiento-al-consumo-con-datos-en-tiempo-real-en-{mes}-de-{anio}/")
+
+
+# ----------------------------------------------------------------------
+# 1. DETECTAR MESES YA DESCARGADOS EN LA CARPETA
+# ----------------------------------------------------------------------
+def meses_existentes(ruta):
+    encontrados = set()
+    patron = re.compile(r"^(\d{2})(\d{4})$")
+    for nombre in os.listdir(ruta):
+        base, ext = os.path.splitext(nombre)
+        if ext.lower() != ".pdf":
+            continue
+        m = patron.match(base)
+        if m:
+            mes, anio = int(m.group(1)), int(m.group(2))
+            if 1 <= mes <= 12:
+                encontrados.add((anio, mes))
+    return encontrados
+
+
+def mmyyyy_a_tupla(mmyyyy):
+    return (int(mmyyyy[2:]), int(mmyyyy[:2]))  # (anio, mes)
+
+
+def tupla_a_mmyyyy(t):
+    anio, mes = t
+    return f"{mes:02d}{anio}"
+
+
+def mes_siguiente(t):
+    anio, mes = t
+    return (anio + 1, 1) if mes == 12 else (anio, mes + 1)
+
+
+# ----------------------------------------------------------------------
+# 2. DETERMINAR INTERVALO (INICIO / FINAL)
+# ----------------------------------------------------------------------
+hoy = date.today()
+mes_prev = hoy.month - 1
+anio_prev = hoy.year
+if mes_prev == 0:
+    mes_prev = 12
+    anio_prev -= 1
+ultimo_periodo_disponible = (anio_prev, mes_prev)  # último mes "cerrado" (anterior al actual)
+
+existentes = meses_existentes(RUTA)
+
+if INICIO_MANUAL and FINAL_MANUAL:
+    inicio_t = mmyyyy_a_tupla(INICIO_MANUAL)
+    final_t = mmyyyy_a_tupla(FINAL_MANUAL)
+    print(f"Usando intervalo manual: {INICIO_MANUAL} -> {FINAL_MANUAL}")
+else:
+    if not existentes:
+        print("No se encontraron archivos PDF válidos (formato MMYYYY) en la carpeta.")
+        print("Define INICIO_MANUAL y FINAL_MANUAL arriba y vuelve a ejecutar.")
+        raise SystemExit
+
+    ultimo_existente = max(existentes)
+    inicio_t = mes_siguiente(ultimo_existente)
+    final_t = ultimo_periodo_disponible
+
+    if inicio_t > final_t:
+        print(f"La carpeta ya está al día (último mes disponible: {tupla_a_mmyyyy(final_t)}).")
+        raise SystemExit
+
+INICIO, FINAL = tupla_a_mmyyyy(inicio_t), tupla_a_mmyyyy(final_t)
+
+periodos = []
+t = inicio_t
+while t <= final_t:
+    periodos.append(t)
+    t = mes_siguiente(t)
+
+print(f"Meses faltantes detectados ({INICIO} -> {FINAL}): {[tupla_a_mmyyyy(p) for p in periodos]}")
+
+
+# ----------------------------------------------------------------------
+# 3. CONSTRUCCIÓN DE URLs Y DESCARGA
+# ----------------------------------------------------------------------
+def url_directa(anio, mes):
+    """Opción 1: patrón estándar de la URL (puede fallar si BBVA varía el nombre del archivo)."""
+    abreviatura_mes = MESES_ABR[mes]
+    abreviatura_anio = str(anio)[-2:]
+    numero_mes = 1 if mes == 12 else mes + 1  # BBVA publica el reporte de un mes al mes siguiente
+    return (f"https://www.bbvaresearch.com/wp-content/uploads/{anio}/{numero_mes:02d}/"
+            f"Seguimiento-al-consumo-con-datos-en-tiempo-real-{abreviatura_mes}-{abreviatura_anio}.pdf")
+
+
+def url_desde_pagina(anio, mes):
+    """Opción 2 (fallback): lee la página de publicación y extrae el link real del PDF."""
+    pagina = BASE_PUBLICACION.format(mes=MESES_NOMBRE[mes], anio=anio)
+    r = requests.get(pagina, headers=HEADERS, timeout=20)
+    if r.status_code != 200:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.lower().endswith(".pdf") and "seguimiento-al-consumo" in href.lower():
+            return href
+    return None
+
+
+def es_pdf(response):
+    ct = response.headers.get("Content-Type", "").lower()
+    return response.status_code == 200 and ("application/pdf" in ct or response.content[:4] == b"%PDF")
+
+
+exitosos, fallidos = [], []
+
+for anio, mes in periodos:
+    mmyyyy = f"{mes:02d}{anio}"
+    destino = os.path.join(RUTA, f"{mmyyyy}.pdf")
+    descargado = False
+    url_usada = None
+
+    try:
+        url1 = url_directa(anio, mes)
+        r = requests.get(url1, headers=HEADERS, timeout=20)
+        if es_pdf(r):
+            with open(destino, "wb") as f:
+                f.write(r.content)
+            descargado, url_usada = True, url1
+    except requests.RequestException:
+        pass
+
+    if not descargado:
+        try:
+            url2 = url_desde_pagina(anio, mes)
+            if url2:
+                r = requests.get(url2, headers=HEADERS, timeout=20)
+                if es_pdf(r):
+                    with open(destino, "wb") as f:
+                        f.write(r.content)
+                    descargado, url_usada = True, url2
+        except requests.RequestException:
+            pass
+
+    if descargado:
+        print(f"[OK] {mmyyyy} descargado -> {url_usada}")
+        exitosos.append(mmyyyy)
+    else:
+        print(f"[ERROR] {mmyyyy}: no se pudo descargar (ni URL directa ni página de publicación).")
+        fallidos.append(mmyyyy)
+
+# ----------------------------------------------------------------------
+# 4. RESUMEN FINAL
+# ----------------------------------------------------------------------
+print("\n--- RESUMEN ---")
+print(f"Descargados ({len(exitosos)}): {exitosos}")
+print(f"Fallidos ({len(fallidos)}): {fallidos}")
