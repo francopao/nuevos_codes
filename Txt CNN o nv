@@ -1,0 +1,441 @@
+Attribute VB_Name = "Paso1_Portafolio"
+Option Explicit
+'==============================================================================
+' PASO 1: portafolio semanal del Screener RF
+'
+' Corre despues de bajar el export del SRCH (eso sigue siendo manual) y lo deja
+' listo para revisar. En orden:
+'   1. Busca el "Portafolio Screening RF (AAAA.MM.DD)" mas reciente de la carpeta
+'      Emisiones Latam y le saca una copia con la fecha de hoy.
+'   2. Vacia "Port Bloomberg" desde la fila 2 y pega el export (columnas A:R).
+'   3. Llena S, T y U de "Port Filtrado" con el mismo criterio de las formulas de
+'      siempre, pero como valores:
+'         S  EN BD_MATLAB  1 si el ISIN esta en Instrumentos (BD_RF.xlsm)
+'         T  EN LISTA      1 si el ISIN esta en "Lista de excepciones"
+'         U  AGREGAR       "AGREGAR/REVISAR" si S + T = 0, si no "NO"
+'   4. Las filas AGREGAR/REVISAR se agregan al final de "Lista de excepciones"
+'      (columnas A:M y BB Comp en N). El Comentario queda vacio: lo llena quien
+'      revisa. Lo que ya estaba en la hoja no se toca.
+'
+' Notas:
+'  - Se limpia con ClearContents y no borrando filas, porque Port Filtrado lee
+'    'Port Bloomberg'!A2... y al borrar filas esas referencias darian #REF!.
+'  - Se pega con PasteSpecial valores y no con Value2 = Value2, porque Mty llega
+'    como texto mm/dd/aaaa y Excel lo volveria fecha (y en una PC con fecha
+'    dd/mm cambiaria dia y mes).
+'  - La formula original de S termina en IFERROR(...;0): si BD_RF no se puede
+'    leer, todo saldria como AGREGAR. Aqui, si no se lee BD_RF, la macro se detiene.
+'  - Necesita Excel con el Z: conectado. Para correrla en solo lectura primero
+'    prueba con una copia de la carpeta.
+'==============================================================================
+
+Private Const TITULO As String = "Screener RF - Paso 1"
+Private Const RUTA_EMISIONES As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Screener RF\1. BD Screener\Emisiones Latam"
+Private Const RUTA_BBG As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Screener RF\1. BD Screener\Emisiones Latam\BBG"
+Private Const RUTA_BD_RF As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Python\BD_RF.xlsm"
+Public Const PREFIJO_PORTAFOLIO As String = "Portafolio Screening RF ("
+
+' Si el emisor viene sin rating, en la lista de excepciones se escribe "NR".
+Private Const RELLENAR_NR As Boolean = True
+
+Private mScreen As Boolean, mEvents As Boolean, mAlerts As Boolean
+Private mCalc As Long, mSeguridad As Long
+
+'------------------------------------------------------------------------------
+Public Sub ActualizarPortafolioScreener()
+    Dim hoy As Date
+    Dim rutaBase As String, rutaNuevo As String, rutaExport As String
+    Dim wbNuevo As Workbook, wbExport As Workbook
+    Dim wsPB As Worksheet, wsPF As Worksheet, wsEx As Worksheet, wsOri As Worksheet
+    Dim dInst As Object, dExc As Object, dVistos As Object
+    Dim datos As Variant, res() As Variant
+    Dim ultExp As Long, n As Long, i As Long, k As Long
+    Dim isin As String, s As Long, t As Long
+    Dim nS As Long, nT As Long
+    Dim filas As Collection
+    Dim copiaCreada As Boolean
+    Dim msg As String
+
+    hoy = Date
+    On Error GoTo Falla
+    GuardarEstadoExcel
+
+    ' --- 1. archivos de entrada ---
+    rutaBase = BuscarUltimoPortafolio(RUTA_EMISIONES, hoy)
+    If Len(rutaBase) = 0 Then
+        Err.Raise vbObjectError + 1, , "No encontre ningun 'Portafolio Screening RF (AAAA.MM.DD)' en " & RUTA_EMISIONES
+    End If
+
+    rutaNuevo = RUTA_EMISIONES & "\" & PREFIJO_PORTAFOLIO & TextoFecha(hoy) & ")" & Mid$(rutaBase, InStrRev(rutaBase, "."))
+    If Len(Dir(rutaNuevo)) > 0 Then
+        Err.Raise vbObjectError + 2, , "Ya existe el archivo de hoy:" & vbCrLf & rutaNuevo & vbCrLf & _
+            "Si quieres rehacerlo, renombralo o borralo y corre la macro otra vez."
+    End If
+
+    rutaExport = BuscarExportBBG(RUTA_BBG, hoy)
+    If Len(rutaExport) = 0 Then
+        Err.Raise vbObjectError + 3, , "No encontre ningun archivo 'Screener...' en " & RUTA_BBG
+    End If
+
+    If MsgBox("Base (se copia): " & NombreArchivo(rutaBase) & vbCrLf & _
+              "Nuevo: " & NombreArchivo(rutaNuevo) & vbCrLf & _
+              "Export de Bloomberg: " & NombreArchivo(rutaExport) & vbCrLf & vbCrLf & _
+              "Continuo?", vbQuestion + vbYesNo, TITULO) = vbNo Then GoTo Salir
+
+    ' --- 2. ISIN que ya estan en Instrumentos (antes de crear nada) ---
+    Set dInst = ISINsDeInstrumentos()
+
+    ' --- 3. copia y apertura ---
+    FileCopy rutaBase, rutaNuevo
+    copiaCreada = True
+    Set wbNuevo = Workbooks.Open(rutaNuevo, UpdateLinks:=0)
+    Set wbExport = Workbooks.Open(rutaExport, ReadOnly:=True, UpdateLinks:=0)
+
+    Set wsPB = Hoja(wbNuevo, "Port Bloomberg")
+    Set wsPF = Hoja(wbNuevo, "Port Filtrado")
+    Set wsEx = Hoja(wbNuevo, "Lista de excepciones")
+    Set wsOri = HojaDelExport(wbExport)
+
+    ' El export debe tener las 18 columnas en el orden de siempre.
+    If Not EncabezadoOK(wsOri, 5, "ISIN") Or Not EncabezadoOK(wsOri, 7, "EQTY") Or _
+       Not EncabezadoOK(wsOri, 17, "BB COMP") Or Not EncabezadoOK(wsOri, 18, "MTY") Then
+        Err.Raise vbObjectError + 4, , "El export no tiene el orden de columnas esperado (ISIN en E, Eqty Ticker en G, BB Comp en Q, Mty en R). " & _
+            "Revisa la vista de columnas del portafolio en Bloomberg."
+    End If
+
+    ultExp = wsOri.Cells(wsOri.Rows.Count, 5).End(xlUp).Row
+    If ultExp < 2 Then Err.Raise vbObjectError + 5, , "El export no trae emisiones."
+
+    ' --- 4. Port Bloomberg: limpiar y pegar ---
+    If wsPB.AutoFilterMode Then
+        If wsPB.FilterMode Then wsPB.ShowAllData      ' ClearContents no toca filas ocultas
+    End If
+    wsPB.Range("A2", wsPB.Cells(wsPB.Rows.Count, 24)).ClearContents
+    wsOri.Range("A2:R" & ultExp).Copy
+    wsPB.Range("A2").PasteSpecial xlPasteValues
+    Application.CutCopyMode = False
+
+    n = ultExp - 1
+    datos = wsPB.Range("A2:R" & ultExp).Value2
+
+    ' --- 5. S, T, U ---
+    Set dExc = ISINsDeColumna(wsEx, 5)
+    Set dVistos = CreateObject("Scripting.Dictionary")
+    Set filas = New Collection
+    ReDim res(1 To n, 1 To 3)
+
+    For i = 1 To n
+        isin = Texto(datos(i, 5))
+        If Len(isin) = 0 Then
+            res(i, 1) = "": res(i, 2) = "": res(i, 3) = ""
+        Else
+            s = 0: t = 0
+            If dInst.Exists(isin) Then s = 1
+            If dExc.Exists(isin) Then t = 1
+            res(i, 1) = s: res(i, 2) = t
+            nS = nS + s: nT = nT + t
+            If s + t = 0 Then
+                res(i, 3) = "AGREGAR/REVISAR"
+                If Not dVistos.Exists(isin) Then
+                    dVistos.Add isin, i
+                    filas.Add i
+                End If
+            Else
+                res(i, 3) = "NO"
+            End If
+        End If
+    Next i
+
+    If wsPF.AutoFilterMode Then
+        If wsPF.FilterMode Then wsPF.ShowAllData     ' el filtro viejo del archivo anterior engana
+    End If
+    If Len(Texto(wsPF.Range("S1").Value2)) = 0 Then wsPF.Range("S1").Value2 = "EN BD_MATLAB"
+    If Len(Texto(wsPF.Range("T1").Value2)) = 0 Then wsPF.Range("T1").Value2 = "EN LISTA"
+    If Len(Texto(wsPF.Range("U1").Value2)) = 0 Then wsPF.Range("U1").Value2 = "AGREGAR"
+
+    k = wsPF.Cells(wsPF.Rows.Count, 19).End(xlUp).Row
+    If k > n + 1 Then wsPF.Range("S" & n + 2 & ":U" & k).ClearContents
+    wsPF.Range("S2").Resize(n, 3).Value2 = res
+
+    ' --- 6. lista de excepciones: agregar al final ---
+    k = AgregarAExcepciones(wsEx, wsPB, datos, filas)
+
+    ' --- 7. cierre ---
+    wsPB.Calculate
+    wsPF.Calculate
+    wbNuevo.Save
+    wbExport.Close SaveChanges:=False
+    Set wbExport = Nothing
+
+    msg = "Listo: " & NombreArchivo(rutaNuevo) & vbCrLf & vbCrLf & _
+          "Emisiones en el export: " & n & vbCrLf & _
+          "Ya en Instrumentos: " & nS & vbCrLf & _
+          "Ya en la lista de excepciones: " & nT & vbCrLf & _
+          "AGREGAR/REVISAR (agregadas a la lista, Comentario vacio): " & k
+    If k > 0 Then msg = msg & vbCrLf & vbCrLf & "Siguiente: llena el Comentario de las filas nuevas en 'Lista de excepciones'."
+    MsgBox msg, vbInformation, TITULO
+
+Salir:
+    Application.CutCopyMode = False
+    RestaurarEstadoExcel
+    Exit Sub
+
+Falla:
+    msg = "No se pudo terminar: " & Err.Description
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If Not wbExport Is Nothing Then wbExport.Close SaveChanges:=False
+    If copiaCreada Then
+        If Not wbNuevo Is Nothing Then wbNuevo.Close SaveChanges:=False
+        Kill rutaNuevo        ' para que no quede una copia a medias bloqueando la siguiente corrida
+        msg = msg & vbCrLf & "(Borre la copia de hoy; puedes volver a correr la macro.)"
+    End If
+    RestaurarEstadoExcel
+    MsgBox msg, vbCritical, TITULO
+End Sub
+
+'------------------------------------------------------------------------------
+' Agrega las emisiones nuevas al final de la lista. Devuelve cuantas agrego.
+' Copia A:M y la columna Q (BB Comp) del portafolio; el Comentario queda vacio.
+Private Function AgregarAExcepciones(wsEx As Worksheet, wsPB As Worksheet, datos As Variant, filas As Collection) As Long
+    Dim ult As Long, destino As Long, j As Long, filaPB As Long
+    Dim rating As String
+
+    If filas.Count = 0 Then Exit Function
+
+    ult = wsEx.Cells(wsEx.Rows.Count, 5).End(xlUp).Row
+    If ult < 1 Then ult = 1
+    destino = ult + 1
+
+    ' encabezados que pudieran faltar
+    If Len(Texto(wsEx.Range("N1").Value2)) = 0 Then wsEx.Range("N1").Value2 = "BB Comp"
+    If Len(Texto(wsEx.Range("O1").Value2)) = 0 Then wsEx.Range("O1").Value2 = "Comentario"
+
+    ' mismo formato que la ultima fila con datos
+    If ult >= 2 Then
+        wsEx.Range("A" & ult & ":O" & ult).Copy
+        wsEx.Range("A" & destino & ":O" & destino + filas.Count - 1).PasteSpecial xlPasteFormats
+        Application.CutCopyMode = False
+    End If
+
+    For j = 1 To filas.Count
+        filaPB = filas(j) + 1                       ' fila real en Port Bloomberg
+        wsPB.Range("A" & filaPB & ":M" & filaPB).Copy
+        wsEx.Range("A" & destino).PasteSpecial xlPasteValues
+        wsPB.Range("Q" & filaPB).Copy
+        wsEx.Range("N" & destino).PasteSpecial xlPasteValues
+        Application.CutCopyMode = False
+
+        If RELLENAR_NR Then
+            rating = Trim$(Texto(wsEx.Range("N" & destino).Value2))
+            If Len(rating) = 0 Or Left$(rating, 2) = "#N" Then wsEx.Range("N" & destino).Value2 = "NR"
+        End If
+        destino = destino + 1
+    Next j
+
+    AgregarAExcepciones = filas.Count
+End Function
+
+'------------------------------------------------------------------------------
+' ISIN de la columna D de Instrumentos en BD_RF.xlsm, sin tocar el archivo.
+' Si ya esta abierto lo usa; si no, lo abre solo lectura, sin macros ni vinculos.
+Private Function ISINsDeInstrumentos() As Object
+    Dim d As Object, wb As Workbook, wsI As Worksheet
+    Dim abiertoAqui As Boolean, v As Variant, i As Long, ult As Long
+
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+
+    On Error Resume Next
+    Set wb = Workbooks("BD_RF.xlsm")
+    On Error GoTo 0
+
+    If wb Is Nothing Then
+        If Len(Dir(RUTA_BD_RF)) = 0 Then Err.Raise vbObjectError + 10, , "No encuentro BD_RF.xlsm en " & RUTA_BD_RF
+        Application.AutomationSecurity = msoAutomationSecurityForceDisable
+        Set wb = Workbooks.Open(RUTA_BD_RF, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, Notify:=False)
+        Application.AutomationSecurity = mSeguridad
+        abiertoAqui = True
+    End If
+
+    Set wsI = Hoja(wb, "Instrumentos")
+    ult = wsI.Cells(wsI.Rows.Count, 4).End(xlUp).Row
+    If ult < 3 Then Err.Raise vbObjectError + 11, , "La hoja Instrumentos de BD_RF esta vacia."
+
+    v = wsI.Range("D1:D" & ult).Value2
+    For i = 1 To UBound(v, 1)
+        If VarType(v(i, 1)) = vbString Then
+            If Len(v(i, 1)) > 0 Then d(v(i, 1)) = i
+        End If
+    Next i
+
+    If abiertoAqui Then wb.Close SaveChanges:=False
+    If d.Count < 50 Then Err.Raise vbObjectError + 12, , "Solo lei " & d.Count & " ISIN de Instrumentos; no me parece correcto. Reviso antes de seguir."
+
+    Set ISINsDeInstrumentos = d
+End Function
+
+Private Function ISINsDeColumna(ws As Worksheet, col As Long) As Object
+    Dim d As Object, v As Variant, i As Long, ult As Long
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    ult = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+    If ult >= 2 Then
+        v = ws.Range(ws.Cells(2, col), ws.Cells(ult, col)).Value2
+        If IsArray(v) Then
+            For i = 1 To UBound(v, 1)
+                If Len(Texto(v(i, 1))) > 0 Then d(Texto(v(i, 1))) = i
+            Next i
+        Else
+            If Len(Texto(v)) > 0 Then d(Texto(v)) = 1
+        End If
+    End If
+    Set ISINsDeColumna = d
+End Function
+
+'------------------------------------------------------------------------------
+' Portafolio con la fecha mas reciente que no pase de hoy. Es publica porque la
+' usa tambien el modulo del Paso 2.
+Public Function BuscarUltimoPortafolio(ByVal carpeta As String, ByVal hoy As Date) As String
+    Dim f As String, d As Date, mejorD As Date, mejor As String
+
+    f = Dir(carpeta & "\" & PREFIJO_PORTAFOLIO & "*")
+    Do While Len(f) > 0
+        If Left$(f, 2) <> "~$" And EsExcel(f) And InStr(1, f, "sin formula", vbTextCompare) = 0 Then
+            If FechaDeNombre(f, d) Then
+                If d <= hoy And d > mejorD Then
+                    mejorD = d
+                    mejor = f
+                End If
+            End If
+        End If
+        f = Dir()
+    Loop
+
+    If Len(mejor) > 0 Then BuscarUltimoPortafolio = carpeta & "\" & mejor
+End Function
+
+' Export de Bloomberg: el que lleva la fecha de hoy en el nombre; si no hay,
+' el ultimo modificado (y la macro te lo muestra para confirmar).
+Private Function BuscarExportBBG(ByVal carpeta As String, ByVal hoy As Date) As String
+    Dim f As String, hoyTxt As String, m As Date
+    Dim mejorHoy As String, fHoy As Date, mejorTodos As String, fTodos As Date
+
+    hoyTxt = Year(hoy) & Right$("0" & Month(hoy), 2) & Right$("0" & Day(hoy), 2)
+    f = Dir(carpeta & "\Screener*")
+    Do While Len(f) > 0
+        If Left$(f, 2) <> "~$" And EsExcel(f) Then
+            m = FileDateTime(carpeta & "\" & f)
+            If InStr(1, DigitosDe(f), hoyTxt) > 0 Then
+                If m > fHoy Then
+                    fHoy = m
+                    mejorHoy = carpeta & "\" & f
+                End If
+            End If
+            If m > fTodos Then
+                fTodos = m
+                mejorTodos = carpeta & "\" & f
+            End If
+        End If
+        f = Dir()
+    Loop
+
+    If Len(mejorHoy) > 0 Then
+        BuscarExportBBG = mejorHoy
+    Else
+        BuscarExportBBG = mejorTodos
+    End If
+End Function
+
+'------------------------------------------------------------------------------
+' Auxiliares
+Private Function FechaDeNombre(ByVal nombre As String, ByRef d As Date) As Boolean
+    Dim p As Long, q As Long, partes() As String
+    p = InStr(1, nombre, "(")
+    If p = 0 Then Exit Function
+    q = InStr(p, nombre, ")")
+    If q = 0 Then Exit Function
+    partes = Split(Mid$(nombre, p + 1, q - p - 1), ".")
+    If UBound(partes) <> 2 Then Exit Function
+    If Not IsNumeric(partes(0)) Then Exit Function
+    If Not IsNumeric(partes(1)) Then Exit Function
+    If Not IsNumeric(partes(2)) Then Exit Function
+    If CLng(partes(1)) < 1 Or CLng(partes(1)) > 12 Then Exit Function
+    If CLng(partes(2)) < 1 Or CLng(partes(2)) > 31 Then Exit Function
+    d = DateSerial(CLng(partes(0)), CLng(partes(1)), CLng(partes(2)))
+    FechaDeNombre = True
+End Function
+
+Private Function TextoFecha(ByVal d As Date) As String
+    TextoFecha = Year(d) & "." & Right$("0" & Month(d), 2) & "." & Right$("0" & Day(d), 2)
+End Function
+
+Private Function DigitosDe(ByVal s As String) As String
+    Dim i As Long, c As String
+    For i = 1 To Len(s)
+        c = Mid$(s, i, 1)
+        If c >= "0" And c <= "9" Then DigitosDe = DigitosDe & c
+    Next i
+End Function
+
+Private Function EsExcel(ByVal f As String) As Boolean
+    Dim e As String
+    If InStrRev(f, ".") = 0 Then Exit Function
+    e = LCase$(Mid$(f, InStrRev(f, ".")))
+    EsExcel = (e = ".xlsx" Or e = ".xlsm" Or e = ".xls")
+End Function
+
+Private Function NombreArchivo(ByVal ruta As String) As String
+    NombreArchivo = Mid$(ruta, InStrRev(ruta, "\") + 1)
+End Function
+
+Private Function Texto(ByVal v As Variant) As String
+    If IsError(v) Then Exit Function
+    If IsNull(v) Then Exit Function
+    Texto = CStr(v)
+End Function
+
+Private Function Hoja(wb As Workbook, ByVal nombre As String) As Worksheet
+    Dim r As Worksheet
+    On Error Resume Next
+    Set r = wb.Worksheets(nombre)
+    On Error GoTo 0
+    If r Is Nothing Then Err.Raise vbObjectError + 20, , "No encuentro la hoja '" & nombre & "' en " & wb.Name
+    Set Hoja = r
+End Function
+
+' El export trae hoja "Worksheet" (22 columnas, las 18 primeras son las nuestras).
+' La hoja "adj" tiene otro orden y no sirve.
+Private Function HojaDelExport(wb As Workbook) As Worksheet
+    Dim r As Worksheet
+    On Error Resume Next
+    Set r = wb.Worksheets("Worksheet")
+    On Error GoTo 0
+    If r Is Nothing Then Set r = wb.Worksheets(1)
+    Set HojaDelExport = r
+End Function
+
+Private Function EncabezadoOK(ws As Worksheet, ByVal col As Long, ByVal clave As String) As Boolean
+    EncabezadoOK = (InStr(1, UCase$(Texto(ws.Cells(1, col).Value2)), clave) > 0)
+End Function
+
+Private Sub GuardarEstadoExcel()
+    mScreen = Application.ScreenUpdating
+    mEvents = Application.EnableEvents
+    mAlerts = Application.DisplayAlerts
+    mCalc = Application.Calculation
+    mSeguridad = Application.AutomationSecurity
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+End Sub
+
+Private Sub RestaurarEstadoExcel()
+    On Error Resume Next
+    Application.AutomationSecurity = mSeguridad
+    Application.Calculation = mCalc
+    Application.DisplayAlerts = mAlerts
+    Application.EnableEvents = mEvents
+    Application.ScreenUpdating = mScreen
+End Sub
