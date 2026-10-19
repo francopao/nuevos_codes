@@ -1,0 +1,1241 @@
+Attribute VB_Name = "Paso2_BD_RF"
+Option Explicit
+'==============================================================================
+' PASO 2: BD_RF.xlsm (Historico, Instrumentos, RF, RF_HY, RF_IG, Separados)
+'
+' version 2: ya no copia formulas de Instrumentos ni de RF para los bonos
+' nuevos. Lo que antes era una formula (el indice de la columna B, la
+' clasificacion IG/HY, el vencimiento, las filas 3 a 10 de RF) ahora lo
+' calcula el VBA y lo deja como valor. Lo unico que sigue siendo formula de
+' verdad son los campos que dependen de Bloomberg en el momento (BDP de
+' called/defaulted, BDH de spreads) y los campos "vivos" de RF (filas 1109 en
+' adelante), porque esos si cambian cada semana.
+'
+' Dos macros, con trabajo humano en medio:
+'
+'   Fase1_Instrumentos
+'     - Guarda en "Historico" el Name/IQ/Emisor/Sector Fundamentales que hoy
+'       tiene Instrumentos, para no perderlos cuando un bono se borre.
+'     - Trae de "Port Filtrado" del portafolio de hoy los ISIN que no estan en
+'       Instrumentos pero ya pasaron la revision en "Lista de excepciones"
+'       (Comentario con algo escrito). A esos les busca IQ, Emisor y Sector
+'       Fundamentales en "Historico" buscando otro bono del mismo emisor (se
+'       reconoce por la primera palabra del Name, que es el ticker del bono:
+'       "BBVASM 5.4 06/03/31" y "BBVASM 5 7/8 09/13/34" comparten "BBVASM"). Si
+'       no encuentra nada, lo deja en blanco para que alguien lo complete.
+'     - Refresca Bloomberg, congela el rating y el called/defaulted de las
+'       filas nuevas en valores, y borra las llamadas, en default o que
+'       vencen en menos de 12 meses.
+'     - Reindexa la columna B como numero, no como formula.
+'     Tiene modo simulacro.
+'
+'   (aqui revisas: las filas con IQ/Emisor/Sector en blanco, por si el match
+'   con Historico no encontro nada y hay que llenarlo a mano)
+'
+'   Fase2_RF_y_Exportar
+'     - Por cada bono de Instrumentos calcula lo que antes era formula en RF
+'       (Clasif, indice, ISIN, Sector, Pais) y busca Rating y Duracion en
+'       S_ValuationP del Modelo Latam RF. Si el Modelo no tiene el bono
+'       todavia, esas dos celdas quedan en blanco y se avisa; el bono SI entra
+'       a RF igual.
+'     - Si el Clasif de un bono no es valido (viene vacio o con error, porque
+'       el rating de Bloomberg no llego), ese bono no entra a RF esta semana:
+'       se anota en "Separados" y se reintenta la siguiente corrida.
+'     - Deja RF, RF_HY y RF_IG con una columna por bono que si entro, refresca
+'       Bloomberg, pega el historico 1109:2204 en 12:1107, y exporta un .xlsx
+'       solo con valores (con Historico y Separados incluidos) para leer desde
+'       cualquier PC sin Bloomberg.
+'
+' Hallazgo (no lo invente, lo vi en los vinculos externos del archivo): la
+' formula de RF fila 8 apunta a "[2]S_ValuationP", y el vinculo de verdad
+' (xl/externalLinks) de tu BD_RF dice que esa hoja se llama "S_ValuationP" en
+' Modelo Latam RF.xlsx. Me habias dicho que ese nombre fue un typo y que es
+' "S_Valuation". Dejo el codigo probando los dos nombres, pero avisame cual es
+' el real para no seguir adivinando.
+'
+' Lo que NO intento calcular (se queda en blanco con aviso, porque depende de
+' otro libro que a su vez depende de que el bono ya este en RF):
+'   - L (OAS) de Instrumentos: viene de [1]SpreadsRF, que en tu BD_RF2 esta en
+'     #REF!. Si en tu archivo real apunta a otro lado, dimelo.
+'   - Q y R de Instrumentos (Check Screening / Check S_ValuationP): cuentan
+'     apariciones en el Modelo, mismo problema de orden que el anterior.
+'   - Filas 8 y 10 de RF (Rating y Duracion), cuando el bono no esta todavia
+'     en el Modelo: segun lo que confirmaste, blanco y aviso, no se separa.
+'
+' Antes de correr:
+'  - Este modulo va importado en BD_RF.xlsm y se corre con BD_RF.xlsm abierto:
+'    las dos fases usan ThisWorkbook directo, no abren ni cierran BD_RF por
+'    ruta ni por nombre, asi que no importa como se llame el archivo.
+'  - Terminal de Bloomberg abierto y con sesion iniciada en esta PC.
+'  - Importar tambien Paso1_Portafolio.bas (se usa su BuscarUltimoPortafolio).
+'  - Las dos fases respaldan BD_RF (un .xlsm aparte, no lo tocan) antes de
+'    tocar nada; si algo falla, BD_RF se queda abierto tal como estaba, sin
+'    guardar los cambios de esa corrida. Revisalo o cierralo sin guardar tu
+'    mismo.
+'==============================================================================
+
+Private Const TITULO As String = "Screener RF - Paso 2"
+Private Const RUTA_EMISIONES As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Screener RF\1. BD Screener\Emisiones Latam"
+Private Const RUTA_MODELO As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Modelo Latam RF.xlsx"
+
+' Hojas que siguen en el proceso y se exportan como valores.
+Private Const HOJAS_EXPORT As String = "Instrumentos,RF,RF_HY,RF_IG,Historico,Separados"
+
+' Instrumentos: primera fila de datos y columnas
+Private Const I_FILA_INI As Long = 3
+Private Const I_IDX As Long = 2        ' B  indice (ahora valor, no formula)
+Private Const I_NOMBRE As Long = 3     ' C
+Private Const I_ISIN As Long = 4       ' D
+Private Const I_TICKER As Long = 5     ' E  ticker BBG (Eqty Ticker + " Equity")
+Private Const I_IQ As Long = 6         ' F
+Private Const I_EMISOR As Long = 7     ' G
+Private Const I_SECTOR As Long = 8     ' H
+Private Const I_PAIS As Long = 9       ' I
+Private Const I_RATING As Long = 10    ' J  BDP, se congela a valor
+Private Const I_CLASIF As Long = 11    ' K  IG/HY, calculado por VBA desde J
+Private Const I_OAS As Long = 12       ' L  depende de otro libro: blanco + aviso
+Private Const I_CALLED As Long = 13    ' M  BDP, se congela a valor
+Private Const I_DEFAULT As Long = 14   ' N  BDP, se congela a valor
+Private Const I_VENCE As Long = 15     ' O  calculado por VBA desde el Mty del portafolio
+Private Const I_REPETIDOS As Long = 16 ' P  calculado por VBA (cuenta de ISIN)
+Private Const I_CHECKSCR As Long = 17  ' Q  depende del Modelo: blanco + aviso
+Private Const I_CHECKVAL As Long = 18  ' R  depende del Modelo: blanco + aviso
+
+' Port Bloomberg / Port Filtrado (mismo layout A:R)
+Private Const PF_NOMBRE As Long = 1
+Private Const PF_ISIN As Long = 5
+Private Const PF_EQTY_TICKER As Long = 7
+Private Const PF_CNTRY_RISK As Long = 12
+Private Const PF_MTY As Long = 18
+
+' Historico: Name, IQ, Emisor, Sector Fundamentales (espejo de C,F,G,H)
+Private Const H_NOMBRE As Long = 1
+Private Const H_IQ As Long = 2
+Private Const H_EMISOR As Long = 3
+Private Const H_SECTOR As Long = 4
+
+' RF / RF_HY / RF_IG
+Private Const COL_PRIMER_BONO As String = "GH"
+Private Const FILA_CLASIF As Long = 3
+Private Const FILA_IDXCOL As Long = 4
+Private Const FILA_IDXINST As Long = 5
+Private Const FILA_ISIN As Long = 6
+Private Const FILA_SECTOR As Long = 7
+Private Const FILA_RATING_MODELO As Long = 8
+Private Const FILA_PAIS As Long = 9
+Private Const FILA_DURACION_MODELO As Long = 10
+Private Const FILA_HIST_INI As Long = 12
+Private Const FILA_HIST_FIN As Long = 1107
+Private Const FILA_VIVA_INI As Long = 1109
+Private Const FILA_VIVA_FIN As Long = 2204
+Private Const FILA_BDH As Long = 3303
+Private Const FILA_BDH_FIN As Long = 4398
+
+' S_ValuationP del Modelo: ISIN en B, Rating en AB, Duracion en AH
+Private Const SV_ISIN As Long = 2
+Private Const SV_RATING As Long = 28
+Private Const SV_DURACION As Long = 34
+
+Private Const MESES_MIN_VENCIMIENTO As Long = 12
+Private Const ESPERA_BBG_SEG As Long = 1200      ' 20 min maximo esperando a Bloomberg
+
+Private mScreen As Boolean, mEvents As Boolean, mAlerts As Boolean
+Private mCalc As Long, mSeguridad As Long
+Private mOrigenes As Collection                  ' libros de vinculos que abrio la macro
+
+'==============================================================================
+' FASE 1
+'==============================================================================
+Public Sub Fase1_Instrumentos()
+    Dim hoy As Date, simulacro As Boolean
+    Dim wbP As Workbook, wb As Workbook, wsI As Worksheet, wsHist As Worksheet
+    Dim rutaPort As String, rutaResp As String
+    Dim dInst As Object, dHist As Object
+    Dim altas As Collection, saltadas As Collection, bajas As Collection
+    Dim ult As Long, filaTot As Long, pendientes As Long, i As Long
+    Dim nuevasDesde As Long, nuevasHasta As Long
+    Dim msg As String, lineas As Collection
+
+    hoy = Date
+    On Error GoTo Falla
+    GuardarEstadoExcel
+
+    rutaPort = BuscarUltimoPortafolio(RUTA_EMISIONES, hoy)
+    If Len(rutaPort) = 0 Then Err.Raise vbObjectError + 101, , "No encontre ningun 'Portafolio Screening RF (AAAA.MM.DD)' en " & RUTA_EMISIONES
+
+    simulacro = (MsgBox("Portafolio: " & NombreArchivo(rutaPort) & vbCrLf & vbCrLf & _
+        "Quieres un SIMULACRO (solo te cuento que haria, sin cambiar nada)?", _
+        vbQuestion + vbYesNo, TITULO) = vbYes)
+
+    ' --- abrir ---
+    Set wbP = AbrirSoloLectura(rutaPort)
+    Set wb = ThisWorkbook
+    Set wsI = Hoja(wb, "Instrumentos")
+    Set wsHist = HojaHistorico(wb)
+    AbrirOrigenesDeVinculos wb
+
+    ult = UltimaFilaInstrumentos(wsI, filaTot)
+    Set dInst = DiccionarioISIN(wsI, ult)
+
+    ' --- historico: guardar lo que Instrumentos tiene hoy, antes de tocar nada ---
+    ActualizarHistorico wsI, ult, wsHist
+    Set dHist = DiccionarioHistorico(wsHist)
+
+    ' --- que entra ---
+    Set altas = LeerAltasDesdePortFiltrado(wbP, dInst, hoy, saltadas)
+
+    msg = "Altas (pasaron la revision en Lista de excepciones, Comentario con algo escrito): " & altas.Count & vbCrLf & _
+          "No se agregan por vencer en menos de " & MESES_MIN_VENCIMIENTO & " meses: " & saltadas.Count & vbCrLf & vbCrLf & _
+          ListaAltas(altas, 12)
+
+    If simulacro Then
+        MsgBox "SIMULACRO (no se cambio nada)." & vbCrLf & vbCrLf & msg & vbCrLf & _
+               "Las bajas (llamados, default, vencimiento) se calculan despues de refrescar Bloomberg.", vbInformation, TITULO
+        GoTo Cierre
+    End If
+
+    If MsgBox(msg & vbCrLf & "Hago los cambios en " & ThisWorkbook.Name & "? (hay respaldo antes)", _
+              vbQuestion + vbYesNo, TITULO) = vbNo Then GoTo Cierre
+
+    rutaResp = Respaldar(wb, hoy, "Fase1")
+
+    ' --- 1. altas: valores directos + match con Historico para IQ/Emisor/Sector ---
+    nuevasDesde = ult + 1
+    If altas.Count > 0 Then EscribirAltas wsI, altas, dHist, ult, filaTot
+    nuevasHasta = ult + altas.Count
+    ult = UltimaFilaInstrumentos(wsI, filaTot)
+
+    ' --- 2. refrescar Bloomberg (las filas nuevas necesitan J, M, N) ---
+    If Not RefrescarBBG(wsI) Then MsgBox "No pude lanzar el refresh de Bloomberg por macro." & vbCrLf & _
+        "Hazlo tu en esta hoja (pestana Bloomberg > Actualizar hoja) y luego pulsa Aceptar.", vbExclamation, TITULO
+    wsI.Calculate
+    If altas.Count > 0 Then
+        If Not EsperarBBG(wsI.Range(wsI.Cells(nuevasDesde, I_RATING), wsI.Cells(nuevasHasta, I_DEFAULT))) Then
+            Err.Raise vbObjectError + 102, , "Bloomberg no termino de responder en las filas nuevas de Instrumentos. No borre nada; BD_RF se queda abierto sin guardar, revisalo o cierralo sin guardar tu mismo."
+        End If
+    End If
+
+    ' --- 3. congelar J, M, N de las filas nuevas y calcular K ---
+    If altas.Count > 0 Then CongelarFilasNuevas wsI, nuevasDesde, nuevasHasta
+
+    ' --- 4. bajas con M, N, O ya frescos ---
+    Set bajas = LeerBajas(wsI, ult, hoy, pendientes)
+    If pendientes > 0 Then
+        Err.Raise vbObjectError + 103, , "Hay " & pendientes & " celdas de M/N con error o vacias despues de refrescar. " & _
+            "No borro nada hasta que las revises (revisa la sesion de Bloomberg)."
+    End If
+    BorrarFilas wsI, bajas
+
+    ' --- 5. columna B como valor, para toda la hoja (ya no es formula) ---
+    ult = UltimaFilaInstrumentos(wsI, filaTot)
+    ReindexarB wsI, ult
+
+    wb.Save
+
+    Set lineas = New Collection
+    lineas.Add "Fase 1 " & TextoFecha(hoy) & " - portafolio " & NombreArchivo(rutaPort)
+    lineas.Add "Altas: " & altas.Count
+    For i = 1 To altas.Count: lineas.Add "  + " & altas(i)(1) & " | " & altas(i)(0): Next i
+    lineas.Add "Bajas: " & bajas.Count
+    For i = 1 To bajas.Count: lineas.Add "  - " & bajas(i)(1) & " | " & bajas(i)(2) & " | " & bajas(i)(3): Next i
+    lineas.Add "Saltadas por vencimiento: " & saltadas.Count
+    For i = 1 To saltadas.Count: lineas.Add "  . " & saltadas(i): Next i
+    EscribirLog rutaResp & ".fase1.txt", lineas
+
+    MsgBox "Fase 1 lista." & vbCrLf & vbCrLf & _
+        "Altas: " & altas.Count & "   Bajas: " & bajas.Count & "   Bonos ahora: " & (ult - I_FILA_INI + 1) & vbCrLf & vbCrLf & _
+        "Revisa las filas nuevas de Instrumentos: si IQ, Emisor o Sector Fundamentales quedaron en blanco, " & _
+        "es que no encontre otro bono del mismo emisor en Historico; llenalo a mano." & vbCrLf & vbCrLf & _
+        "Siguiente: Fase2_RF_y_Exportar." & vbCrLf & "Detalle en " & rutaResp & ".fase1.txt", vbInformation, TITULO
+
+Cierre:
+    CerrarOrigenes
+    If Not wbP Is Nothing Then wbP.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    Exit Sub
+
+Falla:
+    msg = "No se pudo terminar la Fase 1: " & Err.Description
+    On Error Resume Next
+    CerrarOrigenes
+    If Not wbP Is Nothing Then wbP.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    MsgBox msg & vbCrLf & vbCrLf & "BD_RF (este archivo) se quedo abierto sin guardar los cambios de esta corrida; revisalo y guarda o cierra sin guardar tu mismo antes de volver a correr la macro.", vbCritical, TITULO
+End Sub
+
+'------------------------------------------------------------------------------
+' Hoja "Historico": si no existe la crea con encabezado. Copia de Instrumentos
+' el Name, IQ, Emisor y Sector Fundamentales de cada bono cuyo Name todavia no
+' este en Historico (comparacion exacta de texto). Solo agrega al final, nunca
+' borra ni reescribe lo que ya habia.
+Private Sub ActualizarHistorico(wsI As Worksheet, ByVal ult As Long, wsHist As Worksheet)
+    Dim dYaEsta As Object, ultHist As Long, destino As Long, i As Long, nombre As String
+    Dim v As Variant
+
+    Set dYaEsta = CreateObject("Scripting.Dictionary")
+    dYaEsta.CompareMode = vbTextCompare
+    ultHist = wsHist.Cells(wsHist.Rows.Count, H_NOMBRE).End(xlUp).Row
+    If ultHist >= 2 Then
+        v = wsHist.Range(wsHist.Cells(2, H_NOMBRE), wsHist.Cells(ultHist, H_NOMBRE)).Value2
+        If IsArray(v) Then
+            For i = 1 To UBound(v, 1)
+                If Len(Texto(v(i, 1))) > 0 Then dYaEsta(Texto(v(i, 1))) = 1
+            Next i
+        ElseIf Len(Texto(v)) > 0 Then
+            dYaEsta(Texto(v)) = 1
+        End If
+    End If
+
+    destino = IIf(ultHist >= 2, ultHist + 1, 2)
+    v = wsI.Range(wsI.Cells(I_FILA_INI, I_NOMBRE), wsI.Cells(ult, I_SECTOR)).Value2   ' C..H
+    For i = 1 To UBound(v, 1)
+        nombre = Trim$(Texto(v(i, I_NOMBRE - I_NOMBRE + 1)))
+        If Len(nombre) > 0 Then
+            If Not dYaEsta.Exists(nombre) Then
+                wsHist.Cells(destino, H_NOMBRE).Value2 = nombre
+                wsHist.Cells(destino, H_IQ).Value2 = Texto(v(i, I_IQ - I_NOMBRE + 1))
+                wsHist.Cells(destino, H_EMISOR).Value2 = Texto(v(i, I_EMISOR - I_NOMBRE + 1))
+                wsHist.Cells(destino, H_SECTOR).Value2 = Texto(v(i, I_SECTOR - I_NOMBRE + 1))
+                dYaEsta(nombre) = 1
+                destino = destino + 1
+            End If
+        End If
+    Next i
+End Sub
+
+Private Function HojaHistorico(wb As Workbook) As Worksheet
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets("Historico")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = "Historico"
+        ws.Range("A1").Value2 = "Name": ws.Range("B1").Value2 = "IQ"
+        ws.Range("C1").Value2 = "Emisor": ws.Range("D1").Value2 = "Sector Fundamentales"
+        ws.Range("A1:D1").Font.Bold = True
+    End If
+    Set HojaHistorico = ws
+End Function
+
+' primerToken(Name) -> Array(IQ, Emisor, Sector). Recorre Historico de arriba
+' hacia abajo y se queda con la ultima coincidencia, porque Historico solo
+' crece agregando filas al final: la ultima es la mas reciente.
+Private Function DiccionarioHistorico(wsHist As Worksheet) As Object
+    Dim d As Object, v As Variant, i As Long, ult As Long, tk As String
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    ult = wsHist.Cells(wsHist.Rows.Count, H_NOMBRE).End(xlUp).Row
+    If ult >= 2 Then
+        v = wsHist.Range(wsHist.Cells(2, H_NOMBRE), wsHist.Cells(ult, H_SECTOR)).Value2
+        For i = 1 To UBound(v, 1)
+            tk = PrimerToken(Texto(v(i, 1)))
+            If Len(tk) > 0 Then d(tk) = Array(Texto(v(i, 2)), Texto(v(i, 3)), Texto(v(i, 4)))
+        Next i
+    End If
+    Set DiccionarioHistorico = d
+End Function
+
+Private Function PrimerToken(ByVal nombre As String) As String
+    Dim p As Long
+    nombre = Trim$(nombre)
+    p = InStr(nombre, " ")
+    If p = 0 Then PrimerToken = nombre Else PrimerToken = Left$(nombre, p - 1)
+End Function
+
+'------------------------------------------------------------------------------
+' Emisiones del portafolio de hoy que hay que agregar, leidas de "Port
+' Filtrado" (no de Port Bloomberg: Port Filtrado ya tiene el mismo A:R mas las
+' columnas de chequeo). Una emision entra si:
+'   - esta en Port Filtrado y su ISIN no esta en Instrumentos,
+'   - esta en "Lista de excepciones" con el Comentario lleno (ya la revisaron),
+'   - no vence en menos de MESES_MIN_VENCIMIENTO meses.
+' Cada alta es un Array: (0)=Name (1)=ISIN (2)=ticker BBG (3)=codigo de pais (4)=Mty (Date o Empty)
+Private Function LeerAltasDesdePortFiltrado(wbP As Workbook, dInst As Object, ByVal hoy As Date, ByRef saltadas As Collection) As Collection
+    Dim wsPF As Worksheet, wsEx As Worksheet
+    Dim colIsin As Long, colCom As Long, ultEx As Long, ultPF As Long
+    Dim vEx As Variant, vPF As Variant, i As Long
+    Dim dCom As Object, dVistos As Object
+    Dim isin As String, tk As String, d As Date, corte As Date
+    Dim res As New Collection
+
+    Set saltadas = New Collection
+    Set wsPF = Hoja(wbP, "Port Filtrado")
+    Set wsEx = Hoja(wbP, "Lista de excepciones")
+
+    colIsin = ColPorEncabezado(wsEx, "ISIN")
+    colCom = ColPorEncabezado(wsEx, "Comentario")
+    If colIsin = 0 Or colCom = 0 Then Err.Raise vbObjectError + 110, , "En 'Lista de excepciones' no encuentro los encabezados ISIN y Comentario."
+
+    Set dCom = CreateObject("Scripting.Dictionary")
+    dCom.CompareMode = vbTextCompare
+    ultEx = wsEx.Cells(wsEx.Rows.Count, colIsin).End(xlUp).Row
+    If ultEx >= 2 Then
+        vEx = wsEx.Range(wsEx.Cells(2, 1), wsEx.Cells(ultEx, IIf(colCom > colIsin, colCom, colIsin))).Value2
+        For i = 1 To UBound(vEx, 1)
+            isin = Trim$(Texto(vEx(i, colIsin)))
+            If Len(isin) > 0 Then dCom(isin) = Trim$(Texto(vEx(i, colCom)))
+        Next i
+    End If
+
+    corte = DateAdd("m", MESES_MIN_VENCIMIENTO, hoy)
+    Set dVistos = CreateObject("Scripting.Dictionary")
+    ultPF = wsPF.Cells(wsPF.Rows.Count, PF_ISIN).End(xlUp).Row
+    If ultPF < 2 Then Set LeerAltasDesdePortFiltrado = res: Exit Function
+    vPF = wsPF.Range(wsPF.Cells(2, 1), wsPF.Cells(ultPF, PF_MTY)).Value2
+
+    For i = 1 To UBound(vPF, 1)
+        isin = Trim$(Texto(vPF(i, PF_ISIN)))
+        If Len(isin) > 0 Then
+            If Not dInst.Exists(isin) And Not dVistos.Exists(isin) Then
+                If dCom.Exists(isin) Then
+                    If Len(dCom(isin)) > 0 Then
+                        dVistos.Add isin, 1
+                        If FechaDeTexto(vPF(i, PF_MTY), d) And d < corte Then
+                            saltadas.Add isin & " vence " & TextoFecha(d)
+                        Else
+                            tk = Trim$(Texto(vPF(i, PF_EQTY_TICKER)))
+                            If Len(tk) > 0 And Left$(tk, 2) <> "#N" Then
+                                If UCase$(Right$(tk, 7)) <> " EQUITY" Then tk = tk & " Equity"
+                            Else
+                                tk = ""
+                            End If
+                            If FechaDeTexto(vPF(i, PF_MTY), d) Then
+                                res.Add Array(Texto(vPF(i, PF_NOMBRE)), isin, tk, UCase$(Trim$(Texto(vPF(i, PF_CNTRY_RISK)))), d)
+                            Else
+                                res.Add Array(Texto(vPF(i, PF_NOMBRE)), isin, tk, UCase$(Trim$(Texto(vPF(i, PF_CNTRY_RISK)))), Empty)
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    Set LeerAltasDesdePortFiltrado = res
+End Function
+
+' Agrega las altas debajo del ultimo bono. C, D, E, I van con el valor que trae
+' el portafolio. F, G, H (IQ, Emisor, Sector Fundamentales) vienen del match
+' con Historico; si no hay match quedan en blanco, resaltadas para que se
+' note. O (vencimiento) y P (repetidos) se calculan de una vez. J, M, N quedan
+' con la formula de Bloomberg copiada de la ultima fila, para refrescarla y
+' congelarla despues. K, L, Q, R quedan en blanco (K se llena tras refrescar;
+' L, Q y R dependen de otro libro y no se calculan aqui).
+Private Sub EscribirAltas(wsI As Worksheet, altas As Collection, dHist As Object, ByVal ult As Long, ByVal filaTot As Long)
+    Dim n As Long, i As Long, r As Long, pais As String, tk As String, falta As Long
+    Dim amarillo As Long, datosHist As Variant
+
+    n = altas.Count
+    amarillo = RGB(255, 242, 204)
+
+    ' si no hay hueco antes de la fila de totales, se insertan filas encima
+    If filaTot > 0 Then
+        falta = ult + n - (filaTot - 2)
+        If falta > 0 Then wsI.Rows(filaTot - 1 & ":" & (filaTot - 2 + falta)).Insert
+    End If
+
+    ' formato y las formulas de J, M, N (las unicas que de verdad necesitan Bloomberg)
+    wsI.Range("B" & ult & ":R" & ult).Copy
+    wsI.Range("B" & ult + 1 & ":R" & ult + n).PasteSpecial xlPasteFormats
+    Application.CutCopyMode = False
+    wsI.Range(wsI.Cells(ult, I_RATING), wsI.Cells(ult, I_RATING)).Copy wsI.Range(wsI.Cells(ult + 1, I_RATING), wsI.Cells(ult + n, I_RATING))
+    wsI.Range(wsI.Cells(ult, I_CALLED), wsI.Cells(ult, I_DEFAULT)).Copy wsI.Range(wsI.Cells(ult + 1, I_CALLED), wsI.Cells(ult + n, I_DEFAULT))
+    Application.CutCopyMode = False
+    wsI.Range(wsI.Cells(ult + 1, I_CLASIF), wsI.Cells(ult + n, I_CLASIF)).ClearContents
+    wsI.Range(wsI.Cells(ult + 1, I_OAS), wsI.Cells(ult + n, I_OAS)).ClearContents
+    wsI.Range(wsI.Cells(ult + 1, I_IQ), wsI.Cells(ult + n, I_SECTOR)).ClearContents
+    wsI.Range(wsI.Cells(ult + 1, I_IQ), wsI.Cells(ult + n, I_SECTOR)).Interior.Pattern = xlNone
+
+    For i = 1 To n
+        r = ult + i
+        wsI.Cells(r, I_NOMBRE).Value2 = altas(i)(0)
+        wsI.Cells(r, I_ISIN).Value2 = altas(i)(1)
+        tk = altas(i)(2)
+        If Len(tk) > 0 Then wsI.Cells(r, I_TICKER).Value2 = tk Else wsI.Cells(r, I_TICKER).Interior.Color = amarillo
+
+        If dHist.Exists(PrimerToken(altas(i)(0))) Then
+            datosHist = dHist(PrimerToken(altas(i)(0)))
+            If Len(Texto(datosHist(0))) > 0 Then wsI.Cells(r, I_IQ).Value2 = datosHist(0) Else wsI.Cells(r, I_IQ).Interior.Color = amarillo
+            If Len(Texto(datosHist(1))) > 0 Then wsI.Cells(r, I_EMISOR).Value2 = datosHist(1) Else wsI.Cells(r, I_EMISOR).Interior.Color = amarillo
+            If Len(Texto(datosHist(2))) > 0 Then wsI.Cells(r, I_SECTOR).Value2 = datosHist(2) Else wsI.Cells(r, I_SECTOR).Interior.Color = amarillo
+        Else
+            wsI.Range(wsI.Cells(r, I_IQ), wsI.Cells(r, I_SECTOR)).Interior.Color = amarillo
+        End If
+
+        pais = PaisDeCodigo(altas(i)(3))
+        If Len(pais) > 0 Then wsI.Cells(r, I_PAIS).Value2 = pais Else wsI.Cells(r, I_PAIS).Interior.Color = amarillo
+
+        If Not IsEmpty(altas(i)(4)) Then wsI.Cells(r, I_VENCE).Value2 = CDate(altas(i)(4)) Else wsI.Cells(r, I_VENCE).Value2 = "NA"
+        wsI.Cells(r, I_REPETIDOS).Value2 = 1
+    Next i
+End Sub
+
+' Codigo de Cntry (Risk) -> nombre que usa Instrumentos.
+Private Function PaisDeCodigo(ByVal cod As String) As String
+    Select Case cod
+        Case "MX": PaisDeCodigo = "Mexico"
+        Case "BR": PaisDeCodigo = "Brazil"
+        Case "CL": PaisDeCodigo = "Chile"
+        Case "CO": PaisDeCodigo = "Colombia"
+        Case "PE": PaisDeCodigo = "Peru"
+    End Select
+End Function
+
+' Convierte J, M y N de las filas nuevas de formula a valor (Bloomberg ya
+' respondio) y calcula K a partir del J ya congelado.
+Private Sub CongelarFilasNuevas(wsI As Worksheet, ByVal desde As Long, ByVal hasta As Long)
+    Dim r As Long, rating As Variant
+    For r = desde To hasta
+        rating = wsI.Cells(r, I_RATING).Value2
+        wsI.Cells(r, I_RATING).Value2 = rating
+        wsI.Cells(r, I_CALLED).Value2 = wsI.Cells(r, I_CALLED).Value2
+        wsI.Cells(r, I_DEFAULT).Value2 = wsI.Cells(r, I_DEFAULT).Value2
+        wsI.Cells(r, I_CLASIF).Value2 = ClasificarRating(Texto(rating))
+    Next r
+End Sub
+
+' Misma regla que la formula original de K: sin rating o en el tramo CCC+ para
+' abajo es HY, lo demas es IG.
+Private Function ClasificarRating(ByVal rating As String) As String
+    Select Case UCase$(Trim$(rating))
+        Case "", "CCC", "CCC+", "B-", "B", "B+", "BB-", "BB", "BB+", "#N/A", "NR"
+            ClasificarRating = "HY"
+        Case Else
+            ClasificarRating = "IG"
+    End Select
+End Function
+
+' Bajas: llamadas (M = Y), en default (N = Y) o que vencen antes de hoy + 12
+' meses (O es fecha; "NA" = perpetuo, se queda). pendientes cuenta M/N vacios o
+' con error: no se sabe todavia si estan llamados.
+Private Function LeerBajas(wsI As Worksheet, ByVal ult As Long, ByVal hoy As Date, ByRef pendientes As Long) As Collection
+    Dim v As Variant, i As Long, r As Long, corte As Date, d As Date
+    Dim mot As String, res As New Collection
+
+    pendientes = 0
+    corte = DateAdd("m", MESES_MIN_VENCIMIENTO, hoy)
+    v = wsI.Range(wsI.Cells(I_FILA_INI, 1), wsI.Cells(ult, I_VENCE)).Value2
+
+    For i = 1 To UBound(v, 1)
+        r = I_FILA_INI + i - 1
+        mot = ""
+        If IsError(v(i, I_CALLED)) Then
+            pendientes = pendientes + 1
+        ElseIf Len(Trim$(Texto(v(i, I_CALLED)))) = 0 Then
+            pendientes = pendientes + 1
+        ElseIf UCase$(Trim$(Texto(v(i, I_CALLED)))) = "Y" Then
+            mot = "llamado"
+        End If
+
+        If IsError(v(i, I_DEFAULT)) Then
+            pendientes = pendientes + 1
+        ElseIf Len(Trim$(Texto(v(i, I_DEFAULT)))) = 0 Then
+            pendientes = pendientes + 1
+        ElseIf UCase$(Trim$(Texto(v(i, I_DEFAULT)))) = "Y" Then
+            If Len(mot) > 0 Then mot = mot & " + "
+            mot = mot & "default"
+        End If
+
+        If VarType(v(i, I_VENCE)) = vbDouble Then
+            d = CDate(v(i, I_VENCE))
+            If d < corte Then
+                If Len(mot) > 0 Then mot = mot & " + "
+                mot = mot & "vence " & TextoFecha(d)
+            End If
+        End If
+
+        If Len(mot) > 0 Then res.Add Array(r, Texto(v(i, I_ISIN)), Texto(v(i, I_NOMBRE)), mot)
+    Next i
+    Set LeerBajas = res
+End Function
+
+Private Sub BorrarFilas(wsI As Worksheet, bajas As Collection)
+    Dim i As Long
+    For i = bajas.Count To 1 Step -1
+        wsI.Rows(bajas(i)(0)).Delete
+    Next i
+End Sub
+
+' Ya no es formula: cada fila de bono se numera 1, 2, 3... como valor.
+Private Sub ReindexarB(wsI As Worksheet, ByVal ult As Long)
+    Dim n As Long, i As Long, v() As Variant
+    n = ult - I_FILA_INI + 1
+    If n <= 0 Then Exit Sub
+    ReDim v(1 To n, 1 To 1)
+    For i = 1 To n: v(i, 1) = i: Next i
+    wsI.Range(wsI.Cells(I_FILA_INI, I_IDX), wsI.Cells(ult, I_IDX)).Value2 = v
+End Sub
+
+Private Function ListaAltas(altas As Collection, ByVal maxN As Long) As String
+    Dim i As Long, s As String
+    For i = 1 To altas.Count
+        If i > maxN Then s = s & "... y " & (altas.Count - maxN) & " mas" & vbCrLf: Exit For
+        s = s & altas(i)(1) & "  " & altas(i)(0) & vbCrLf
+    Next i
+    ListaAltas = s
+End Function
+
+'==============================================================================
+' FASE 2
+'==============================================================================
+Public Sub Fase2_RF_y_Exportar()
+    Dim hoy As Date
+    Dim wb As Workbook, wbModelo As Workbook, wsI As Worksheet, wsRF As Worksheet, wsHY As Worksheet, wsIG As Worksheet, wsSep As Worksheet
+    Dim rutaResp As String, rutaExp As String
+    Dim ult As Long, filaTot As Long, cUlt As Long
+    Dim dModelo As Object, bonosOK As Collection, separados As Collection
+    Dim avisos As New Collection, probFechas As String
+    Dim msg As String, modeloFaltante As Long
+
+    hoy = Date
+    On Error GoTo Falla
+    GuardarEstadoExcel
+
+    Set wb = ThisWorkbook
+    Set wsI = Hoja(wb, "Instrumentos")
+    Set wsRF = Hoja(wb, "RF")
+    Set wsHY = Hoja(wb, "RF_HY")
+    Set wsIG = Hoja(wb, "RF_IG")
+    Set wsSep = HojaSeparados(wb)
+    AbrirOrigenesDeVinculos wb
+
+    Set wbModelo = AbrirModeloOpcional()
+    Set dModelo = DiccionarioModelo(wbModelo)
+    If dModelo.Count = 0 Then avisos.Add "No pude leer S_ValuationP (ni S_Valuation) del Modelo Latam RF. Rating y Duracion de RF (filas 8 y 10) quedaran en blanco para todos los bonos."
+
+    ' --- 1. Instrumentos tiene que estar en orden (sin revisar Sector/IQ: pueden venir en blanco) ---
+    ult = UltimaFilaInstrumentos(wsI, filaTot)
+    RevisarInstrumentos wsI, ult, avisos
+
+    ' --- 2. armar la lista de bonos que entran a RF, separando los que no tienen Clasif valido ---
+    ArmarListaDeBonos wsI, ult, dModelo, bonosOK, separados, modeloFaltante
+    If modeloFaltante > 0 Then avisos.Add modeloFaltante & " bonos sin Rating/Duracion del Modelo (quedan en blanco en RF)."
+
+    If MsgBox("Instrumentos tiene " & (ult - I_FILA_INI + 1) & " bonos." & vbCrLf & _
+              "Entran a RF: " & bonosOK.Count & vbCrLf & _
+              "Separados (Clasif invalido, se reintentan la siguiente corrida): " & separados.Count & vbCrLf & vbCrLf & _
+              "Voy a ajustar las columnas de RF, RF_HY y RF_IG, refrescar Bloomberg (puede tardar varios minutos), " & _
+              "pegar como valores y exportar." & vbCrLf & vbCrLf & "Sigo? (hay respaldo antes)", _
+              vbQuestion + vbYesNo, TITULO) = vbNo Then GoTo Cierre
+
+    rutaResp = Respaldar(wb, hoy, "Fase2")
+
+    EscribirSeparados wsSep, separados, hoy
+
+    ' --- 3. una columna por bono que sobrevivio ---
+    AjustarColumnas wsRF, bonosOK.Count, True
+    AjustarColumnas wsHY, bonosOK.Count, False
+    AjustarColumnas wsIG, bonosOK.Count, False
+    cUlt = wsRF.Range(COL_PRIMER_BONO & "1").Column + bonosOK.Count - 1
+    Application.Calculate
+
+    ' --- 4. filas 3,4,5,6,7,9 por valor (ya no formula); 8 y 10 desde el Modelo o blanco ---
+    EscribirCabecera wsRF, bonosOK
+
+    ' --- 5. Bloomberg en RF (fila 3303 BDH) ---
+    If Not RefrescarBBG(wsRF) Then MsgBox "No pude lanzar el refresh de Bloomberg por macro." & vbCrLf & _
+        "Hazlo tu en la hoja RF (pestana Bloomberg > Actualizar hoja) y luego pulsa Aceptar.", vbExclamation, TITULO
+    Application.Calculate
+    If Not EsperarBBG(wsRF.Range(wsRF.Cells(FILA_BDH, wsRF.Range(COL_PRIMER_BONO & "1").Column), wsRF.Cells(FILA_BDH, cUlt))) Then
+        Err.Raise vbObjectError + 201, , "Bloomberg no termino de responder en RF. No pegue nada; BD_RF se queda abierto sin guardar, revisalo o cierralo sin guardar tu mismo."
+    End If
+    Application.Calculate
+    Application.Calculate
+
+    ' --- 6. RF_HY y RF_IG copian la misma cabecera de RF (mismos bonos, mismo orden) ---
+    wsRF.Range(wsRF.Cells(1, wsRF.Range(COL_PRIMER_BONO & "1").Column), wsRF.Cells(11, cUlt)).Copy
+    wsHY.Cells(1, wsRF.Range(COL_PRIMER_BONO & "1").Column).PasteSpecial xlPasteValues
+    wsRF.Range(wsRF.Cells(1, wsRF.Range(COL_PRIMER_BONO & "1").Column), wsRF.Cells(11, cUlt)).Copy
+    wsIG.Cells(1, wsRF.Range(COL_PRIMER_BONO & "1").Column).PasteSpecial xlPasteValues
+    Application.CutCopyMode = False
+    ComparaISIN wsRF, wsHY, bonosOK.Count, "RF_HY"
+    ComparaISIN wsRF, wsIG, bonosOK.Count, "RF_IG"
+
+    ' --- 7. congelar 1109:2204 -> 12:1107 ---
+    Congelar wsRF, cUlt
+    Application.Calculate
+    Congelar wsHY, cUlt
+    Congelar wsIG, cUlt
+    Application.Calculate
+
+    ' --- 8. fechas alineadas ---
+    probFechas = ChequearFechas(wsRF, wsHY, wsIG, hoy)
+    If Len(probFechas) > 0 Then Err.Raise vbObjectError + 204, , probFechas
+
+    wb.Save
+
+    ' --- 9. paquete en valores ---
+    rutaExp = ExportarValores(wb, hoy, bonosOK.Count, avisos, rutaResp)
+
+    MsgBox "Fase 2 lista." & vbCrLf & vbCrLf & _
+        "Bonos en RF: " & bonosOK.Count & "   Separados: " & separados.Count & vbCrLf & "Valores: " & rutaExp & vbCrLf & _
+        IIf(avisos.Count > 0, vbCrLf & avisos.Count & " aviso(s); estan en la hoja Manifiesto.", ""), vbInformation, TITULO
+
+Cierre:
+    CerrarOrigenes
+    If Not wbModelo Is Nothing Then wbModelo.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    Exit Sub
+
+Falla:
+    msg = "No se pudo terminar la Fase 2: " & Err.Description
+    On Error Resume Next
+    CerrarOrigenes
+    If Not wbModelo Is Nothing Then wbModelo.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    MsgBox msg & vbCrLf & vbCrLf & "BD_RF (este archivo) se quedo abierto sin guardar los cambios de esta corrida; revisalo y guarda o cierra sin guardar tu mismo antes de volver a correr la macro.", vbCritical, TITULO
+End Sub
+
+'------------------------------------------------------------------------------
+' Instrumentos: indices 1..n seguidos, ISIN sin repetir. Ya no bloquea por
+' Sector o IQ en blanco (un bono recien agregado puede no tener match en
+' Historico); eso queda como aviso, no como error.
+Private Sub RevisarInstrumentos(wsI As Worksheet, ByVal ult As Long, avisos As Collection)
+    Dim v As Variant, i As Long, d As Object, isin As String, sinSector As Long, sinIQ As Long
+
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    v = wsI.Range(wsI.Cells(I_FILA_INI, 1), wsI.Cells(ult, I_SECTOR)).Value2
+
+    For i = 1 To UBound(v, 1)
+        isin = Trim$(Texto(v(i, I_ISIN)))
+        If Len(isin) = 0 Then Err.Raise vbObjectError + 210, , "Fila " & (I_FILA_INI + i - 1) & " de Instrumentos sin ISIN."
+        If d.Exists(isin) Then Err.Raise vbObjectError + 211, , "ISIN repetido en Instrumentos: " & isin
+        d.Add isin, 1
+        If IsError(v(i, I_IDX)) Then
+            Err.Raise vbObjectError + 212, , "Indice con error en la fila " & (I_FILA_INI + i - 1) & " de Instrumentos."
+        ElseIf CLng(Val(Texto(v(i, I_IDX)))) <> i Then
+            Err.Raise vbObjectError + 213, , "El indice de la fila " & (I_FILA_INI + i - 1) & " de Instrumentos no es " & i & ". Corre de nuevo Fase1 para reindexar."
+        End If
+        If Len(Trim$(Texto(v(i, I_SECTOR)))) = 0 Then sinSector = sinSector + 1
+        If Len(Trim$(Texto(v(i, I_IQ)))) = 0 Then sinIQ = sinIQ + 1
+    Next i
+
+    If sinSector > 0 Then avisos.Add sinSector & " bonos sin Sector Fundamentales en Instrumentos (RF fila 7 los deja en blanco)."
+    If sinIQ > 0 Then avisos.Add sinIQ & " bonos sin codigo IQ en Instrumentos."
+End Sub
+
+' Recorre Instrumentos en orden. Por cada bono con Clasif valido lo agrega a
+' bonosOK (en el mismo orden); si Clasif viene vacio o con error, va a
+' separados y no se le construye columna en RF esta corrida.
+' bonosOK(j) = Array(ISIN, Clasif, indiceB, Sector, Pais, Rating Modelo o "", Duracion Modelo o "")
+Private Sub ArmarListaDeBonos(wsI As Worksheet, ByVal ult As Long, dModelo As Object, ByRef bonosOK As Collection, ByRef separados As Collection, ByRef modeloFaltante As Long)
+    Dim v As Variant, i As Long, isin As String, clasif As String
+    Dim datosModelo As Variant, ratingM As String, durM As String
+
+    Set bonosOK = New Collection
+    Set separados = New Collection
+    modeloFaltante = 0
+
+    v = wsI.Range(wsI.Cells(I_FILA_INI, 1), wsI.Cells(ult, I_CLASIF)).Value2
+    For i = 1 To UBound(v, 1)
+        isin = Trim$(Texto(v(i, I_ISIN)))
+        If IsError(v(i, I_CLASIF)) Then
+            clasif = ""
+        Else
+            clasif = Trim$(Texto(v(i, I_CLASIF)))
+        End If
+
+        If clasif <> "IG" And clasif <> "HY" Then
+            separados.Add isin
+        Else
+            ratingM = "": durM = ""
+            If dModelo.Exists(isin) Then
+                datosModelo = dModelo(isin)
+                ratingM = Texto(datosModelo(0))
+                durM = Texto(datosModelo(1))
+            Else
+                modeloFaltante = modeloFaltante + 1
+            End If
+            bonosOK.Add Array(isin, clasif, Texto(v(i, I_IDX)), Texto(v(i, I_SECTOR)), Texto(v(i, I_PAIS)), ratingM, durM)
+        End If
+    Next i
+End Sub
+
+' Escribe en RF las filas 3 (Clasif), 4 (posicion), 5 (indice de Instrumentos),
+' 6 (ISIN), 7 (Sector), 9 (Pais) como valores; 8 (Rating) y 10 (Duracion) del
+' Modelo si lo encontro, o blanco si no.
+Private Sub EscribirCabecera(ws As Worksheet, bonosOK As Collection)
+    Dim c1 As Long, j As Long, col As Long, b As Variant
+    c1 = ws.Range(COL_PRIMER_BONO & "1").Column
+    For j = 1 To bonosOK.Count
+        b = bonosOK(j)
+        col = c1 + j - 1
+        ws.Cells(FILA_CLASIF, col).Value2 = b(1)
+        ws.Cells(FILA_IDXCOL, col).Value2 = j
+        ws.Cells(FILA_IDXINST, col).Value2 = b(2)
+        ws.Cells(FILA_ISIN, col).Value2 = b(0)
+        ws.Cells(FILA_SECTOR, col).Value2 = b(3)
+        ws.Cells(FILA_PAIS, col).Value2 = b(4)
+        If Len(b(5)) > 0 Then ws.Cells(FILA_RATING_MODELO, col).Value2 = b(5) Else ws.Cells(FILA_RATING_MODELO, col).ClearContents
+        If Len(b(6)) > 0 Then ws.Cells(FILA_DURACION_MODELO, col).Value2 = b(6) Else ws.Cells(FILA_DURACION_MODELO, col).ClearContents
+    Next j
+End Sub
+
+' Deja n columnas de bonos desde GH. Si faltan, copia la ultima hacia la
+' derecha (formato y las formulas mecanicas: fila 11 Moneda, la fila 3303 BDH
+' y las filas 1109:3301 que dependen de su propia columna, no de Instrumentos);
+' si sobran, limpia las del final. Las filas 3,4,5,6,7,8,9,10 se sobrescriben
+' despues con EscribirCabecera, asi que no importa lo que quede aqui pegado.
+Private Sub AjustarColumnas(ws As Worksheet, ByVal n As Long, ByVal esRF As Boolean)
+    Dim c1 As Long, cUlt As Long, nAntes As Long, k As Long
+    Dim filaForm As Long, filaFin As Long
+
+    c1 = ws.Range(COL_PRIMER_BONO & "1").Column
+    cUlt = ws.Cells(FILA_ISIN, ws.Columns.Count).End(xlToLeft).Column
+    If cUlt < c1 Then Err.Raise vbObjectError + 220, , "No encuentro columnas de bonos desde " & COL_PRIMER_BONO & " en " & ws.Name
+    nAntes = cUlt - c1 + 1
+
+    If esRF Then
+        filaForm = FILA_BDH - 1
+        filaFin = FILA_BDH_FIN
+    Else
+        filaForm = FILA_VIVA_FIN
+        filaFin = FILA_VIVA_FIN
+    End If
+
+    If n > nAntes Then
+        k = n - nAntes
+        ws.Range(ws.Cells(1, cUlt), ws.Cells(filaForm, cUlt)).Copy ws.Range(ws.Cells(1, cUlt + 1), ws.Cells(filaForm, cUlt + k))
+        If esRF Then
+            ws.Cells(FILA_BDH, cUlt).Copy ws.Range(ws.Cells(FILA_BDH, cUlt + 1), ws.Cells(FILA_BDH, cUlt + k))
+        End If
+        Application.CutCopyMode = False
+        ws.Range(ws.Cells(FILA_HIST_INI, cUlt + 1), ws.Cells(FILA_HIST_FIN, cUlt + k)).ClearContents
+    ElseIf n < nAntes Then
+        ws.Range(ws.Cells(1, c1 + n), ws.Cells(filaFin, cUlt)).ClearContents
+    End If
+End Sub
+
+' Pega 1109:2204 como valores en 12:1107, de la columna B hasta la ultima de bonos.
+Private Sub Congelar(ws As Worksheet, ByVal cUlt As Long)
+    ws.Range(ws.Cells(FILA_VIVA_INI, 2), ws.Cells(FILA_VIVA_FIN, cUlt)).Copy
+    ws.Cells(FILA_HIST_INI, 2).PasteSpecial xlPasteValues
+    Application.CutCopyMode = False
+End Sub
+
+' RF_HY y RF_IG deben quedar con los mismos ISIN que RF, columna por columna
+' (se copiaron de RF, esto es una comprobacion, no deberia fallar nunca).
+Private Sub ComparaISIN(wsRF As Worksheet, ws As Worksheet, ByVal n As Long, ByVal nombre As String)
+    Dim c1 As Long, a As Variant, b As Variant, j As Long
+    c1 = wsRF.Range(COL_PRIMER_BONO & "1").Column
+    a = wsRF.Range(wsRF.Cells(FILA_ISIN, c1), wsRF.Cells(FILA_ISIN, c1 + n - 1)).Value2
+    b = ws.Range(ws.Cells(FILA_ISIN, c1), ws.Cells(FILA_ISIN, c1 + n - 1)).Value2
+    For j = 1 To n
+        If Texto(a(1, j)) <> Texto(b(1, j)) Then
+            Err.Raise vbObjectError + 230, , nombre & " no coincide con RF en la columna " & (c1 + j - 1) & _
+                " (RF: " & Texto(a(1, j)) & ", " & nombre & ": " & Texto(b(1, j)) & "). Revisa la copia de la cabecera."
+        End If
+    Next j
+End Sub
+
+' Devuelve texto de error si las fechas no cuadran, o "" si todo bien.
+Private Function ChequearFechas(wsRF As Worksheet, wsHY As Worksheet, wsIG As Worksheet, ByVal hoy As Date) As String
+    Dim a As Variant, b As Variant, c As Variant
+    a = wsRF.Cells(FILA_HIST_INI, 2).Value2
+    b = wsHY.Cells(FILA_HIST_INI, 2).Value2
+    c = wsIG.Cells(FILA_HIST_INI, 2).Value2
+    If IsError(a) Or Not IsNumeric(a) Then ChequearFechas = "RF!B12 no es una fecha despues de pegar valores.": Exit Function
+    If CDbl(a) <> CDbl(Val(Texto(b))) Or CDbl(a) <> CDbl(Val(Texto(c))) Then
+        ChequearFechas = "Fechas desalineadas en la fila 12: RF " & TextoFecha(CDate(a)) & ", RF_HY " & Texto(b) & ", RF_IG " & Texto(c) & _
+            ". No se guardo nada."
+        Exit Function
+    End If
+    If CDate(a) < hoy - 7 Then ChequearFechas = "La fecha mas reciente de RF es " & TextoFecha(CDate(a)) & ", mas de 7 dias atras. Bloomberg no entrego datos nuevos."
+End Function
+
+'------------------------------------------------------------------------------
+' Hoja "Separados": una columna por dia de corrida, con la fecha en la fila 1
+' y los ISIN separados desde la fila 2. Si la macro ya corrio hoy, se limpia
+' esa columna y se reescribe con el resultado mas reciente. Si es un dia
+' nuevo, se deja una columna de espacio y se usa la siguiente.
+Private Function HojaSeparados(wb As Workbook) As Worksheet
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets("Separados")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = "Separados"
+    End If
+    Set HojaSeparados = ws
+End Function
+
+Private Sub EscribirSeparados(ws As Worksheet, separados As Collection, ByVal hoy As Date)
+    Dim ultCol As Long, col As Long, c As Long, i As Long, hoyTxt As String
+
+    hoyTxt = TextoFecha(hoy)
+    col = 0
+    ultCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If ws.Cells(1, 1).Value2 <> "" Or ultCol > 1 Then
+        For c = 1 To ultCol
+            If Texto(ws.Cells(1, c).Value2) = hoyTxt Then col = c: Exit For
+        Next c
+    End If
+
+    If col = 0 Then
+        If Len(Texto(ws.Cells(1, 1).Value2)) = 0 And ultCol <= 1 Then
+            col = 1
+        Else
+            col = ultCol + 2
+        End If
+    End If
+
+    ws.Columns(col).ClearContents
+    ws.Cells(1, col).Value2 = hoyTxt
+    ws.Cells(1, col).Font.Bold = True
+    For i = 1 To separados.Count
+        ws.Cells(1 + i, col).Value2 = separados(i)
+    Next i
+End Sub
+
+'------------------------------------------------------------------------------
+' S_ValuationP del Modelo Latam RF (ISIN en B, Rating en AB, Duracion en AH).
+' No es un error si el Modelo no se puede abrir: se sigue sin esos datos.
+Private Function AbrirModeloOpcional() As Workbook
+    Dim wb As Workbook
+    On Error Resume Next
+    Set wb = Workbooks("Modelo Latam RF.xlsx")
+    If wb Is Nothing Then Set wb = Workbooks("Modelo Latam RF.xlsm")
+    On Error GoTo 0
+    If wb Is Nothing Then
+        If Len(Dir(RUTA_MODELO)) > 0 Then
+            Application.AutomationSecurity = msoAutomationSecurityForceDisable
+            On Error Resume Next
+            Set wb = Workbooks.Open(RUTA_MODELO, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, Notify:=False)
+            On Error GoTo 0
+            Application.AutomationSecurity = mSeguridad
+        End If
+    End If
+    Set AbrirModeloOpcional = wb
+End Function
+
+' Prueba "S_ValuationP" (el nombre que de verdad aparece en el vinculo externo
+' de tu BD_RF) y, si no esta, "S_Valuation" (el nombre que me confirmaste).
+' Avisa en el Manifiesto si no encuentra ninguna de las dos.
+Private Function DiccionarioModelo(wbModelo As Workbook) As Object
+    Dim d As Object, ws As Worksheet, v As Variant, i As Long, ult As Long
+
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    If wbModelo Is Nothing Then Set DiccionarioModelo = d: Exit Function
+
+    On Error Resume Next
+    Set ws = wbModelo.Worksheets("S_ValuationP")
+    If ws Is Nothing Then Set ws = wbModelo.Worksheets("S_Valuation")
+    On Error GoTo 0
+    If ws Is Nothing Then Set DiccionarioModelo = d: Exit Function
+
+    ult = ws.Cells(ws.Rows.Count, SV_ISIN).End(xlUp).Row
+    If ult < 2 Then Set DiccionarioModelo = d: Exit Function
+
+    v = ws.Range(ws.Cells(1, SV_ISIN), ws.Cells(ult, SV_DURACION)).Value2
+    For i = 1 To UBound(v, 1)
+        If Len(Texto(v(i, 1))) > 0 Then
+            d(Trim$(Texto(v(i, 1)))) = Array(Texto(v(i, SV_RATING - SV_ISIN + 1)), Texto(v(i, SV_DURACION - SV_ISIN + 1)))
+        End If
+    Next i
+    Set DiccionarioModelo = d
+End Function
+
+'------------------------------------------------------------------------------
+' Exporta Instrumentos, RF, RF_HY, RF_IG, Historico y Separados a un libro
+' nuevo solo con valores (sin formulas, sin vinculos, sin Bloomberg), mas la
+' hoja Manifiesto. Guarda <Python>\Valores\BD_RF (valores AAAA.MM.DD).xlsx y
+' una copia de nombre fijo BD_RF_valores.xlsx para que los notebooks siempre
+' lean el mismo archivo.
+Private Function ExportarValores(wb As Workbook, ByVal hoy As Date, ByVal n As Long, avisos As Collection, ByVal rutaResp As String) As String
+    Dim wbX As Workbook, wsX As Worksheet, wsM As Worksheet
+    Dim nombres() As String, i As Long, ws As Worksheet, carpeta As String, ruta As String, fijo As String
+    Dim fRF As Variant, fHY As Variant, fIG As Variant
+
+    carpeta = wb.Path & "\Valores"
+    If Len(Dir(carpeta, vbDirectory)) = 0 Then MkDir carpeta
+    ruta = carpeta & "\BD_RF (valores " & TextoFecha(hoy) & ").xlsx"
+    fijo = carpeta & "\BD_RF_valores.xlsx"
+
+    nombres = Split(HOJAS_EXPORT, ",")
+    Set wbX = Workbooks.Add(xlWBATWorksheet)
+    On Error GoTo Falla
+
+    For i = LBound(nombres) To UBound(nombres)
+        Set ws = Nothing
+        On Error Resume Next
+        Set ws = wb.Worksheets(Trim$(nombres(i)))
+        On Error GoTo Falla
+        If ws Is Nothing Then
+            avisos.Add "No existe la hoja " & nombres(i) & "; no se exporto."
+        Else
+            Set wsX = wbX.Worksheets.Add(After:=wbX.Worksheets(wbX.Worksheets.Count))
+            wsX.Name = ws.Name
+            ws.UsedRange.Copy
+            wsX.Range("A1").PasteSpecial xlPasteValuesAndNumberFormats
+            ws.UsedRange.Copy
+            wsX.Range("A1").PasteSpecial xlPasteColumnWidths
+            Application.CutCopyMode = False
+        End If
+    Next i
+
+    fRF = wb.Worksheets("RF").Cells(FILA_HIST_INI, 2).Value2
+    fHY = wb.Worksheets("RF_HY").Cells(FILA_HIST_INI, 2).Value2
+    fIG = wb.Worksheets("RF_IG").Cells(FILA_HIST_INI, 2).Value2
+
+    Set wsM = wbX.Worksheets.Add(After:=wbX.Worksheets(wbX.Worksheets.Count))
+    wsM.Name = "Manifiesto"
+    wsM.Range("A1").Value2 = "Corrida": wsM.Range("B1").Value2 = TextoFecha(hoy) & " " & Hour(Now) & ":" & Right$("0" & Minute(Now), 2)
+    wsM.Range("A2").Value2 = "Usuario": wsM.Range("B2").Value2 = Environ$("USERNAME")
+    wsM.Range("A3").Value2 = "Origen": wsM.Range("B3").Value2 = wb.FullName
+    wsM.Range("A4").Value2 = "Bonos en RF": wsM.Range("B4").Value2 = n
+    wsM.Range("A5").Value2 = "Ultima fecha RF": wsM.Range("B5").Value2 = TextoFecha(CDate(fRF))
+    wsM.Range("A6").Value2 = "Ultima fecha RF_HY": wsM.Range("B6").Value2 = TextoFecha(CDate(fHY))
+    wsM.Range("A7").Value2 = "Ultima fecha RF_IG": wsM.Range("B7").Value2 = TextoFecha(CDate(fIG))
+    wsM.Range("A8").Value2 = "Respaldo previo": wsM.Range("B8").Value2 = rutaResp
+    wsM.Range("A9").Value2 = "Nota": wsM.Range("B9").Value2 = "Solo valores. L, Q y R de Instrumentos no se calculan (dependen de otro libro); los bonos sin Rating/Duracion del Modelo quedan en blanco en RF filas 8 y 10."
+    wsM.Range("A11").Value2 = "Avisos"
+    For i = 1 To avisos.Count
+        wsM.Cells(11 + i, 1).Value2 = avisos(i)
+    Next i
+    wsM.Range("A1:A11").Font.Bold = True
+    wsM.Columns("A").ColumnWidth = 26
+    wsM.Columns("B").ColumnWidth = 60
+
+    Application.DisplayAlerts = False
+    wbX.Worksheets(1).Delete
+    Application.DisplayAlerts = False
+    If Len(Dir(ruta)) > 0 Then Kill ruta
+    wbX.SaveAs ruta, xlOpenXMLWorkbook
+    wbX.Close SaveChanges:=False
+    Set wbX = Nothing
+
+    If Len(Dir(fijo)) > 0 Then Kill fijo
+    FileCopy ruta, fijo
+    ExportarValores = ruta
+    Exit Function
+
+Falla:
+    Dim m As String: m = Err.Description
+    On Error Resume Next
+    If Not wbX Is Nothing Then wbX.Close SaveChanges:=False
+    Err.Raise vbObjectError + 240, , "No pude exportar a valores: " & m
+End Function
+
+'==============================================================================
+' Bloomberg
+'==============================================================================
+Private Function RefrescarBBG(ws As Worksheet) As Boolean
+    Dim nombres As Variant, i As Long
+    nombres = Array("RefreshCurrentWorksheet", "RefreshAllWorksheets", "RefreshEntireWorkbook")
+    ws.Activate
+    For i = LBound(nombres) To UBound(nombres)
+        On Error Resume Next
+        Err.Clear
+        Application.Run nombres(i)
+        If Err.Number = 0 Then
+            On Error GoTo 0
+            RefrescarBBG = True
+            Exit Function
+        End If
+        On Error GoTo 0
+    Next i
+End Function
+
+Private Function EsperarBBG(rng As Range) As Boolean
+    Dim t0 As Date
+    t0 = Now
+    Do
+        If PendientesBBG(rng) = 0 Then EsperarBBG = True: Exit Function
+        If (Now - t0) * 86400 > ESPERA_BBG_SEG Then Exit Function
+        Application.StatusBar = "Esperando a Bloomberg... (" & Int((Now - t0) * 86400) & " s)"
+        DoEvents
+        Application.Wait Now + TimeSerial(0, 0, 3)
+    Loop
+End Function
+
+Private Function PendientesBBG(rng As Range) As Long
+    Dim c As Range, n As Long
+    For Each c In rng.Cells
+        If IsError(c.Value2) Then
+            If InStr(1, c.Text, "Requesting", vbTextCompare) > 0 Then n = n + 1
+        End If
+    Next c
+    PendientesBBG = n
+End Function
+
+'==============================================================================
+' Apertura de archivos y vinculos
+'==============================================================================
+Private Function AbrirSoloLectura(ByVal ruta As String) As Workbook
+    Application.AutomationSecurity = msoAutomationSecurityForceDisable
+    Set AbrirSoloLectura = Workbooks.Open(ruta, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, Notify:=False)
+    Application.AutomationSecurity = mSeguridad
+End Function
+
+Private Sub AbrirOrigenesDeVinculos(wb As Workbook)
+    Dim v As Variant, i As Long, ruta As String, nombre As String
+    Set mOrigenes = New Collection
+    v = wb.LinkSources(xlExcelLinks)
+    If IsEmpty(v) Then Exit Sub
+    For i = LBound(v) To UBound(v)
+        ruta = CStr(v(i))
+        nombre = NombreArchivo(ruta)
+        If Not EstaAbierto(nombre) Then
+            If Len(Dir(ruta)) > 0 Then
+                Application.AutomationSecurity = msoAutomationSecurityForceDisable
+                On Error Resume Next
+                mOrigenes.Add Workbooks.Open(ruta, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, Notify:=False), nombre
+                On Error GoTo 0
+                Application.AutomationSecurity = mSeguridad
+            End If
+        End If
+    Next i
+    wb.Activate
+End Sub
+
+Private Sub CerrarOrigenes()
+    Dim w As Variant
+    If mOrigenes Is Nothing Then Exit Sub
+    On Error Resume Next
+    For Each w In mOrigenes
+        w.Close SaveChanges:=False
+    Next w
+    Set mOrigenes = Nothing
+End Sub
+
+Private Function Respaldar(wb As Workbook, ByVal hoy As Date, ByVal fase As String) As String
+    Dim carpeta As String, ruta As String
+    carpeta = wb.Path & "\Respaldo"
+    If Len(Dir(carpeta, vbDirectory)) = 0 Then MkDir carpeta
+    ruta = carpeta & "\BD_RF (respaldo " & fase & " " & TextoFecha(hoy) & " " & Right$("0" & Hour(Now), 2) & Right$("0" & Minute(Now), 2) & ")"
+    wb.SaveCopyAs ruta & ".xlsm"
+    Respaldar = ruta
+End Function
+
+Private Sub EscribirLog(ByVal ruta As String, lineas As Collection)
+    Dim f As Integer, i As Long
+    f = FreeFile
+    Open ruta For Output As #f
+    For i = 1 To lineas.Count
+        Print #f, lineas(i)
+    Next i
+    Close #f
+End Sub
+
+'==============================================================================
+' Instrumentos: ubicar datos
+'==============================================================================
+Private Function UltimaFilaInstrumentos(wsI As Worksheet, ByRef filaTot As Long) As Long
+    Dim r As Long, tope As Long
+    r = I_FILA_INI
+    Do While Len(Texto(wsI.Cells(r + 1, I_ISIN).Value2)) > 0
+        r = r + 1
+        If r > 5000 Then Exit Do
+    Loop
+    UltimaFilaInstrumentos = r
+
+    filaTot = 0
+    tope = wsI.Cells(wsI.Rows.Count, I_IDX).End(xlUp).Row
+    Dim k As Long
+    For k = r + 1 To tope
+        If InStr(1, Texto(wsI.Cells(k, I_IDX).Value2) & Texto(wsI.Cells(k, I_NOMBRE).Value2), "sin Repetir", vbTextCompare) > 0 Then filaTot = k: Exit For
+    Next k
+    If filaTot > 0 Then
+        For k = r + 2 To filaTot - 1
+            If Len(Texto(wsI.Cells(k, I_ISIN).Value2)) > 0 Then
+                Err.Raise vbObjectError + 310, , "Hay un ISIN suelto en la fila " & k & " de Instrumentos, separado del bloque de bonos. Revisa la hoja."
+            End If
+        Next k
+    End If
+End Function
+
+Private Function DiccionarioISIN(wsI As Worksheet, ByVal ult As Long) As Object
+    Dim d As Object, v As Variant, i As Long
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    v = wsI.Range(wsI.Cells(I_FILA_INI, I_ISIN), wsI.Cells(ult, I_ISIN)).Value2
+    For i = 1 To UBound(v, 1)
+        If Len(Trim$(Texto(v(i, 1)))) > 0 Then d(Trim$(Texto(v(i, 1)))) = I_FILA_INI + i - 1
+    Next i
+    If d.Count < 50 Then Err.Raise vbObjectError + 311, , "Solo lei " & d.Count & " ISIN en Instrumentos; no me parece correcto."
+    Set DiccionarioISIN = d
+End Function
+
+'==============================================================================
+' Auxiliares
+'==============================================================================
+Private Function ColPorEncabezado(ws As Worksheet, ByVal texto_ As String) As Long
+    Dim c As Long
+    For c = 1 To 40
+        If UCase$(Trim$(Texto(ws.Cells(1, c).Value2))) = UCase$(texto_) Then ColPorEncabezado = c: Exit Function
+    Next c
+End Function
+
+' Mty llega como texto mm/dd/aaaa (o como fecha real).
+Private Function FechaDeTexto(ByVal v As Variant, ByRef d As Date) As Boolean
+    Dim p() As String, y As Long
+    If IsError(v) Or IsEmpty(v) Then Exit Function
+    If VarType(v) = vbString Then
+        p = Split(Trim$(CStr(v)), "/")
+        If UBound(p) <> 2 Then Exit Function
+        If Not (IsNumeric(p(0)) And IsNumeric(p(1)) And IsNumeric(p(2))) Then Exit Function
+        y = CLng(p(2))
+        If y < 100 Then y = 2000 + y
+        If CLng(p(0)) < 1 Or CLng(p(0)) > 12 Or CLng(p(1)) < 1 Or CLng(p(1)) > 31 Then Exit Function
+        d = DateSerial(y, CLng(p(0)), CLng(p(1)))
+        FechaDeTexto = True
+    ElseIf IsNumeric(v) Then
+        If CDbl(v) > 0 Then d = CDate(v): FechaDeTexto = True
+    End If
+End Function
+
+Private Function EstaAbierto(ByVal nombre As String) As Boolean
+    Dim w As Workbook
+    For Each w In Workbooks
+        If StrComp(w.Name, nombre, vbTextCompare) = 0 Then EstaAbierto = True: Exit Function
+    Next w
+End Function
+
+Private Function TextoFecha(ByVal d As Date) As String
+    TextoFecha = Year(d) & "." & Right$("0" & Month(d), 2) & "." & Right$("0" & Day(d), 2)
+End Function
+
+Private Function NombreArchivo(ByVal ruta As String) As String
+    NombreArchivo = Mid$(ruta, InStrRev(ruta, "\") + 1)
+End Function
+
+Private Function Texto(ByVal v As Variant) As String
+    If IsError(v) Then Exit Function
+    If IsNull(v) Then Exit Function
+    Texto = CStr(v)
+End Function
+
+Private Function Hoja(wb As Workbook, ByVal nombre As String) As Worksheet
+    Dim r As Worksheet
+    On Error Resume Next
+    Set r = wb.Worksheets(nombre)
+    On Error GoTo 0
+    If r Is Nothing Then Err.Raise vbObjectError + 320, , "No encuentro la hoja '" & nombre & "' en " & wb.Name
+    Set Hoja = r
+End Function
+
+Private Sub GuardarEstadoExcel()
+    mScreen = Application.ScreenUpdating
+    mEvents = Application.EnableEvents
+    mAlerts = Application.DisplayAlerts
+    mCalc = Application.Calculation
+    mSeguridad = Application.AutomationSecurity
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+End Sub
+
+Private Sub RestaurarEstadoExcel()
+    On Error Resume Next
+    Application.StatusBar = False
+    Application.CutCopyMode = False
+    Application.AutomationSecurity = mSeguridad
+    Application.Calculation = mCalc
+    Application.DisplayAlerts = mAlerts
+    Application.EnableEvents = mEvents
+    Application.ScreenUpdating = mScreen
+End Sub
