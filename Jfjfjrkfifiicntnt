@@ -1,0 +1,19 @@
+**ValueError: duplicados en el índice antes del pivot**
+
+El `.pivot()` exige que no haya más de una fila por combinación `Fecha + Fondo`. Si el Excel de origen trae alguna fecha repetida para el mismo fondo, truena. Dedupe justo antes del pivot, quedándote con el último valor (el más reciente que llegó), sin tocar nada más:
+
+BUSCA:
+```python
+    Nuevos_DQ_IN.set_index("Fecha",inplace=True)
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+    Nuevos_DQ_IN_T= Nuevos_DQ_IN.pivot(columns="Fondo", values="VALFON")
+```
+REEMPLAZA POR:
+```python
+    Nuevos_DQ_IN.set_index("Fecha",inplace=True)
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+    Nuevos_DQ_IN=Nuevos_DQ_IN.reset_index().drop_duplicates(subset=["Fecha","Fondo"], keep="last").set_index("Fecha")
+    Nuevos_DQ_IN_T= Nuevos_DQ_IN.pivot(columns="Fondo", values="VALFON")
+```
+
+No cambia columnas, valores ni el tipo de dato que exportas: para toda fecha-fondo que ya era única, el resultado es idéntico. Solo elimina filas repetidas exactas en esa combinación (quedándote con la última), que es lo único que le impedía al pivot reshapear.
