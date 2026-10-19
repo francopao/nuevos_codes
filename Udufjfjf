@@ -1,0 +1,83 @@
+**Diagnóstico:** el filtro `index>="2020-01-02"` compara **strings**, no fechas reales. Si en algún momento la celda "Fecha" fuente llega vacía/corrupta (ej. una celda con fórmula de Bloomberg que aún no tiene dato), `formateando_fechas()` no truena — genera un string tipo `"nan--"` o similar. Y como la letra `n` es mayor que cualquier dígito en orden ASCII, ese string **pasa el filtro como si fuera una fecha válida** y además queda ordenado al final (por eso te sale justo en la última fila, A1509). Luego Power BI intenta parsearlo como fecha, falla, y lo muestra como blanco. Esto no es un error nuevo que introdujimos: es un defecto preexistente en la lógica de filtrado que nunca se manifestó hasta que llegó una celda vacía real.
+
+No toco ningún dato válido — solo agrego validación explícita que detecta y avisa cuándo pasa esto, y descarta únicamente lo que nunca fue una fecha real.
+
+**1) En `DQ_IN`**
+
+BUSCA:
+```python
+    Nuevos_DQ_IN["Fecha"]= Nuevos_DQ_IN["Fecha"].apply(formateando_fechas)
+    
+    Nuevos_DQ_IN.set_index("Fecha",inplace=True)
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+    Nuevos_DQ_IN=Nuevos_DQ_IN.reset_index().drop_duplicates(subset=["Fecha","Fondo"], keep="last").set_index("Fecha")
+    Nuevos_DQ_IN_T= Nuevos_DQ_IN.pivot(columns="Fondo", values="VALFON")
+```
+REEMPLAZA POR:
+```python
+    Nuevos_DQ_IN["Fecha"]= Nuevos_DQ_IN["Fecha"].apply(formateando_fechas)
+    
+    _val = pd.to_datetime(Nuevos_DQ_IN["Fecha"], format="%Y-%m-%d", errors="coerce")
+    if _val.isna().any():
+        print(f"ALERTA DQ_IN: {_val.isna().sum()} fila(s) con Fecha invalida descartada(s): {Nuevos_DQ_IN.loc[_val.isna(),'Fecha'].unique().tolist()}")
+    Nuevos_DQ_IN = Nuevos_DQ_IN[_val.notna()]
+    
+    Nuevos_DQ_IN.set_index("Fecha",inplace=True)
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+    Nuevos_DQ_IN=Nuevos_DQ_IN.reset_index().drop_duplicates(subset=["Fecha","Fondo"], keep="last").set_index("Fecha")
+    Nuevos_DQ_IN_T= Nuevos_DQ_IN.pivot(columns="Fondo", values="VALFON")
+```
+
+**2) En `BD_TC`**
+
+BUSCA:
+```python
+    Nuevos_BD_TC["Fecha"]= Nuevos_BD_TC["Fecha"].apply(formateando_fechas)
+    
+    Nuevos_BD_TC.set_index("Fecha",inplace=True)
+    Nuevos_BD_TC=Nuevos_BD_TC[Nuevos_BD_TC.index>="2020-01-02"]
+```
+REEMPLAZA POR:
+```python
+    Nuevos_BD_TC["Fecha"]= Nuevos_BD_TC["Fecha"].apply(formateando_fechas)
+    
+    _val = pd.to_datetime(Nuevos_BD_TC["Fecha"], format="%Y-%m-%d", errors="coerce")
+    if _val.isna().any():
+        print(f"ALERTA BD_TC: {_val.isna().sum()} fila(s) con Fecha invalida descartada(s): {Nuevos_BD_TC.loc[_val.isna(),'Fecha'].unique().tolist()}")
+    Nuevos_BD_TC = Nuevos_BD_TC[_val.notna()]
+    
+    Nuevos_BD_TC.set_index("Fecha",inplace=True)
+    Nuevos_BD_TC=Nuevos_BD_TC[Nuevos_BD_TC.index>="2020-01-02"]
+```
+
+**3) Red de seguridad final, antes de exportar `Fondos_y_TC.csv`** (por si algo se cuela del join)
+
+BUSCA:
+```python
+Base_Final= Base_Integra.join(Base_TC)
+Base_Final.reset_index(inplace=True)
+try:
+    Base_Final.to_csv(ruta, index=False)
+except PermissionError:
+    print(f"ERROR: '{ruta}' esta abierto en Excel u otro programa. Cierralo y vuelve a ejecutar.")
+    raise
+```
+REEMPLAZA POR:
+```python
+Base_Final= Base_Integra.join(Base_TC)
+Base_Final.reset_index(inplace=True)
+
+if Base_Final["Fecha"].isna().any():
+    print(f"ALERTA: {Base_Final['Fecha'].isna().sum()} fila(s) con Fecha vacia en Fondos_y_TC, se descartan antes de exportar")
+    Base_Final = Base_Final[Base_Final["Fecha"].notna()]
+if Base_Final["Fecha"].duplicated().any():
+    print(f"ALERTA: Fecha duplicada en Fondos_y_TC: {Base_Final.loc[Base_Final['Fecha'].duplicated(keep=False),'Fecha'].unique().tolist()}")
+
+try:
+    Base_Final.to_csv(ruta, index=False)
+except PermissionError:
+    print(f"ERROR: '{ruta}' esta abierto en Excel u otro programa. Cierralo y vuelve a ejecutar.")
+    raise
+```
+
+Con esto, toda fila que sí tenía una fecha real queda exactamente igual (mismos valores, mismo orden, mismo tipo de dato). Lo único que cambia es que la fila corrupta que venía colándose se descarta con una alerta explícita en consola diciéndote exactamente qué valor crudo venía mal — así la próxima vez que pase no te enteras por Power BI sino por tu consola de Spyder.
