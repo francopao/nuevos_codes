@@ -1,0 +1,55 @@
+**1) Warning de tipos mixtos (línea con el `read_csv`)**
+
+BUSCA:
+```python
+Base_Diaria_csv=pd.read_csv(ruta, delimiter=",")
+```
+REEMPLAZA POR:
+```python
+Base_Diaria_csv=pd.read_csv(ruta, delimiter=",", low_memory=False)
+```
+Solo cambia cómo pandas infiere tipos al leer (lee todo de una vez en vez de por chunks); no altera el CSV que exportas después.
+
+**2) Riesgo de PermissionError al guardar (ya te pasó antes, documento adjunto) — primer bloque, dentro del `if`**
+
+BUSCA:
+```python
+    Base_Final.to_csv(ruta, index=False)  
+    
+##########################################################################################################################
+    
+    FiNaL = datetime.datetime.now()
+```
+REEMPLAZA POR:
+```python
+    try:
+        Base_Final.to_csv(ruta, index=False)
+    except PermissionError:
+        print(f"ERROR: '{ruta}' esta abierto en Excel u otro programa. Cierralo y vuelve a ejecutar.")
+        raise
+    
+##########################################################################################################################
+    
+    FiNaL = datetime.datetime.now()
+```
+
+**3) Mismo riesgo, segundo bloque (al final, bloque de Fondos_y_TC)**
+
+BUSCA:
+```python
+Base_Final= Base_Integra.join(Base_TC)
+Base_Final.reset_index(inplace=True)
+Base_Final.to_csv(ruta, index=False)  
+```
+REEMPLAZA POR:
+```python
+Base_Final= Base_Integra.join(Base_TC)
+Base_Final.reset_index(inplace=True)
+try:
+    Base_Final.to_csv(ruta, index=False)
+except PermissionError:
+    print(f"ERROR: '{ruta}' esta abierto en Excel u otro programa. Cierralo y vuelve a ejecutar.")
+    raise
+```
+
+Ninguno de los tres cambios toca filtros, cálculos ni el formato/tipo de dato exportado — solo blindan la lectura y la escritura.
