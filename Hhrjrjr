@@ -1,0 +1,25 @@
+**Módulo 1 — `Paso1_Portafolio` (`ActualizarPortafolioScreener`)**
+
+Automatiza el paso semanal de portafolio, antes de tocar BD_RF:
+
+1. Busca en la carpeta Emisiones Latam el "Portafolio Screening RF (AAAA.MM.DD)" más reciente y le saca una copia con fecha de hoy.
+2. Vacía "Port Bloomberg" (ClearContents, sin borrar filas, porque Port Filtrado lee esas celdas por referencia) y pega ahí el export del SRCH de Bloomberg (A:R) como valores, buscado en la carpeta BBG.
+3. Calcula y escribe como valores (ya no fórmula) las columnas S, T, U de Port Filtrado: S = 1 si el ISIN ya está en Instrumentos de BD_RF; T = 1 si ya está en Lista de excepciones; U = "AGREGAR/REVISAR" si S+T=0, si no "NO".
+4. Agrega al final de Lista de excepciones (A:M + BB Comp en N) las filas que salieron AGREGAR/REVISAR, con Comentario vacío para que alguien lo llene a mano.
+
+Para el paso 3 necesita los ISIN que ya están en Instrumentos: abre BD_RF.xlsm (lo busca ya abierto por nombre, si no lo encuentra lo abre solo lectura por ruta fija en Z:) solo para leer esa columna, y lo cierra sin guardar si lo abrió él.
+
+**Módulo 2 — `Paso2_BD_RF`, dos fases con revisión humana en medio**
+
+*Fase1_Instrumentos:*
+1. Guarda en la hoja "Historico" el Name/IQ/Emisor/Sector de lo que hoy tiene Instrumentos, para no perder esos datos cuando un bono se borre.
+2. Trae de "Port Filtrado" del portafolio del día los ISIN que no están en Instrumentos pero ya tienen Comentario en Lista de excepciones (ya revisados). A esos les busca IQ/Emisor/Sector en Historico comparando el primer token del Name (ej. "BBVASM"); si no encuentra nada, lo deja en blanco.
+3. Refresca Bloomberg, congela Rating/Called/Default de las filas nuevas como valor, y borra las que están llamadas, en default o vencen en menos de 12 meses.
+4. Reindexa la columna B como número (ya no fórmula).
+
+*Fase2_RF_y_Exportar:*
+1. Por cada bono de Instrumentos calcula como valor (ya no fórmula) Clasif, índice, ISIN, Sector y País en RF; busca Rating y Duración en la hoja S_ValuationP/S_Valuation del Modelo (que es el mismo libro donde corre la macro, así que la lee directo sin abrir nada).
+2. Si el Clasif de un bono no es válido (rating vacío o con error), ese bono no entra a RF esta semana: se anota en "Separados" y se reintenta la siguiente corrida.
+3. Ajusta las columnas de RF/RF_HY/RF_IG a la cantidad de bonos que sí entran, refresca Bloomberg (BDH fila 3303), pega el histórico 1109:2204 sobre 12:1107, y exporta un .xlsx solo con valores (Instrumentos, RF, RF_HY, RF_IG, Historico, Separados) con hoja Manifiesto, para leer sin Bloomberg.
+
+Ambas fases abren BD_RF.xlsm por ruta fija (`Z:\...\Python\BD_RF.xlsm`), hacen un respaldo antes de tocarlo, y lo cierran al final: si guarda bien, cierra guardando; si algo falla, cierra sin guardar para no dejar nada a medias. El libro donde corren ambos módulos (Modelo Latam RF.xlsx) nunca se abre ni se cierra por código, porque es el que ya tienes abierto corriendo la macro.
