@@ -1,0 +1,25 @@
+**1) KeyError en `DQ_IN` — índice de fechas no ordenado/con duplicados**
+
+BUSCA:
+```python
+    Nuevos_DQ_IN=Nuevos_DQ_IN.loc["2020-01-02":]
+```
+REEMPLAZA POR:
+```python
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+```
+
+**2) Mismo riesgo en `BD_TC` (aún no te truena porque el script paró antes, pero tiene el mismo patrón)**
+
+BUSCA:
+```python
+    Nuevos_BD_TC=Nuevos_BD_TC.loc["2020-01-02":]
+```
+REEMPLAZA POR:
+```python
+    Nuevos_BD_TC=Nuevos_BD_TC[Nuevos_BD_TC.index>="2020-01-02"]
+```
+
+**Por qué:** `.loc["2020-01-02":]` es un slice que exige índice ordenado (monotónico) y, antes de pandas 2.x más estricto, que la etiqueta exista. El export de QEST/BDPrecios no viene garantizado en orden cronológico ni sin fechas repetidas, así que el slice revienta. El filtro `index>="2020-01-02"` (comparación de strings ISO, que ordenan igual que fechas) hace exactamente el mismo filtro — mismas filas, mismo tipo de dato (string "YYYY-MM-DD") — pero sin requerir orden ni que la etiqueta exista exacta. No toca el pivot ni lo que exportas después.
+
+**Aparte — ojo con el CSV adjunto:** `Historico_RFL.csv` me llega con **1 sola fila** y una columna llamada literalmente `"10677636"` (parece un código/ISIN que terminó como encabezado). Eso no es un error del bloque que acabamos de tocar, pero sí es señal de que el archivo en disco quedó corrupto/desalineado de una corrida anterior — si el script lo lee así como "base ya actualizada", vas a arrastrar ese problema hacia adelante. Antes de tu próxima corrida, revisa manualmente ese CSV (o restaura un backup) para confirmar que tenga las ~29 columnas correctas y muchas filas históricas, no 1.
