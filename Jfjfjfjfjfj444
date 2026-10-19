@@ -1,0 +1,25 @@
+Primero la de altas, porque ahí hay una contradicción real que prefiero mostrarte antes de tocar nada.
+
+**Observación 1: el código actual no hace lo que mi explicación dijo, pero tampoco hace lo que tu mensaje describe ahora**
+
+Lo que el VBA hace hoy (función `LeerAltasDesdePortFiltrado`): lee "Port Filtrado" del portafolio más reciente (eso ya está bien, es el mismo `wbP` que `BuscarUltimoPortafolio` encuentra), y por cada ISIN que no está en Instrumentos, lo busca en "Lista de excepciones". Si lo encuentra Y el Comentario tiene algo escrito, entra como alta. Si el Comentario está vacío, o el ISIN ni siquiera está en Lista de excepciones, no entra y no se avisa en ningún lado, se ignora en silencio.
+
+Esto no es un invento mío de ahora: es lo que confirmaste explícitamente en la ronda de preguntas de la sesión pasada, cuando elegiste "mantener el filtro de excepciones" como condición de entrada.
+
+Tu mensaje de ahora dice lo contrario: "ignorando aquellos ISIN que tengan Comentario en Lista de excepciones... y no tengan Comentario en Lista de excepciones (ya revisados)". Leído literal, esto pide la regla inversa, que un ISIN entre cuando el Comentario está vacío, que era la lectura de la primera versión (antes de que la cambiáramos a propósito). Y llamar "ya revisados" a los que NO tienen comentario tampoco cuadra con cómo se usa esa columna en el resto del proceso: un Comentario vacío en Lista de excepciones normalmente es un AGREGAR/REVISAR pendiente de que alguien lo mire, no uno ya revisado.
+
+Además mencionas un paso que no existe en el diseño actual: que Instrumentos "debería haber sido actualizado previamente extrayendo los nuevos ISIN de Port Bloomberg". Hoy Instrumentos no se toca desde Port Bloomberg en ningún punto; el único lugar donde se agregan ISIN nuevos a Instrumentos es esta misma función, leyendo Port Filtrado, no Port Bloomberg.
+
+Antes de tocar el código necesito que me confirmes cuál de las dos reglas es la correcta: ¿Comentario lleno = entra (lo que hay hoy y lo que confirmaste antes), o Comentario vacío = entra (lo que acabas de escribir)? Y si hay un paso intermedio de Instrumentos-desde-Port-Bloomberg que no te he capturado, cuéntame en qué consiste, porque con lo que tengo documentado no existe.
+
+**Observación 2: sobre centralizar valores antes de dejar la PC con Bloomberg**
+
+Es realizable, y una parte ya está construida; otra parte no, y una tercera queda fuera de lo que el VBA puede controlar. Para ser preciso necesito separar los tres scripts de Valuation (RF, IG, HY) de BD_Fundamentals, porque dependen de archivos distintos:
+
+- **Valuation RF / RF_Valuation_IG / RF_Valuation_HY**: los tres leen únicamente `BD_RF.xlsm`, hojas RF/RF_HY/RF_IG, filas 12 a 1107. Esa franja ya es el bloque "pegado en valores" dentro del propio BD_RF (no son fórmulas de Bloomberg), y `Fase2_RF_y_Exportar` ya hace ese pegado (función `Congelar`) y además ya genera un archivo aparte solo de valores (`ExportarValores`, guarda `BD_RF (valores AAAA.MM.DD).xlsx` y una copia fija `BD_RF_valores.xlsx` con Instrumentos, RF, RF_HY, RF_IG, Historico y Separados). O sea esta parte del "centralizar antes de irte de la PC con Bloomberg" ya existe. Lo que falta: según mis notas de la sesión pasada, los tres notebooks hoy tienen la ruta de `BD_RF.xlsm` escrita fija, no apuntan al export limpio. Puedo cambiarles esa ruta para que lean `BD_RF_valores.xlsx` en vez del original, así quedan blindados del todo (sin depender de que nadie reabra el original en Excel real en la PC sin Bloomberg). Eso es un cambio en los notebooks de Python, no en el VBA.
+
+- **BD_Fundamentals**: ese notebook lee `BD_Fundamentals.xlsm` directo, un archivo que según el mapeo del proceso lo mantiene Gerard con el plugin de CIQ (no Bloomberg Terminal), y que ninguno de los dos módulos VBA abre, toca ni exporta. No es algo que el VBA pueda centralizar porque no participa del flujo BD_RF/Modelo. Si ese archivo también depende de que alguien lo tenga abierto un rato para que refresque CIQ antes de llevarlo a la PC de Python, es un problema aparte del de Gerard, no de este pipeline.
+
+- **Modelo Latam RF.xlsx**: dato que vale la pena que sepas, ninguno de los cuatro notebooks lee este archivo directamente. Las hojas con fórmulas vivas de Bloomberg que sí tiene (S_ValuationP, columnas G-V) solo las necesita el propio Excel para armar Screening y OP, no Python.
+
+Dime si quieres que agregue el repunteo de los tres notebooks hacia `BD_RF_valores.xlsx`, y resolvemos primero lo de la regla de altas antes de tocar el VBA.
