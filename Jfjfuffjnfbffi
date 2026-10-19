@@ -1,0 +1,66 @@
+**NameError: `Nuevos_DQ_IN` no existe en ese scope**
+
+Ese bloque de diagnóstico (el `#%%` final) es código de debug que armaste para investigar el error anterior. `Nuevos_DQ_IN` es una variable **local** dentro de la función `DQ_IN()` — una vez que la función termina y retorna, esa variable desaparece; nunca existió a nivel global del script. Por eso el bloque solo "funcionaba" si lo corrías pegado justo después de ejecutar el cuerpo de la función como celda suelta, pero no en una ejecución normal del script completo.
+
+Esto **no es parte del pipeline ni del output** (no toca `Base_Final`, `Historico_RFL.csv` ni `Fondos_y_TC.csv`) — es solo el bloque que usamos para inspeccionar el índice y diagnosticar el `KeyError`/`ValueError` anteriores. Como ya se resolvieron, lo más limpio es borrarlo:
+
+BUSCA:
+```python
+#%%
+# ===== DIAGNOSTICO DEL INDICE FECHA =====
+
+import pandas as pd
+
+print("----- INFO GENERAL -----")
+print("Tipo de índice:", type(Nuevos_DQ_IN.index))
+print("Dtype índice:", Nuevos_DQ_IN.index.dtype)
+print("Cantidad de filas:", len(Nuevos_DQ_IN))
+
+print("\n----- PRIMERAS 10 FECHAS -----")
+print(Nuevos_DQ_IN.index[:10])
+
+print("\n----- ULTIMAS 10 FECHAS -----")
+print(Nuevos_DQ_IN.index[-10:])
+
+print("\n----- RANGO DE FECHAS -----")
+print("Mínima :", Nuevos_DQ_IN.index.min())
+print("Máxima :", Nuevos_DQ_IN.index.max())
+
+print("\n----- ORDEN DEL INDICE -----")
+print("is_monotonic_increasing :", Nuevos_DQ_IN.index.is_monotonic_increasing)
+
+print("\n----- EXISTE 2020-01-02? -----")
+try:
+    print(pd.Timestamp("2020-01-02") in Nuevos_DQ_IN.index)
+except:
+    print("No se pudo evaluar como Timestamp")
+
+print("\n----- DUPLICADOS -----")
+print("Duplicados:", Nuevos_DQ_IN.index.duplicated().sum())
+
+# Intentar convertir explícitamente a datetime
+try:
+    idx_test = pd.to_datetime(Nuevos_DQ_IN.index)
+    print("\nConversión a datetime: OK")
+    print("Dtype:", idx_test.dtype)
+
+    print("\nExiste 2020-01-02:")
+    print(pd.Timestamp("2020-01-02") in idx_test)
+
+except Exception as e:
+    print("\nERROR AL CONVERTIR A DATETIME:")
+    print(e)
+
+print("\n----- FILAS CERCANAS A 2020 -----")
+try:
+    fechas = pd.to_datetime(Nuevos_DQ_IN.index)
+    mask = (fechas >= "2019-12-25") & (fechas <= "2020-01-10")
+    print(Nuevos_DQ_IN.loc[mask])
+except Exception as e:
+    print(e)
+
+# ===== FIN DIAGNOSTICO =====
+```
+REEMPLAZA POR: (nada — borra todo ese bloque, incluyendo el `#%%` de arriba)
+
+Con eso tu script queda terminando limpio en el print de "¡Base AUM y TC actualizada...!". Si en algún momento quieres volver a inspeccionar `Nuevos_DQ_IN` por fuera, la forma correcta sería que `DQ_IN()` también lo exponga (ej. `return Nuevos_DQ_IN_T, Nuevos_DQ_IN`), pero eso sí tocaría la función — no te lo recomiendo ahora que el output ya está validado y funcionando.
