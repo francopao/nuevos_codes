@@ -1,0 +1,284 @@
+Attribute VB_Name = "Paso4_SyncModelo"
+Option Explicit
+'==============================================================================
+' PASO 4: vista previa de sync Instrumentos -> Screening / S_ValuationP
+'
+' Nuevo. Screening y S_ValuationP son listas del Modelo que deberian tener los
+' mismos ISIN que Instrumentos (altas y bajas de Instrumentos deberian
+' reflejarse ahi tambien), pero hoy eso se hace a mano. Confirmaste que son
+' listas autocontenidas (no hay riesgo de romper otra cosa si se tocan), pero
+' por ser conservador en esta primera entrega el modulo NO toca las hojas
+' Screening/S_ValuationP reales de Modelo Latam RF.xlsx: exporta una copia a
+' un libro nuevo, hace ahi el alta/baja, y te deja esa copia para que la
+' revises y la traslades tu mismo al Modelo. Cuando quieras que toque las
+' hojas reales directamente, es un cambio chico sobre este mismo modulo.
+'
+' Que hace:
+'   - Lee el ISIN (y Name) de todos los bonos de Instrumentos en BD_RF.xlsm
+'     (se abre por ruta, igual que en los otros pasos).
+'   - Por cada hoja (Screening, S_ValuationP) copia su contenido completo
+'     (valores, no formulas: una formula que cruce otras hojas del Modelo no
+'     sirve de nada en un libro aparte) a una hoja del mismo nombre en un
+'     libro nuevo.
+'   - Compara los ISIN de esa copia contra los de Instrumentos:
+'       - ISIN que estan en Instrumentos y no en la copia -> se agregan al
+'         final, copiando formato y valores de la ultima fila existente como
+'         plantilla, con el ISIN puesto en la columna B (y el Name en A si la
+'         hoja tiene esa columna). El resto de columnas de esa fila nueva
+'         quedan con lo que tenia la ultima fila; revisalas antes de pasarlas
+'         al Modelo real.
+'       - ISIN que estan en la copia y no en Instrumentos -> se borra la fila.
+'   - Guarda la copia en Z:\...\Python\Respaldo (al lado de los respaldos de
+'     BD_RF) como "Modelo (sync preview AAAA.MM.DD HHMM).xlsx" y te dice
+'     cuantas altas/bajas detecto en cada hoja.
+'
+' No necesita Bloomberg. No toca BD_RF.xlsm (se abre solo lectura) ni Modelo
+' Latam RF.xlsx (el libro donde corre la macro: solo se lee ThisWorkbook para
+' copiar Screening y S_ValuationP, nunca se escribe en el).
+'
+' Antes de correr:
+'  - Este modulo va importado en Modelo Latam RF.xlsx, igual que los otros.
+'  - Columna B de Screening y de S_ValuationP tiene que ser el ISIN (igual que
+'    asume Paso2_Instrumentos para el COUNTIF de Q y R).
+'==============================================================================
+
+Private Const TITULO As String = "Screener RF - Paso 4"
+Private Const RUTA_PYTHON As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Python"
+Private Const ARCHIVO_BD_RF As String = "BD_RF.xlsm"
+
+Private Const I_FILA_INI As Long = 3
+Private Const I_ISIN As Long = 4   ' D
+Private Const I_NOMBRE As Long = 3 ' C
+
+Private mScreen As Boolean, mEvents As Boolean, mAlerts As Boolean
+Private mCalc As Long, mSeguridad As Long
+
+Public Sub Fase4_SincronizarModelo()
+    Dim rutaBD As String, carpeta As String, rutaStage As String, msg As String
+    Dim wb As Workbook, wsI As Worksheet, wbStage As Workbook
+    Dim dInst As Object
+    Dim altasScr As Collection, bajasScr As Collection, altasVal As Collection, bajasVal As Collection
+
+    rutaBD = RUTA_PYTHON & "\" & ARCHIVO_BD_RF
+    On Error GoTo Falla
+    GuardarEstadoExcel
+
+    Set wb = AbrirSoloLectura(rutaBD)
+    Set wsI = Hoja(wb, "Instrumentos")
+    Set dInst = DiccionarioInstrumentos(wsI)
+
+    Set wbStage = Workbooks.Add(xlWBATWorksheet)
+
+    SincronizarHoja ThisWorkbook, "Screening", dInst, wbStage, altasScr, bajasScr
+    SincronizarHoja ThisWorkbook, "S_ValuationP", dInst, wbStage, altasVal, bajasVal
+
+    Application.DisplayAlerts = False
+    If wbStage.Worksheets.Count > 1 Then wbStage.Worksheets(1).Delete
+    Application.DisplayAlerts = False
+
+    carpeta = RUTA_PYTHON & "\Respaldo"
+    If Len(Dir(carpeta, vbDirectory)) = 0 Then MkDir carpeta
+    rutaStage = carpeta & "\Modelo (sync preview " & TextoFecha(Date) & " " & Right$("0" & Hour(Now), 2) & Right$("0" & Minute(Now), 2) & ").xlsx"
+    wbStage.SaveAs rutaStage, xlOpenXMLWorkbook
+    wbStage.Close SaveChanges:=False
+    Set wbStage = Nothing
+
+    msg = "Vista previa de sync lista. No se tocaron las hojas reales de Modelo Latam RF.xlsx." & vbCrLf & vbCrLf & _
+        "Screening -> altas: " & NCol(altasScr) & "   bajas: " & NCol(bajasScr) & vbCrLf & _
+        "S_ValuationP -> altas: " & NCol(altasVal) & "   bajas: " & NCol(bajasVal) & vbCrLf & vbCrLf & _
+        "Revisa la copia en:" & vbCrLf & rutaStage & vbCrLf & vbCrLf & _
+        "Las filas que se agregarian copian valores y formato de la ultima fila existente, solo con el ISIN " & _
+        "(y el Name si aplica) cambiados; el resto de columnas de esas filas nuevas hay que revisarlas antes de " & _
+        "pasarlas al Modelo real. Las bajas ya vienen borradas en la copia."
+
+    If NCol(altasScr) = 0 And NCol(bajasScr) = 0 And NCol(altasVal) = 0 And NCol(bajasVal) = 0 Then
+        msg = "Screening y S_ValuationP ya tienen los mismos ISIN que Instrumentos; no hay nada que sincronizar." & vbCrLf & vbCrLf & _
+            "(de todos modos quedo la copia en " & rutaStage & ")"
+    End If
+
+    MsgBox msg, vbInformation, TITULO
+
+Cierre:
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    Exit Sub
+
+Falla:
+    Dim m As String: m = "No se pudo terminar: " & Err.Description
+    On Error Resume Next
+    If Not wbStage Is Nothing Then wbStage.Close SaveChanges:=False
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    RestaurarEstadoExcel
+    MsgBox m, vbCritical, TITULO
+End Sub
+
+Private Function NCol(c As Collection) As Long
+    If c Is Nothing Then Exit Function
+    NCol = c.Count
+End Function
+
+' ISIN -> Name, leido de Instrumentos (BD_RF.xlsm, solo lectura).
+Private Function DiccionarioInstrumentos(wsI As Worksheet) As Object
+    Dim d As Object, ult As Long, v As Variant, i As Long, isin As String
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    ult = wsI.Cells(wsI.Rows.Count, I_ISIN).End(xlUp).Row
+    If ult < I_FILA_INI Then Set DiccionarioInstrumentos = d: Exit Function
+    v = wsI.Range(wsI.Cells(I_FILA_INI, I_NOMBRE), wsI.Cells(ult, I_ISIN)).Value2
+    For i = 1 To UBound(v, 1)
+        isin = Trim$(Texto(v(i, I_ISIN - I_NOMBRE + 1)))
+        If Len(isin) > 0 Then d(isin) = Texto(v(i, 1))
+    Next i
+    If d.Count < 50 Then Err.Raise vbObjectError + 400, , "Solo lei " & d.Count & " ISIN en Instrumentos; no me parece correcto. No sigo."
+    Set DiccionarioInstrumentos = d
+End Function
+
+' Copia (solo valores y formato, sin formulas: una formula que cruce otras
+' hojas del Modelo no sirve de nada en un libro aparte) la hoja "nombreHoja"
+' de wbOrigen a una hoja nueva de wbStage, y ahi aplica altas/bajas contra
+' dInst (ISIN -> Name). Devuelve en altas/bajas los ISIN que se agregaron o se
+' borraron, para el resumen final. Si la hoja no existe en wbOrigen, no hace
+' nada (altas y bajas quedan como colecciones vacias).
+Private Sub SincronizarHoja(wbOrigen As Workbook, ByVal nombreHoja As String, dInst As Object, wbStage As Workbook, ByRef altas As Collection, ByRef bajas As Collection)
+    Dim wsOrigen As Worksheet, wsCopy As Worksheet
+    Dim dFila As Object, k As Variant, i As Long
+
+    Set altas = New Collection
+    Set bajas = New Collection
+
+    On Error Resume Next
+    Set wsOrigen = wbOrigen.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If wsOrigen Is Nothing Then Exit Sub
+
+    Set wsCopy = wbStage.Worksheets.Add(After:=wbStage.Worksheets(wbStage.Worksheets.Count))
+    wsCopy.Name = nombreHoja
+    wsOrigen.UsedRange.Copy
+    wsCopy.Range("A1").PasteSpecial xlPasteValuesAndNumberFormats
+    wsOrigen.UsedRange.Copy
+    wsCopy.Range("A1").PasteSpecial xlPasteColumnWidths
+    Application.CutCopyMode = False
+
+    Set dFila = DiccionarioFilaPorISIN(wsCopy, 2)   ' columna B = ISIN
+
+    For Each k In dFila.Keys
+        If Not dInst.Exists(CStr(k)) Then bajas.Add dFila(k)
+    Next k
+    ' de abajo hacia arriba, para no desordenar las filas que faltan borrar
+    QuitarFilas wsCopy, bajas
+
+    For Each k In dInst.Keys
+        If Not dFila.Exists(CStr(k)) Then
+            AgregarFilaCopia wsCopy, CStr(k), Texto(dInst(k))
+            altas.Add CStr(k)
+        End If
+    Next k
+End Sub
+
+' ISIN (columna "col") -> numero de fila, de arriba hacia abajo.
+Private Function DiccionarioFilaPorISIN(ws As Worksheet, ByVal col As Long) As Object
+    Dim d As Object, v As Variant, i As Long, ult As Long, isin As String
+    Set d = CreateObject("Scripting.Dictionary")
+    d.CompareMode = vbTextCompare
+    ult = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+    If ult >= 2 Then
+        v = ws.Range(ws.Cells(2, col), ws.Cells(ult, col)).Value2
+        If IsArray(v) Then
+            For i = 1 To UBound(v, 1)
+                isin = Trim$(Texto(v(i, 1)))
+                If Len(isin) > 0 Then d(isin) = 1 + i   ' fila real = encabezado (1) + i
+            Next i
+        Else
+            isin = Trim$(Texto(v))
+            If Len(isin) > 0 Then d(isin) = 2
+        End If
+    End If
+    Set DiccionarioFilaPorISIN = d
+End Function
+
+' filas viene en orden ascendente (se construyo recorriendo la hoja de arriba
+' a abajo); hay que borrar de abajo hacia arriba para que un borrado no corra
+' los numeros de fila de lo que falta por borrar.
+Private Sub QuitarFilas(ws As Worksheet, filas As Collection)
+    Dim i As Long
+    For i = filas.Count To 1 Step -1
+        ws.Rows(filas(i)).Delete
+    Next i
+End Sub
+
+' Agrega una fila al final, copiando valores y formato de la ultima fila
+' existente como plantilla (no formulas, por la misma razon que en
+' SincronizarHoja), y pone el ISIN en B y el Name en A. El resto de columnas
+' queda igual que la ultima fila; eso es justamente lo que hay que revisar a
+' mano antes de pasarlo al Modelo real.
+Private Sub AgregarFilaCopia(ws As Worksheet, ByVal isin As String, ByVal nombre As String)
+    Dim ult As Long, cFin As Long, destino As Long
+    ult = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row   ' columna B = ISIN
+    If ult < 2 Then ult = 1
+    cFin = ws.Cells(IIf(ult >= 1, ult, 1), ws.Columns.Count).End(xlToLeft).Column
+    If cFin < 2 Then cFin = 2
+    destino = ult + 1
+
+    If ult >= 2 Then
+        ws.Range(ws.Cells(ult, 1), ws.Cells(ult, cFin)).Copy
+        ws.Cells(destino, 1).PasteSpecial xlPasteValuesAndNumberFormats
+        ws.Range(ws.Cells(ult, 1), ws.Cells(ult, cFin)).Copy
+        ws.Cells(destino, 1).PasteSpecial xlPasteFormats
+        Application.CutCopyMode = False
+    End If
+
+    ws.Cells(destino, 2).Value2 = isin
+    ws.Cells(destino, 1).Value2 = nombre
+End Sub
+
+'==============================================================================
+' Auxiliares (mismas firmas que en los otros pasos)
+'==============================================================================
+Private Function AbrirSoloLectura(ByVal ruta As String) As Workbook
+    If Len(Dir(ruta)) = 0 Then Err.Raise vbObjectError + 401, , "No encuentro " & ruta
+    Application.AutomationSecurity = msoAutomationSecurityForceDisable
+    Set AbrirSoloLectura = Workbooks.Open(ruta, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, Notify:=False)
+    Application.AutomationSecurity = mSeguridad
+End Function
+
+Private Function Hoja(wb As Workbook, ByVal nombre As String) As Worksheet
+    Dim r As Worksheet
+    On Error Resume Next
+    Set r = wb.Worksheets(nombre)
+    On Error GoTo 0
+    If r Is Nothing Then Err.Raise vbObjectError + 402, , "No encuentro la hoja '" & nombre & "' en " & wb.Name
+    Set Hoja = r
+End Function
+
+Private Function Texto(ByVal v As Variant) As String
+    If IsError(v) Then Exit Function
+    If IsNull(v) Then Exit Function
+    Texto = CStr(v)
+End Function
+
+Private Function TextoFecha(ByVal d As Date) As String
+    TextoFecha = Year(d) & "." & Right$("0" & Month(d), 2) & "." & Right$("0" & Day(d), 2)
+End Function
+
+Private Sub GuardarEstadoExcel()
+    mScreen = Application.ScreenUpdating
+    mEvents = Application.EnableEvents
+    mAlerts = Application.DisplayAlerts
+    mCalc = Application.Calculation
+    mSeguridad = Application.AutomationSecurity
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+End Sub
+
+Private Sub RestaurarEstadoExcel()
+    On Error Resume Next
+    Application.StatusBar = False
+    Application.CutCopyMode = False
+    Application.AutomationSecurity = mSeguridad
+    Application.Calculation = mCalc
+    Application.DisplayAlerts = mAlerts
+    Application.EnableEvents = mEvents
+    Application.ScreenUpdating = mScreen
+End Sub
