@@ -1,0 +1,41 @@
+'==============================================================================
+' Bloomberg
+'==============================================================================
+Private Function RefrescarBBG(ws As Worksheet) As Boolean
+    Dim nombres As Variant, i As Long
+    nombres = Array("RefreshCurrentWorksheet", "RefreshAllWorksheets", "RefreshEntireWorkbook")
+    ws.Activate
+    For i = LBound(nombres) To UBound(nombres)
+        On Error Resume Next
+        Err.Clear
+        Application.Run nombres(i)
+        If Err.Number = 0 Then
+            On Error GoTo 0
+            RefrescarBBG = True
+            Exit Function
+        End If
+        On Error GoTo 0
+    Next i
+End Function
+
+Private Function EsperarBBG(rng As Range) As Boolean
+    Dim t0 As Date
+    t0 = Now
+    Do
+        If PendientesBBG(rng) = 0 Then EsperarBBG = True: Exit Function
+        If (Now - t0) * 86400 > ESPERA_BBG_SEG Then Exit Function
+        Application.StatusBar = "Esperando a Bloomberg... (" & Int((Now - t0) * 86400) & " s)"
+        DoEvents
+        Application.Wait Now + TimeSerial(0, 0, 3)
+    Loop
+End Function
+
+Private Function PendientesBBG(rng As Range) As Long
+    Dim c As Range, n As Long
+    For Each c In rng.Cells
+        If IsError(c.Value2) Then
+            If InStr(1, c.Text, "Requesting", vbTextCompare) > 0 Then n = n + 1
+        End If
+    Next c
+    PendientesBBG = n
+End Function
