@@ -1,0 +1,513 @@
+Option Explicit
+
+Private Const RUTA_SCREENING As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Screener RF\1. BD Screener\Emisiones Latam\"
+Private Const RUTA_RAIZ As String = "Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Screener RF\"
+Private Const MAX_INTENTOS_BBG As Long = 12
+Private Const SEGUNDOS_ESPERA_BBG As Long = 5
+
+Public Sub ActualizarBDRF()
+    Dim app As Object
+    Dim wbBDRF As Object
+    Dim wbPort As Object
+    Dim wbSalida As Object
+    Dim wsInstrumentos As Object
+    Dim wsPortBB As Object
+    Dim wsExcepciones As Object
+    Dim wsRF As Object
+    Dim wsSpreadsRF As Object
+    Dim wsSalidaInstr As Object
+    Dim wsSalidaPB As Object
+    Dim rngValores As Object
+
+    Dim rutaArchivo As String
+    Dim rutaSalida As String
+
+    Dim colISIN_PB As Long, colName_PB As Long, colCntry_PB As Long
+    Dim colName_I As Long, colISIN_I As Long, colPais_I As Long
+    Dim colTicker_I As Long, colIQ_I As Long, colEmisor_I As Long, colSector_I As Long
+    Dim colJ As Long, colK As Long, colL As Long, colM As Long, colN As Long
+    Dim colO As Long, colP As Long, colQ As Long, colR As Long
+
+    Dim headerRowPB As Long, headerRowInstr As Long
+    Dim lastRowInstr As Long, lastRowPB As Long, lastRowExcep As Long
+
+    Dim screenState As Boolean
+    Dim eventsState As Boolean
+    Dim calcState As Long
+
+    Dim dictExistISIN As Object
+    Dim dictExcepISIN As Object
+    Dim dictEquivalencias As Object
+    Dim colCombos As Object
+
+    Dim filasNuevas As Collection
+    Dim filaDestino As Long, filaOrigen As Long
+    Dim i As Long, j As Long, k As Long
+    Dim newRowsCount As Long
+
+    Dim vIsinExist As String, vIsinExcep As String
+    Dim nameVal As String, prefijo As String, claveCombo As String
+    Dim isinActual As String
+    Dim nameNueva As String, isinNueva As String, cntryNueva As String, paisNueva As String
+    Dim prefijoNueva As String, comboUnico As String
+    Dim tickerNueva As String, iqNueva As String, emisorNueva As String, sectorNueva As String
+    Dim claveUnica As Variant
+    Dim partes() As String
+
+    Dim intentos As Long
+    Dim hayErroresCarga As Boolean
+    Dim isinFila As String, nameFila As String
+    Dim ratingVal As Variant, ratingTxt As String, spreadVal As Variant
+    Dim contISIN As Long
+
+    On Error GoTo ErrHandler
+
+    Set app = Application
+    screenState = app.ScreenUpdating
+    calcState = app.Calculation
+    eventsState = app.EnableEvents
+    app.ScreenUpdating = False
+    app.Calculation = xlCalculationManual
+    app.EnableEvents = False
+    app.DisplayAlerts = False
+
+    rutaArchivo = ObtenerArchivoMasReciente(RUTA_SCREENING)
+    If rutaArchivo = "" Then
+        MsgBox "No se encontro ningun archivo Portafolio Screening RF en la ruta especificada.", vbCritical
+        GoTo Salir
+    End If
+
+    Set wbBDRF = ThisWorkbook
+    Set wsInstrumentos = wbBDRF.Sheets("Instrumentos")
+    Set wsRF = wbBDRF.Sheets("RF")
+    Set wsSpreadsRF = wbBDRF.Sheets("SpreadsRF")
+
+    Set wbPort = app.Workbooks.Open(RUTA_SCREENING & rutaArchivo, UpdateLinks:=0, ReadOnly:=True)
+    Set wsPortBB = wbPort.Sheets("Port Bloomberg")
+    Set wsExcepciones = wbPort.Sheets("Lista de excepciones")
+
+    headerRowPB = 1
+    colISIN_PB = 5
+    colName_PB = EncontrarColumnaPorEncabezado(wsPortBB, headerRowPB, 1, 21, "Name")
+    colCntry_PB = EncontrarColumnaPorEncabezado(wsPortBB, headerRowPB, 1, 21, "Cntry (Risk)")
+
+    If colName_PB = 0 Or colCntry_PB = 0 Then
+        MsgBox "No se pudieron ubicar los encabezados Name y/o Cntry (Risk) en Port Bloomberg.", vbCritical
+        GoTo Salir
+    End If
+
+    headerRowInstr = 1
+    colName_I = 3
+    colISIN_I = 4
+    colJ = 10: colK = 11: colL = 12: colM = 13: colN = 14
+    colO = 15: colP = 16: colQ = 17: colR = 18
+
+    colPais_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "Pais")
+    If colPais_I = 0 Then colPais_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "Pais (Riesgo)")
+    colTicker_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "Ticker")
+    colIQ_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "IQ")
+    colEmisor_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "Emisor")
+    colSector_I = EncontrarColumnaPorEncabezado(wsInstrumentos, headerRowInstr, 1, 9, "Sector Fundamentals")
+
+    If colPais_I = 0 Or colTicker_I = 0 Or colIQ_I = 0 Or colEmisor_I = 0 Or colSector_I = 0 Then
+        MsgBox "No se pudieron ubicar todos los encabezados requeridos en Instrumentos (Pais, Ticker, IQ, Emisor, Sector Fundamentals).", vbCritical
+        GoTo Salir
+    End If
+
+    lastRowInstr = wsInstrumentos.Cells(wsInstrumentos.Rows.Count, colISIN_I).End(xlUp).Row
+    lastRowPB = wsPortBB.Cells(wsPortBB.Rows.Count, colISIN_PB).End(xlUp).Row
+    lastRowExcep = wsExcepciones.Cells(wsExcepciones.Rows.Count, 5).End(xlUp).Row
+
+    Set dictExistISIN = CreateObject("Scripting.Dictionary")
+    dictExistISIN.CompareMode = vbTextCompare
+    For i = headerRowInstr + 1 To lastRowInstr
+        vIsinExist = Trim(CStr(wsInstrumentos.Cells(i, colISIN_I).Value))
+        If vIsinExist <> "" Then
+            If Not dictExistISIN.Exists(vIsinExist) Then dictExistISIN.Add vIsinExist, True
+        End If
+    Next i
+
+    Set dictExcepISIN = CreateObject("Scripting.Dictionary")
+    dictExcepISIN.CompareMode = vbTextCompare
+    For i = headerRowPB + 1 To lastRowExcep
+        vIsinExcep = Trim(CStr(wsExcepciones.Cells(i, 5).Value))
+        If vIsinExcep <> "" Then
+            If Not dictExcepISIN.Exists(vIsinExcep) Then dictExcepISIN.Add vIsinExcep, True
+        End If
+    Next i
+
+    Set dictEquivalencias = CreateObject("Scripting.Dictionary")
+    dictEquivalencias.CompareMode = vbTextCompare
+    For i = headerRowInstr + 1 To lastRowInstr
+        nameVal = Trim(CStr(wsInstrumentos.Cells(i, colName_I).Value))
+        If nameVal <> "" Then
+            prefijo = ObtenerPrimeraPalabra(nameVal)
+            claveCombo = Trim(CStr(wsInstrumentos.Cells(i, colTicker_I).Value)) & "|" & _
+                         Trim(CStr(wsInstrumentos.Cells(i, colIQ_I).Value)) & "|" & _
+                         Trim(CStr(wsInstrumentos.Cells(i, colEmisor_I).Value)) & "|" & _
+                         Trim(CStr(wsInstrumentos.Cells(i, colSector_I).Value))
+            If Not dictEquivalencias.Exists(prefijo) Then
+                Set colCombos = CreateObject("Scripting.Dictionary")
+                colCombos.CompareMode = vbTextCompare
+                colCombos.Add claveCombo, True
+                dictEquivalencias.Add prefijo, colCombos
+            Else
+                If Not dictEquivalencias(prefijo).Exists(claveCombo) Then
+                    dictEquivalencias(prefijo).Add claveCombo, True
+                End If
+            End If
+        End If
+    Next i
+
+    Set filasNuevas = New Collection
+    For i = headerRowPB + 1 To lastRowPB
+        isinActual = Trim(CStr(wsPortBB.Cells(i, colISIN_PB).Value))
+        If isinActual <> "" Then
+            If Not dictExistISIN.Exists(isinActual) And Not dictExcepISIN.Exists(isinActual) Then
+                filasNuevas.Add i
+            End If
+        End If
+    Next i
+
+    If filasNuevas.Count = 0 Then
+        wbPort.Close SaveChanges:=False
+        MsgBox "No se encontraron nuevas emisiones para incorporar.", vbInformation
+        GoTo Salir
+    End If
+
+    filaDestino = lastRowInstr + 1
+
+    For k = 1 To filasNuevas.Count
+        filaOrigen = filasNuevas(k)
+        nameNueva = Trim(CStr(wsPortBB.Cells(filaOrigen, colName_PB).Value))
+        isinNueva = Trim(CStr(wsPortBB.Cells(filaOrigen, colISIN_PB).Value))
+        cntryNueva = Trim(CStr(wsPortBB.Cells(filaOrigen, colCntry_PB).Value))
+
+        Select Case UCase(cntryNueva)
+            Case "MX": paisNueva = "Mexico"
+            Case "PE": paisNueva = "Peru"
+            Case "BR": paisNueva = "Brazil"
+            Case "CL": paisNueva = "Chile"
+            Case "CO": paisNueva = "Colombia"
+            Case Else: paisNueva = ""
+        End Select
+
+        tickerNueva = "": iqNueva = "": emisorNueva = "": sectorNueva = ""
+        prefijoNueva = ObtenerPrimeraPalabra(nameNueva)
+        If dictEquivalencias.Exists(prefijoNueva) Then
+            If dictEquivalencias(prefijoNueva).Count = 1 Then
+                For Each claveUnica In dictEquivalencias(prefijoNueva).Keys
+                    comboUnico = CStr(claveUnica)
+                Next claveUnica
+                partes = Split(comboUnico, "|")
+                tickerNueva = partes(0)
+                iqNueva = partes(1)
+                emisorNueva = partes(2)
+                sectorNueva = partes(3)
+            End If
+        End If
+
+        wsInstrumentos.Cells(filaDestino, colName_I).Value = nameNueva
+        wsInstrumentos.Cells(filaDestino, colISIN_I).Value = isinNueva
+        wsInstrumentos.Cells(filaDestino, colPais_I).Value = paisNueva
+        wsInstrumentos.Cells(filaDestino, colTicker_I).Value = tickerNueva
+        wsInstrumentos.Cells(filaDestino, colIQ_I).Value = iqNueva
+        wsInstrumentos.Cells(filaDestino, colEmisor_I).Value = emisorNueva
+        wsInstrumentos.Cells(filaDestino, colSector_I).Value = sectorNueva
+
+        wsInstrumentos.Cells(filaDestino, colM).Formula = "=IF(BDP(""" & isinNueva & """,""called"")=""#N/A Field Not Applicable"",""NA"",BDP(""" & isinNueva & """,""called""))"
+        wsInstrumentos.Cells(filaDestino, colN).Formula = "=IF(BDP(""" & isinNueva & """,""defaulted"")=""#N/A Field Not Applicable"",""NA"",BDP(""" & isinNueva & """,""defaulted""))"
+
+        filaDestino = filaDestino + 1
+    Next k
+
+    newRowsCount = filasNuevas.Count
+    wbPort.Close SaveChanges:=False
+    lastRowInstr = filaDestino - 1
+
+    intentos = 0
+    Do
+        app.CalculateFullRebuild
+        app.Wait Now + TimeValue("0:00:0" & SEGUNDOS_ESPERA_BBG)
+        DoEvents
+
+        hayErroresCarga = False
+        For i = (lastRowInstr - newRowsCount + 1) To lastRowInstr
+            If InStr(1, CStr(wsInstrumentos.Cells(i, colM).Text), "#NAME?") > 0 Or _
+               InStr(1, CStr(wsInstrumentos.Cells(i, colN).Text), "#NAME?") > 0 Then
+                hayErroresCarga = True
+                Exit For
+            End If
+        Next i
+
+        intentos = intentos + 1
+    Loop While hayErroresCarga And intentos < MAX_INTENTOS_BBG
+
+    If hayErroresCarga Then
+        MsgBox "Bloomberg no respondio correctamente luego de " & MAX_INTENTOS_BBG & " intentos. Se detiene la ejecucion.", vbCritical
+        GoTo Salir
+    End If
+
+    For i = (lastRowInstr - newRowsCount + 1) To lastRowInstr
+        isinFila = Trim(CStr(wsInstrumentos.Cells(i, colISIN_I).Value))
+
+        ratingVal = BuscarValorPorISIN(wsRF, isinFila, 6, 8)
+        wsInstrumentos.Cells(i, colJ).Value = ratingVal
+
+        ratingTxt = Trim(CStr(ratingVal))
+        If ratingTxt = "" Or ratingTxt = "CCC" Or ratingTxt = "CCC+" Or ratingTxt = "B-" Or _
+           ratingTxt = "B" Or ratingTxt = "B+" Or ratingTxt = "BB-" Or ratingTxt = "BB" Or ratingTxt = "BB+" Then
+            wsInstrumentos.Cells(i, colK).Value = "HY"
+        Else
+            wsInstrumentos.Cells(i, colK).Value = "IG"
+        End If
+
+        spreadVal = BuscarValorPorISIN(wsSpreadsRF, isinFila, 6, 12)
+        wsInstrumentos.Cells(i, colL).Value = spreadVal
+
+        nameFila = Trim(CStr(wsInstrumentos.Cells(i, colName_I).Value))
+        wsInstrumentos.Cells(i, colO).Value = CalcularFechaDesdeName(nameFila)
+
+        contISIN = 0
+        For j = headerRowInstr + 1 To lastRowInstr
+            If Trim(CStr(wsInstrumentos.Cells(j, colISIN_I).Value)) = isinFila Then contISIN = contISIN + 1
+        Next j
+        wsInstrumentos.Cells(i, colP).Value = contISIN
+
+        wsInstrumentos.Cells(i, colQ).Value = ContarISINEnOtroLibro("Modelo Latam RF.xlsx", "Screening", 2, isinFila)
+        wsInstrumentos.Cells(i, colR).Value = ContarISINEnOtroLibro("Modelo Latam RF.xlsx", "S_ValuationP", 2, isinFila)
+    Next i
+
+    wbBDRF.Save
+
+    For i = lastRowInstr To headerRowInstr + 1 Step -1
+        If UCase(Trim(CStr(wsInstrumentos.Cells(i, colM).Value))) = "Y" Or _
+           UCase(Trim(CStr(wsInstrumentos.Cells(i, colN).Value))) = "Y" Then
+            wsInstrumentos.Rows(i).Delete
+        End If
+    Next i
+
+    wbBDRF.Save
+
+    lastRowInstr = wsInstrumentos.Cells(wsInstrumentos.Rows.Count, colISIN_I).End(xlUp).Row
+
+    Set wbSalida = app.Workbooks.Add
+    Do While wbSalida.Sheets.Count > 1
+        wbSalida.Sheets(wbSalida.Sheets.Count).Delete
+    Loop
+    wbSalida.Sheets(1).Name = "Instrumentos"
+    Set wsSalidaInstr = wbSalida.Sheets("Instrumentos")
+
+    wsInstrumentos.UsedRange.Copy
+    wsSalidaInstr.Range("A1").PasteSpecial Paste:=xlPasteAll
+    app.CutCopyMode = False
+    Set rngValores = wsSalidaInstr.UsedRange
+    rngValores.Value = rngValores.Value
+
+    wbSalida.Sheets.Add(After:=wbSalida.Sheets(wbSalida.Sheets.Count)).Name = "Port Bloomberg"
+    Set wsSalidaPB = wbSalida.Sheets("Port Bloomberg")
+
+    Set wbPort = app.Workbooks.Open(RUTA_SCREENING & rutaArchivo, UpdateLinks:=0, ReadOnly:=True)
+    Set wsPortBB = wbPort.Sheets("Port Bloomberg")
+    wsPortBB.Range("A1:U" & lastRowPB).Copy
+    wsSalidaPB.Range("A1").PasteSpecial Paste:=xlPasteAll
+    app.CutCopyMode = False
+    wsSalidaPB.UsedRange.Value = wsSalidaPB.UsedRange.Value
+    wbPort.Close SaveChanges:=False
+
+    rutaSalida = RUTA_SCREENING & "Inputs - Screener RF.xlsx"
+    wbSalida.SaveAs Filename:=rutaSalida, FileFormat:=xlOpenXMLWorkbook
+    wbSalida.Close SaveChanges:=False
+
+Salir:
+    app.ScreenUpdating = screenState
+    app.Calculation = calcState
+    app.EnableEvents = eventsState
+    app.DisplayAlerts = True
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical
+    Resume Salir
+End Sub
+
+Private Function ObtenerArchivoMasReciente(ByVal ruta As String) As String
+    Dim fso As Object
+    Dim carpeta As Object
+    Dim archivo As Object
+    Dim nombreArchivo As String
+    Dim fechaArchivo As Date
+    Dim fechaMaxima As Date
+    Dim nombreMaximo As String
+    Dim posParentesis As Long
+    Dim textoFecha As String
+    Dim anio As Integer, mes As Integer, dia As Integer
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(ruta) Then
+        ObtenerArchivoMasReciente = ""
+        Exit Function
+    End If
+
+    Set carpeta = fso.GetFolder(ruta)
+    fechaMaxima = 0
+    nombreMaximo = ""
+
+    For Each archivo In carpeta.Files
+        nombreArchivo = archivo.Name
+        If InStr(1, nombreArchivo, "Portafolio Screening RF", vbTextCompare) > 0 Then
+            posParentesis = InStr(nombreArchivo, "(")
+            If posParentesis > 0 Then
+                textoFecha = Mid(nombreArchivo, posParentesis + 1, 10)
+                If Len(textoFecha) >= 10 Then
+                    If IsNumeric(Mid(textoFecha, 1, 4)) And IsNumeric(Mid(textoFecha, 6, 2)) And IsNumeric(Mid(textoFecha, 9, 2)) Then
+                        anio = CInt(Mid(textoFecha, 1, 4))
+                        mes = CInt(Mid(textoFecha, 6, 2))
+                        dia = CInt(Mid(textoFecha, 9, 2))
+                        On Error Resume Next
+                        fechaArchivo = DateSerial(anio, mes, dia)
+                        On Error GoTo 0
+                        If fechaArchivo > fechaMaxima Then
+                            fechaMaxima = fechaArchivo
+                            nombreMaximo = nombreArchivo
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next archivo
+
+    ObtenerArchivoMasReciente = nombreMaximo
+End Function
+
+Private Function EncontrarColumnaPorEncabezado(ByVal ws As Object, ByVal fila As Long, ByVal colInicio As Long, ByVal colFin As Long, ByVal texto As String) As Long
+    Dim c As Long
+    Dim valorCelda As String
+    EncontrarColumnaPorEncabezado = 0
+    For c = colInicio To colFin
+        valorCelda = Trim(CStr(ws.Cells(fila, c).Value))
+        If StrComp(valorCelda, texto, vbTextCompare) = 0 Then
+            EncontrarColumnaPorEncabezado = c
+            Exit Function
+        End If
+    Next c
+End Function
+
+Private Function ObtenerPrimeraPalabra(ByVal texto As String) As String
+    Dim pos As Long
+    texto = Trim(texto)
+    pos = InStr(texto, " ")
+    If pos = 0 Then
+        ObtenerPrimeraPalabra = texto
+    Else
+        ObtenerPrimeraPalabra = Left(texto, pos - 1)
+    End If
+End Function
+
+Private Function BuscarValorPorISIN(ByVal ws As Object, ByVal isin As String, ByVal filaEncabezados As Long, ByVal filaValores As Long) As Variant
+    Dim ultimaCol As Long
+    Dim c As Long
+    ultimaCol = ws.Cells(filaEncabezados, ws.Columns.Count).End(xlToLeft).Column
+    For c = 1 To ultimaCol
+        If StrComp(Trim(CStr(ws.Cells(filaEncabezados, c).Value)), isin, vbTextCompare) = 0 Then
+            BuscarValorPorISIN = ws.Cells(filaValores, c).Value
+            Exit Function
+        End If
+    Next c
+    BuscarValorPorISIN = ""
+End Function
+
+Private Function CalcularFechaDesdeName(ByVal nombreInstrumento As String) As Variant
+    On Error GoTo ErrorFecha
+    Dim ultimos8 As String
+    Dim anio As Integer, mes As Integer, dia As Integer
+    ultimos8 = Right(nombreInstrumento, 8)
+    anio = CInt("20" & Right(nombreInstrumento, 2))
+    mes = CInt(Left(ultimos8, 2))
+    dia = CInt(Mid(ultimos8, 4, 2))
+    CalcularFechaDesdeName = DateSerial(anio, mes, dia)
+    Exit Function
+ErrorFecha:
+    CalcularFechaDesdeName = "NA"
+End Function
+
+Private Function ContarISINEnOtroLibro(ByVal nombreArchivo As String, ByVal nombreHoja As String, ByVal columna As Long, ByVal isin As String) As Long
+    Dim wb As Object
+    Dim ws As Object
+    Dim app As Object
+    Dim yaAbierto As Boolean
+    Dim ultimaFila As Long
+    Dim i As Long
+    Dim contador As Long
+    Dim fso As Object
+    Dim rutaCompleta As String
+
+    Set app = Application
+    yaAbierto = False
+    contador = 0
+
+    On Error Resume Next
+    Set wb = app.Workbooks(nombreArchivo)
+    On Error GoTo 0
+
+    If wb Is Nothing Then
+        Set fso = CreateObject("Scripting.FileSystemObject")
+        rutaCompleta = BuscarArchivoEnSubcarpetas(fso, RUTA_RAIZ, nombreArchivo)
+        If rutaCompleta = "" Then
+            ContarISINEnOtroLibro = 0
+            Exit Function
+        End If
+        Set wb = app.Workbooks.Open(rutaCompleta, UpdateLinks:=0, ReadOnly:=True)
+    Else
+        yaAbierto = True
+    End If
+
+    On Error Resume Next
+    Set ws = wb.Sheets(nombreHoja)
+    On Error GoTo 0
+
+    If Not ws Is Nothing Then
+        ultimaFila = ws.Cells(ws.Rows.Count, columna).End(xlUp).Row
+        For i = 2 To ultimaFila
+            If StrComp(Trim(CStr(ws.Cells(i, columna).Value)), isin, vbTextCompare) = 0 Then
+                contador = contador + 1
+            End If
+        Next i
+    End If
+
+    If Not yaAbierto Then wb.Close SaveChanges:=False
+
+    ContarISINEnOtroLibro = contador
+End Function
+
+Private Function BuscarArchivoEnSubcarpetas(ByVal fso As Object, ByVal rutaBase As String, ByVal nombreArchivo As String) As String
+    Dim carpeta As Object
+    Dim subcarpeta As Object
+    Dim archivo As Object
+    Dim resultado As String
+
+    resultado = ""
+    If Not fso.FolderExists(rutaBase) Then
+        BuscarArchivoEnSubcarpetas = ""
+        Exit Function
+    End If
+
+    Set carpeta = fso.GetFolder(rutaBase)
+
+    For Each archivo In carpeta.Files
+        If StrComp(archivo.Name, nombreArchivo, vbTextCompare) = 0 Then
+            BuscarArchivoEnSubcarpetas = archivo.Path
+            Exit Function
+        End If
+    Next archivo
+
+    For Each subcarpeta In carpeta.SubFolders
+        resultado = BuscarArchivoEnSubcarpetas(fso, subcarpeta.Path, nombreArchivo)
+        If resultado <> "" Then
+            BuscarArchivoEnSubcarpetas = resultado
+            Exit Function
+        End If
+    Next subcarpeta
+
+    BuscarArchivoEnSubcarpetas = ""
+End Function
