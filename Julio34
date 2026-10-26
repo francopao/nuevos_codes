@@ -1,0 +1,510 @@
+#%%
+# Parameters
+inicio = "062026"
+final = "082026"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+import unicodedata, difflib
+
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1),int(a2)+1)
+#%%
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+meses_m = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre']
+meses_cod=['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SET','OCT','NOV','DIC']
+#%%
+import shutil
+
+#Archivo
+source_file = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Históricos\Produccion.xlsx"
+#landing
+destination_dir = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Históricos\Backup"
+
+def copy_file_to_directory(source, des):
+    # Crear el directorio de destino si no existe
+    if not os.path.exists(des):
+        os.makedirs(des)
+    # Extraer el nombre del archivo de la ruta de origen
+    file_name = os.path.basename(source)
+    # Construir la ruta de destino completa
+    dest_file = os.path.join(des, file_name)
+    try:
+        # Copiar el archivo
+        shutil.copyfile(source, dest_file)
+        print(f"Archivo copiado exitosamente.")
+    except Exception as e:
+        print(f"Error al copiar el archivo: {str(e)}")
+
+copy_file_to_directory(source_file, destination_dir)
+
+#%%
+array_rutas = []
+for i in rango_anios:
+    if(rango_anios[-1]==i):
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0'+ str(j)
+                    
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(1,int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i) 
+                array_rutas.append(ruta)
+                
+    elif(i != rango_anios[0]):
+        for j in range(1,13):
+            if(len(str(j))==1):
+                j = '0' + str(j)
+            ruta = str(j) + str(i)
+            array_rutas.append(ruta)
+        
+    else:
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(int(m1),13):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+#%%
+def _clave(s):
+    """Clave de comparación: sin tildes, MAYÚSCULAS, espacios simples, '*-*' -> '&'."""
+    s = unicodedata.normalize('NFKD', str(s))
+    s = ''.join(c for c in s if not unicodedata.combining(c)).upper()
+    return re.sub(r'\s+', ' ', s.replace('*-*', '&')).strip()
+
+# (1) Nombre único de titulares que SOLO cambian por tilde / mayúscula / espacio doble / "*-*".
+TITULAR_UNICO = [
+    'COMPAÑIA MINERA CARAVELI S.A.C.',
+    'COMPAÑIA MINERA SANTA LUISA S.A.',
+    'GLORE PERU S.A.C',
+    'COMPAÑIA MINERA SCORPION S.A.',
+    'COMPAÑIA MINERA RAURA S.A.',
+    'COMPAÑIA MINERA SAN VALENTIN S.A.',
+    'COMPAÑIA MINERA CONDESTABLE S.A.',
+    'COMPAÑIA MINERA MAXPALA S.A.C.',
+    'COMPAÑIA MINERA CORIRE S.A.C.',
+    'COMPAÑIA MINERA ATAHUALPA S.A.C.',
+    'AMG-AUPLATA MINING GROUP PERÚ S.A.C.',
+    'CORPORACION MINERA ANANEA S.A.',
+    'A & G CORPORACION MINERA OROSEL S.R.L.',
+    'CORPORACION MINERA SACRACANCHA S.A.C.',
+    'CORPORACION PACHAKORI E.I.R.L.',
+    'NICONSTA COMPAÑIA MINERA S.A.C.',
+    'CORPORACION & SERVICIOS MULTIPLES TUMI DE ORO SOCIEDAD ANONIMA',
+    'CORPORACION CAYETANA SOCIEDAD COMERCIAL DE RESPONSABILIDAD LIMITADA - CORPCA S.R.L.',
+    'AURIFERA SELVA DE ORO PERU S.A.C.',
+    'GRUPO MINERO H & R SOCIEDAD ANONIMA CERRADA - GRUPO MINERO H & R S.A.C.',
+    'DOS AMIGOS V&B S.A.C.',
+    'CORPORACION MINERA SANTA TERESA ITUATA E.I.R.L.',
+    'CORPORACION MINERA GAMAX S.C.R.L.',
+    'EMPRESA MINERA GRUPO GRANDE SOCIEDAD ANONIMA - MINERA G & G S.A.',
+]
+
+# (2) Alias reales: variante -> nombre único (el corto, como pediste). Agrega aquí las nuevas.
+TITULAR_ALIAS = {
+    'COMPAÑIA DE MINAS BUENAVENTURA S.A.A.': 'BUENAVENTURA',
+    'COMPAÑIA MINERA ANTAMINA S.A.': 'ANTAMINA',
+    'EMPRESA ADMINISTRADORA CERRO S.A.C.': 'EMPRESA ADMINISTRADORA CERRO',
+    'COMPAÑIA MINERA PODEROSA S.A.': 'PODEROSA',
+    'COMPAÑIA MINERA LINCUNA S.A.': 'LINCUNA',
+    'COMPAÑIA MINERA ARGENTUM S.A.C.': 'ARGENTUM',
+    'EMPRESA MINERA LOS QUENUALES S.A.C.': 'LOS QUENUALES',
+    'MINSUR S.A.': 'MINSUR',
+    'COMPAÑIA MINERA ARES S.A.C.': 'ARES',
+    'MINERA YANACOCHA S.R.L.': 'YANACOCHA',
+    'SOCIEDAD MINERA EL BROCAL S.A.A.': 'EL BROCAL',
+    'MINERA BATEAS S.A.C.': 'BATEAS',
+    'COMPAÑIA MINERA CHUNGAR S.A.C.': 'CHUNGAR',
+    'NEXA RESOURCES ATACOCHA S.A.A.': 'NEXA ATACOCHA',
+    'NEXA RESOURCES EL PORVENIR S.A.C.': 'NEXA EL PORVENIR',
+    'MINERA CHINALCO PERU S.A.': 'MINERA CHINALCO',
+    'NEXA RESOURCES CAJAMARQUILLA S.A.': 'NEXA CAJAMARQUILLA',
+    'PAN AMERICAN SILVER HUARON S.A.': 'PAN AMERICAN SILVER HUARON',
+    'COMPAÑIA MINERA ANTAPACCAY S.A.': 'ANTAPACCAY',
+    'MINERA TITAN DEL PERU S.R.L.': 'TITAN DEL PERU',
+    'MINERA COLQUISIRI S.A.': 'MINERA COLQUISIRI',
+    'SOCIEDAD MINERA CORONA S.A.': 'MINERA CORONA',
+    'MINERA SHUNTUR S.A.C.': 'SHUNTUR',
+    'MINERA LAS BAMBAS S.A.': 'MINERA LAS BAMBAS',
+    'MINERA SHOUXIN PERU S.A.': 'SHOUXIN',
+    'SHAHUINDO S.A.C.': 'SHAHUINDO',
+    'HUDBAY PERU S.A.C.': 'HUDBAY',
+    'COMPAÑIA MINERA KOLPA S.A.': 'KOLPA',
+    'NEXA RESOURCES PERU S.A.A.': 'NEXA PERU',
+    'CORI PUNO S.R.L.': 'CORI PUNO S.A.C.',
+    'COMPAÑIA MINERA COIMOLACHE S.A.': 'COIMOLACHE',
+    'LA ARENA S.A.': 'LA ARENA',
+    'MINERA VETA DORADA S.A.C.': 'MINERA VETA DORADA',
+    'MINERA BOROO MISQUICHILCA S.A.': 'BOROO MISQUICHILCA',
+    'SOCIEDAD MINERA CERRO VERDE S.A.A.': 'CERRO VERDE',
+    'MINERA OREX S.A.C.': 'MINERA OREX',
+    'MINERA COLIBRI S.A.C.': 'MINERA COLIBRI',
+    'CONSORCIO PERUANO DE MINAS S.A.C': 'CONSORCIO PERUANO DE MINAS',
+    'MARCOBRE S.A.C.': 'MARCOBRE',
+    'GOLD FIELDS LA CIMA S.A.': 'GOLD FIELDS LA CIMA',
+    'MINERA LA ZANJA S.R.L.': 'MINERA LA ZANJA',
+    'MINERA LAYTARUMA S.A.': 'MINERA LAYTARUMA',
+    'VISTA GOLD S.A.C.': 'VISTA GOLD',
+    'MINERA ESPAÑOLITA DEL SUR S.A.': 'MINERA ESPAÑOLITA DEL SUR',
+    'METALURGIA BUSINESS PERU S.A.A.': 'METALURGIA BUSINESS PERU',
+    'LOS TRES EMBLEMAS DORADOS DE ORO S.A.C.': 'LOS TRES EMBLEMAS DORADOS DE ORO',
+    'ANGLO AMERICAN QUELLAVECO S.A.': 'ANGLO AMERICAN QUELLAVECO',
+    'SHOUGANG HIERRO PERU S.A.A.': 'SHOUGANG HIERRO',
+    'PUKA MANI E.I.R.L.': 'PUKA MANI',
+    'PUYANI E.I.R.L.': 'PUYANI',
+    'UNION MINERA HIPASUR S.A.C.': 'UNION MINERA HIPASUR',
+    'AUREX S.A.C.': 'AUREX S.A.',
+    'LA JOYA MINING S.A.C.': 'LA JOYA MINING',
+    'SOUTHERN PERU COPPER CORPORATION SUCURSAL DEL PERU': 'SOUTHERN PERU COPPER',
+    'VOLCAN COMPAÑIA MINERA S.A.A.': 'VOLCAN',
+    'CONSORCIO MINERO HORIZONTE S.R.L.': 'HORIZONTE',
+    'A & M MINERIA Y MAQUINARIAS S.A.C. EN LIQUIDACION': 'A & M MINERIA Y MAQUINARIAS S.A.C.',
+    'CONSORCIO MINERO SUNEC SOCIEDAD COMERCIAL DE RESPONSABILIDAD LIMITADA - CONSORCIO MINERO SUNEC S.R.L': 'CONSORCIO MINERO SUNEC S.A.C.',
+    'CORPORACION JONGOS S.A.C. - CORJON S.A.C.': 'CORPORACION JONGOS S.A.C.',
+    'HUAMAN VIUDA DE AUQUIPATA BALBINA': 'HUAMAN VDA. DE AUQUIPATA BALBINA',
+    'S.M.R.L. HORACIO ZEVALLOS GAMES': 'SMRL HORACIO ZEVALLOS GAMES',
+    'S.M.R.L. SANTA BARBARA DE TRUJILLO': 'SMRL SANTA BARBARA DE TRUJILLO',
+    'EMPRESA MINERA LUZ NUEVA FORTUNA SOCIEDAD ANONIMA': 'LUZ NUEVA FORTUNA',
+    'SUMMA GOLD CORPORATION S.A.C.': 'SUMMA GOLD',
+    'SANTANDER PERUVIAN MINE S.A.C.': 'SANTANDER PERUVIAN MINE',
+    'S.M.R.L. PLAYA CHINO II': 'PLAYA CHINO II',
+}
+
+_MAPA_TITULAR = {}
+def _registrar(variante, unico):
+    k = _clave(variante)
+    if _MAPA_TITULAR.get(k, unico) != unico:
+        raise ValueError(f"Alias contradictorio: '{variante}' -> '{unico}' y '{_MAPA_TITULAR[k]}'")
+    _MAPA_TITULAR[k] = unico
+for _u in TITULAR_UNICO:
+    _registrar(_u, _u)
+for _v, _u in TITULAR_ALIAS.items():
+    _registrar(_u, _u)      # el destino se resuelve a sí mismo (evita cadenas A->B->C)
+    _registrar(_v, _u)
+
+def canonizar_titular(serie):
+    return serie.map(lambda x: _MAPA_TITULAR.get(_clave(x), x) if isinstance(x, str) else x)
+
+_PROCESO_FIX = {'LIXIVIACION': 'LIXIVIACIÓN', '(EN BLANCO)': 'No especifica'}
+def normalizar_dimensiones(df):
+    """MINERAL en mayúsculas ('Oro'->'ORO') y PROCESO sin variantes ('LIXIViACIÓN', '(en blanco)')."""
+    d = df.copy()
+    d['MINERAL'] = d['MINERAL'].map(lambda x: x.upper() if isinstance(x, str) else x)
+    d['PROCESO'] = d['PROCESO'].map(lambda x: _PROCESO_FIX.get(_clave(x), x) if isinstance(x, str) else x)
+    return d
+
+def consolidar_base(df):
+    """Unifica titulares/mineral/proceso en la base histórica y fusiona filas duplicadas.
+    Columnas por posición: 0=Key1, 1-5=MINERAL..UNIDAD, 6+=meses (sirve con etiquetas datetime o texto).
+    Celdas solapadas -> max (en tu base solo chocan 0 vs valor, o 0 vs 0)."""
+    cols = list(df.columns)
+    llaves, meses_c = cols[1:6], cols[6:]
+    d = df.copy()
+    basura = d['MINERAL'].astype(str).str.strip().eq('MINERAL')     # encabezado "fugado" a la base
+    if basura.any():
+        print(f"[BASE] Se elimina {int(basura.sum())} fila(s) basura (encabezado repetido).")
+        d = d[~basura]
+    d['TITULAR'] = canonizar_titular(d['TITULAR'])
+    d = normalizar_dimensiones(d)
+    d[meses_c] = d[meses_c].apply(pd.to_numeric, errors='coerce')
+    antes_filas, antes_tot = len(d), d[meses_c].sum()
+    g = d.groupby(llaves, sort=False, dropna=False)[meses_c]
+    mx, mn = g.max(), g.min()
+    conflictos = int((((mx - mn).abs() > 1e-9) & (mn != 0)).sum().sum())
+    out = mx.reset_index()
+    key1 = out['MINERAL'] + out['ETAPA'] + out['PROCESO'] + out['TITULAR'] + out['UNIDAD']
+    out = pd.concat([key1.rename('Key1'), out], axis=1)[cols]
+    dif = (out[meses_c].sum() - antes_tot).abs()
+    print(f"[BASE] Filas {antes_filas} -> {len(out)} | titulares únicos: {out['TITULAR'].nunique()}")
+    if conflictos:
+        print(f"[BASE][ALERTA] {conflictos} celda(s) con 2 valores distintos no nulos (se tomó el mayor). Revisar.")
+    if (dif > 1e-6).any():
+        print("[BASE][ALERTA] Totales mensuales cambiaron en:", [str(c)[:10] for c in dif[dif > 1e-6].index])
+    else:
+        print("[BASE] Control de totales mensuales: OK (sin cambios).")
+    return out
+
+def _nucleo(s):
+    """Nombre sin tildes/forma societaria/prefijos genéricos, solo para comparar parecidos."""
+    n = re.sub(r'[\.,\-´`]', ' ', _clave(s))
+    n = re.sub(r'\s+', ' ', n).strip()
+    for _ in range(3):
+        n = re.sub(r'\s(S A A|S A C|S R L|S C R L|E I R L|S A|SAC|SRL|SAA|LTDA|SA)$', '', n)
+    n = re.sub(r'^(COMPANIA MINERA|COMPANIA DE MINAS|SOCIEDAD MINERA|EMPRESA MINERA|MINERA|CIA MINERA|COMPANIA)\s', '', n)
+    return re.sub(r'\b(PERU|RESOURCES)\b', '', n).replace('  ', ' ').strip()
+
+def reportar_titulares_nuevos(df_nuevo, df_base, umbral=0.85, max_sin_parecido=15):
+    """Aviso preventivo: titulares del mes que no existen en la base y se parecen a uno existente."""
+    base = sorted(set(df_base['TITULAR'].dropna()))
+    nbase = {b: _nucleo(b) for b in base}
+    nuevos = sorted(set(df_nuevo['TITULAR'].dropna()) - set(base))
+    sin = []
+    for n in nuevos:
+        nn = _nucleo(n)
+        cand = sorted(((difflib.SequenceMatcher(None, nn, nb).ratio(), b) for b, nb in nbase.items()), reverse=True)[:3]
+        cand = [(r, b) for r, b in cand if r >= umbral or (len(nn) >= 5 and nn == nbase[b])]
+        if cand:
+            print(f"[TITULAR NUEVO] '{n}' se parece a: " + " | ".join(f"'{b}' ({r:.2f})" for r, b in cand))
+            print("      -> si es la misma empresa, agrégala a TITULAR_ALIAS.")
+        else:
+            sin.append(n)
+    if sin:
+        print(f"[TITULAR NUEVO] {len(sin)} sin parecidos (entidades nuevas): " + "; ".join(sin[:max_sin_parecido])
+              + (" ..." if len(sin) > max_sin_parecido else ""))
+
+#%%
+# ---------------------------------------------------------------------------
+# MEJORA 1: localizar el archivo "Producción metálica <año>.xlsx" más reciente,
+# porque puede haber varias copias con el mismo nombre en la carpeta.
+# ---------------------------------------------------------------------------
+DIR_PRODUCCION_MINERA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\BD\Producción Minera"
+
+def encontrar_archivo_produccion(directorio, anio, prefijo="Producción metálica"):
+    """
+    Busca en 'directorio' todos los .xlsx cuyo nombre empiece con 'prefijo'
+    (sin importar tildes/mayúsculas/espacios) y contengan el año, y devuelve
+    la ruta del que tenga la fecha de modificación más reciente.
+    Si no encuentra ninguno así, intenta la ruta exacta "<prefijo> <año>.xlsx"
+    como respaldo.
+    """
+    clave_prefijo = _clave(prefijo)
+    candidatos = []
+    try:
+        entradas = os.listdir(directorio)
+    except (FileNotFoundError, NotADirectoryError):
+        entradas = []
+
+    for nombre in entradas:
+        ruta = os.path.join(directorio, nombre)
+        if not os.path.isfile(ruta):
+            continue
+        if not nombre.lower().endswith(".xlsx"):
+            continue
+        if _clave(nombre).startswith(clave_prefijo) and str(anio) in nombre:
+            candidatos.append(ruta)
+
+    if candidatos:
+        candidatos.sort(key=os.path.getmtime, reverse=True)
+        return candidatos[0]
+
+    ruta_exacta = os.path.join(directorio, f"{prefijo} {anio}.xlsx")
+    if os.path.isfile(ruta_exacta):
+        return ruta_exacta
+
+    return None
+
+# ---------------------------------------------------------------------------
+# MEJORA 2: localizar la hoja "INFORMACION GENERAL" sin importar tildes,
+# mayúsculas/minúsculas o espacios extra en el nombre.
+# ---------------------------------------------------------------------------
+def encontrar_hoja(ruta_archivo, nombre_objetivo):
+    with pd.ExcelFile(ruta_archivo) as xl:
+        hojas = xl.sheet_names
+    clave_objetivo = _clave(nombre_objetivo)
+    for hoja in hojas:
+        if _clave(hoja) == clave_objetivo:
+            return hoja, hojas
+    for hoja in hojas:
+        if clave_objetivo in _clave(hoja):
+            return hoja, hojas
+    return None, hojas
+
+# ---------------------------------------------------------------------------
+# MEJORA 3: en vez de detener el script cuando aparece un TITULAR/UNIDAD nuevo,
+# se agrega automáticamente al diccionario (mapeado a sí mismo), se guarda en
+# el archivo y se informa en qué hoja y archivo quedó, sin intervención humana.
+# ---------------------------------------------------------------------------
+def valores_faltantes(df_diccionario, *series):
+    conocidos = set(df_diccionario['Nombre_Antiguo'].dropna().unique())
+    faltantes = set()
+    for s in series:
+        faltantes.update(s.dropna().unique())
+    faltantes -= conocidos
+    return sorted(v for v in faltantes if isinstance(v, str))
+
+def actualizar_diccionario(ruta_diccionario, hoja, df_diccionario, valores_nuevos):
+    filas_nuevas = pd.DataFrame({"Nombre_Antiguo": valores_nuevos, "Nombre_Nuevo": valores_nuevos})
+    df_actualizado = pd.concat([df_diccionario, filas_nuevas], ignore_index=True)
+    with pd.ExcelWriter(ruta_diccionario, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
+        df_actualizado.to_excel(writer, sheet_name=hoja, index=False)
+    for valor in valores_nuevos:
+        print(f"[DICCIONARIO] '{valor}' no existía: se agregó a la hoja '{hoja}' del archivo '{ruta_diccionario}' (mapeado a sí mismo).")
+    return df_actualizado
+
+#%%
+def main(mes, anio):
+
+    archivo = encontrar_archivo_produccion(DIR_PRODUCCION_MINERA, anio)
+    if archivo is None:
+        print(f"Error Base: no se encontró ningún archivo 'Producción metálica' para {mes} {anio} en {DIR_PRODUCCION_MINERA}")
+        return
+
+    hoja_general, hojas_disponibles = encontrar_hoja(archivo, "INFORMACION GENERAL")
+    if hoja_general is None:
+        print(f"Error: no se encontró la hoja 'INFORMACION GENERAL' en '{archivo}'. Hojas disponibles: {hojas_disponibles}")
+        return
+
+    df = pd.read_excel(archivo, sheet_name=hoja_general)
+
+    df1 = df.copy()
+    df1 = df1.iloc[2:].copy()
+    df1 = df1.reset_index()
+
+    columns = df1.columns[(df1.iloc[0] == 'MINERAL') | (df1.iloc[0] == 'ETAPA') | (df1.iloc[0] == 'PROCESO') | (df1.iloc[0] == 'TITULAR') |(df1.iloc[0] == 'UNIDAD') | (df1.iloc[0] == mes_cod)]
+    dff = df1[columns]
+    header=dff.iloc[0].tolist()
+    dff.columns=header
+
+    ultfil =dff[dff['MINERAL']=="Cifras Preliminares"].index[0]
+    dff = dff.iloc[:ultfil-1,].copy()
+    dff = dff.dropna(how='all')
+
+    dff2=dff.copy()
+
+    #Diccionario 2
+
+    Diccionario = r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Diccionarios\Diccionario_Mineria.xlsx' 
+    df_ren = pd.read_excel(Diccionario, sheet_name="Producción 2")
+
+    nuevos = valores_faltantes(df_ren, dff2['TITULAR'], dff2['UNIDAD'])
+    if nuevos:
+        df_ren = actualizar_diccionario(Diccionario, "Producción 2", df_ren, nuevos)
+
+    dic_ren = df_ren.set_index("Nombre_Antiguo")["Nombre_Nuevo"].to_dict()
+
+    dff2['TITULAR'] = dff2['TITULAR'].map(dic_ren).fillna(dff2['TITULAR'])
+    dff2['UNIDAD'] = dff2['UNIDAD'].map(dic_ren).fillna(dff2['UNIDAD'])
+
+    dff2['TITULAR'] = canonizar_titular(dff2['TITULAR'])   # un solo nombre por titular
+    dff2 = normalizar_dimensiones(dff2)
+
+    dff2['PROCESO'] = dff2['PROCESO'].fillna('No especifica')
+
+    Keysum_= dff2["MINERAL"]+","+dff2["ETAPA"]+","+dff2["PROCESO"]+","+dff2["TITULAR"]+","+dff2["UNIDAD"]
+    dff2.insert(0,"Keysum_",Keysum_)
+
+
+
+    dff2 = dff2.groupby('Keysum_', as_index=False)[mes_cod].sum()
+
+    dff2[['MINERAL',"ETAPA",'PROCESO','TITULAR','UNIDAD']]= dff2["Keysum_"].str.split('[,]', expand= True)
+    dff2=dff2.drop('Keysum_',axis=1)
+    dff2 = dff2.reindex(['MINERAL','ETAPA','PROCESO','TITULAR','UNIDAD',mes_cod], axis=1)
+
+    #Diccionario
+
+    Diccionario = r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Diccionarios\Diccionario_Mineria.xlsx' 
+    df_ren = pd.read_excel(Diccionario, sheet_name="Producción")
+
+    nuevos = valores_faltantes(df_ren, dff['TITULAR'], dff['UNIDAD'])
+    if nuevos:
+        df_ren = actualizar_diccionario(Diccionario, "Producción", df_ren, nuevos)
+
+    dic_ren = df_ren.set_index("Nombre_Antiguo")["Nombre_Nuevo"].to_dict()
+
+    dff['TITULAR'] = dff['TITULAR'].map(dic_ren).fillna(dff['TITULAR'])
+    dff['UNIDAD'] = dff['UNIDAD'].map(dic_ren).fillna(dff['UNIDAD'])
+
+    dff['PROCESO'] = dff['PROCESO'].fillna('No especifica')
+
+    otros = dff[dff['TITULAR'] == 'OTROS']
+    otros['UNIDAD']="OTROS"
+    otros = normalizar_dimensiones(otros)
+    Keysum= otros["MINERAL"]+","+otros["ETAPA"]+","+otros["PROCESO"]+","+otros["UNIDAD"]
+    otros.insert(0,"Keysum",Keysum)
+    otros = otros.groupby('Keysum', as_index=False)[mes_cod].sum()
+    otros.insert(0,"TITULAR",'OTROS')
+    otros.insert(0,"UNIDAD",'OTROS')
+    otros[['MINERAL',"ETAPA",'PROCESO','UNIDAD']]= otros["Keysum"].str.split('[,]', expand= True)
+    otros = otros.reindex(['MINERAL','ETAPA','PROCESO','TITULAR','UNIDAD',mes_cod], axis=1)
+
+    Agrupado= pd.concat([dff2,otros])
+
+    Key1= Agrupado["MINERAL"]+Agrupado["ETAPA"]+Agrupado["PROCESO"]+Agrupado["TITULAR"]+Agrupado["UNIDAD"]
+    Agrupado.insert(0,"Key1",Key1)
+
+
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+
+    cols = list(Agrupado.columns)
+    cols[6] = fecha_col
+    Agrupado.columns = cols
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+    
+    #Base total
+    Ruta_Base=r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Históricos\Produccion.xlsx"
+    DF_F = Agrupado.copy()
+
+
+    with pd.ExcelFile(Ruta_Base) as writer:
+        BD_Total = writer.parse(sheet_name='Sheet1')
+        
+
+
+    BD_Total_=BD_Total.copy()
+    BD_Total = consolidar_base(BD_Total)          # limpia/fusiona la base histórica (idempotente)
+    reportar_titulares_nuevos(DF_F, BD_Total)     # aviso preventivo de posibles alias nuevos
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("Key1")
+    dic_Total_ = BD_Total_.to_dict()
+
+    DF_Total2 = DF_F.copy()
+    DF_Total2['Indicador'] =  DF_Total2['Key1'].map(dic_Total_['Indicador'])
+
+    DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True) 
+    DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+    BD_Total = pd.concat([BD_Total, DF_Total2])
+
+    if BD_Total['Key1'].duplicated().any():
+        print(f"[ALERTA] Key1 duplicadas en la base: {BD_Total['Key1'].duplicated().sum()}")
+
+    # cambio 16/04
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+
+    cols = list(Agrupado.columns)
+    cols[6] = fecha_col            # sigue siendo STRING
+    Agrupado.columns = cols
+
+
+    DF_Total = DF_F.set_index("Key1")
+    dic_cr = DF_Total.to_dict()
+
+    BD_Total[fecha_col] = BD_Total['Key1'].map(dic_cr[fecha_col])  
+
+    with pd.ExcelWriter(Ruta_Base ,  mode="a", engine="openpyxl",if_sheet_exists = 'replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index = False)
+
+#%%
+import warnings
+warnings.filterwarnings("ignore")
+#%%
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses_n[int(m)-1]
+    anio = i[2::] 
+    mes_ = meses_[int(m)-1]
+    mes_cod=meses_cod[int(m)-1]
+    print(mes + ' ' + anio)
+    main(mes, anio)
+
+#%%
