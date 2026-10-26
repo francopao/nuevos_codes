@@ -1,0 +1,43 @@
+Con esta info ya puedo cerrar varias cosas:
+
+## Lo que ya confirmé y quedó resuelto
+- La fila "basura" (el header fugado como dato) es un bug real y viejo — estaba también en tu script original, solo que nunca se veía tan descarado porque se limpiaba recién al mes siguiente. El Bloque 5 que te pasé la elimina de raíz.
+- El emparejamiento de encabezados (`UNIDAD` vs `UNIDAD MINERA`) **no es la causa** de que julio/agosto salgan vacíos: en el archivo que usaste el header es `UNIDAD` tal cual, igual que en tu script rígido, así que ahí ambos scripts seleccionan exactamente las mismas columnas.
+
+## Lo que encontré en `Produccion_1.xlsx` y no cuadra
+Revisé fila por fila: de las **1993 filas reales**, junio tiene 737 con dato (correcto), pero **julio y agosto tienen 0 filas reales con dato** — ni una. Solo existe 1 fila basura (la que mencioné arriba) con el texto literal `"AGO"` filtrado.
+
+Esto es clave: tu propia consola, en la misma corrida, imprimió *"JUL 2026: 738 de 738 filas... quedaron con dato"* y *"AGO 2026: 737 de 738..."*. Ese print se calcula justo antes de guardar — es decir, **el cálculo en memoria fue correcto**, el cruce sí encontró los 737-738 valores. El problema está pasando **entre que se guarda y que se vuelve a leer** ese archivo, no en la lógica de cómputo. Por eso insistí con la pregunta de Excel/OneDrive: todo apunta a algo en esa frontera (escritura a disco en red, lectura cacheada, OneDrive/SharePoint revirtiendo el archivo, antivirus interfiriendo con el `.xlsx` mientras se escribe).
+
+## Diagnóstico decisivo (agrégalo, no reemplaza nada)
+
+**Busca:**
+```python
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+```
+
+**Reemplaza por (mismo código + verificación inmediata):**
+```python
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+
+    # VERIFICACIÓN: relee el archivo recién guardado, en el mismo proceso,
+    # para descartar que la pérdida sea al escribir/leer por red.
+    comprobacion = pd.read_excel(Ruta_Base, sheet_name="Sheet1")
+    if fecha_col in comprobacion.columns:
+        n_disco = comprobacion[fecha_col].notna().sum()
+        print(f"[VERIFICACION] {mes_cod} {anio}: en disco hay {n_disco} filas con dato "
+              f"(antes de guardar eran {filas_con_dato}).")
+        if n_disco != filas_con_dato:
+            print(f"[ALERTA] Se perdió información al guardar/leer — es un problema de "
+                  f"escritura en disco (red/antivirus/OneDrive), no del cálculo.")
+    else:
+        print(f"[ALERTA] La columna {fecha_col} no aparece en el archivo recién guardado.")
+```
+
+Corre otra vez los 3 meses juntos y pégame la consola completa con estas líneas nuevas. Eso me va a decir exactamente:
+- Si falla ya en la **propia verificación de julio** (dentro de la misma corrida de julio) → es un bug de escritura/flush a esa ruta de red, y la arreglamos cambiando a escribir primero en un archivo local temporal y luego moverlo (`os.replace`) en vez de escribir directo al `.xlsx` de Z:\.
+- Si julio pasa bien su propia verificación, pero **agosto, al leer el archivo al inicio, ya lo encuentra vacío** → el archivo se corrompió/revirtió entre que julio terminó y agosto empezó a leer (típico de Excel abierto, OneDrive sincronizando, o un backup automático pisando el archivo).
+
+Mientras tanto, dime también: ¿la carpeta `Históricos` en Z:\ está dentro de alguna sincronización de OneDrive/SharePoint, o tienes algún backup automático corriendo sobre esa ruta?
