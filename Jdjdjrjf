@@ -1,0 +1,43 @@
+Encontré algo que no cuadra con lo que mostró la consola. Revisé `Produccion_1.xlsx` directamente:
+
+| Columna | No-nulos | Valor |
+|---|---|---|
+| 2026-06-01 (JUN) | 737 | ✅ datos reales |
+| 2026-07-01 (JUL) | **0** | vacía |
+| 2026-08-01 (AGO) | **1** | y ese único valor es literalmente el texto **`"AGO"`** (no un número) |
+
+Esto es inconsistente con tu consola, que decía "JUL 2026: 738/738" y "AGO 2026: 737/738" con dato. O sea: **en memoria el cruce sí funcionó**, pero lo que terminó guardado en este archivo no es ese resultado.
+
+## Dos cosas distintas están pasando
+
+**A) Hay un bug real que sí debemos arreglar:** el valor `"AGO"` que encontré es la fila de encabezado "fugada" como dato — el mismo fenómeno que ves cada corrida en la consola como `[TITULAR NUEVO] ... entidades nuevas: TITULAR`. Pasa porque después de armar `dff` con las columnas ya renombradas, nunca se descarta la fila 0 (que trae literalmente los textos "MINERAL", "TITULAR", "UNIDAD", "AGO"... como si fueran un registro más). Antes se "disimulaba" porque `consolidar_base` la limpiaba recién en la corrida del mes SIGUIENTE — por eso en agosto (al ser el último mes corrido) esa fila basura se quedó sin limpiar, visible tal cual.
+
+**Fix (Bloque 5) — busca:**
+```python
+    ultfil = dff[dff['MINERAL'] == "Cifras Preliminares"].index[0]
+    dff = dff.iloc[:ultfil - 1,].copy()
+    dff = dff.dropna(how='all')
+```
+**Reemplaza por:**
+```python
+    dff = dff[dff['MINERAL'].astype(str).str.strip() != 'MINERAL'].copy()  # quita la fila de encabezado fugada como dato
+
+    ultfil = dff[dff['MINERAL'] == "Cifras Preliminares"].index[0]
+    dff = dff.iloc[:ultfil - 1,].copy()
+    dff = dff.dropna(how='all')
+```
+
+**B) Pero eso NO explica que julio quede en 0 ni que agosto pierda 737 valores reales.** Ese 1 valor fantasma máximo debería convivir con 737 datos buenos, no reemplazarlos. Eso me hace sospechar que **este archivo que me subiste no es el resultado directo de la corrida cuya consola pegaste** — o algo lo sobreescribió después. Antes de tocar más código, necesito que confirmes en tu entorno:
+
+1. ¿`Produccion.xlsx` estaba **abierto en Excel** en algún momento entre que corriste el script y que lo revisaste/subiste? (Si Excel lo tenía abierto con la versión vieja en memoria y luego se guardó — aunque sea sin querer — pisa el resultado bueno del script).
+2. ¿Hay algún **sync de OneDrive/SharePoint** sobre esa ruta de red Z:\ que pueda revertir el archivo a una versión anterior?
+3. Justo después de que la consola te mostró el `[OK] AGO 2026: 737 de 738...`, ¿corriste algo más que toque ese mismo archivo (otro script, otra celda, una ejecución anterior que seguía colgada)?
+
+Si quieres descartarlo rápido, corre esto en Spyder **inmediatamente después** del script (sin abrir Excel) y pégame la salida:
+```python
+import pandas as pd, datetime
+df = pd.read_excel(r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Históricos\Produccion.xlsx", sheet_name="Sheet1")
+for c in [datetime.datetime(2026,7,1), datetime.datetime(2026,8,1)]:
+    print(c, df[c].notna().sum(), df[c].sum())
+```
+Eso me dirá si el archivo en disco ya está mal apenas termina el script (bug en el script) o si está bien ahí y se corrompe después (problema externo, no del código).
