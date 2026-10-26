@@ -1,0 +1,53 @@
+Ahí está la prueba definitiva: en la **misma corrida**, para julio y agosto el cálculo en memoria da 737/737, pero al releer el archivo recién guardado **dentro del mismo proceso** ya aparece en 0. Junio sí persiste bien. Esto descarta 100% que sea un bug de cálculo — es la escritura sobre esa unidad compartida (Z:\, aunque no se llame OneDrive, si es una ruta corporativa sincronizada tiene el mismo problema: el cliente de sync no confirma la escritura al servidor tan rápido como tu script vuelve a leer el archivo).
+
+La solución robusta es no depender de que la red confirme a tiempo: escribir primero **localmente** (sin red de por medio), verificar ahí mismo, y recién entonces subir el archivo ya completo y verificado a Z:\ de una sola vez (copia atómica, no escritura incremental sobre la red).
+
+**Agrega al inicio del script**, junto al `import shutil` que ya existe:
+```python
+import tempfile
+```
+
+**Busca (es el bloque que ya tienes, con la verificación que agregamos antes):**
+```python
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+
+    # VERIFICACIÓN: relee el archivo recién guardado, en el mismo proceso,
+    # para descartar que la pérdida sea al escribir/leer por red.
+    comprobacion = pd.read_excel(Ruta_Base, sheet_name="Sheet1")
+    if fecha_col in comprobacion.columns:
+        n_disco = comprobacion[fecha_col].notna().sum()
+        print(f"[VERIFICACION] {mes_cod} {anio}: en disco hay {n_disco} filas con dato "
+              f"(antes de guardar eran {filas_con_dato}).")
+        if n_disco != filas_con_dato:
+            print(f"[ALERTA] Se perdió información al guardar/leer — es un problema de "
+                  f"escritura en disco (red/antivirus/OneDrive), no del cálculo.")
+    else:
+        print(f"[ALERTA] La columna {fecha_col} no aparece en el archivo recién guardado.")
+```
+
+**Reemplaza por:**
+```python
+    # FIX: escribir primero LOCAL (sin red de por medio), verificar ahí mismo,
+    # y recién entonces copiar el archivo ya completo a Z:\ en una sola operación.
+    # Esto evita el problema real: la red/sync no confirma la escritura tan rápido
+    # como el script vuelve a leer el archivo.
+    ruta_local = os.path.join(tempfile.gettempdir(), f"_tmp_{os.path.basename(Ruta_Base)}")
+    with pd.ExcelWriter(ruta_local, engine="openpyxl") as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+
+    comprobacion_local = pd.read_excel(ruta_local, sheet_name="Sheet1")
+    n_local = comprobacion_local[fecha_col].notna().sum() if fecha_col in comprobacion_local.columns else -1
+    if n_local != filas_con_dato:
+        raise RuntimeError(
+            f"{mes_cod} {anio}: el archivo LOCAL recién escrito no coincide "
+            f"({n_local} filas con dato vs {filas_con_dato} esperadas). No se copia a la red; "
+            f"revisa el cálculo, esta vez sí sería un bug real.")
+
+    shutil.copyfile(ruta_local, Ruta_Base)
+    os.remove(ruta_local)
+    print(f"[OK] {mes_cod} {anio}: {filas_con_dato} de {len(DF_F)} filas con dato "
+          f"(verificado local y copiado a la red).")
+```
+
+Corre de nuevo los 3 meses. Si el fix funciona, `Produccion.xlsx` debería quedar con jun/jul/ago completos esta vez — y si llegara a fallar la verificación local (`RuntimeError`), ahí sí sabríamos que hay algo más en el cálculo, no en la red.
