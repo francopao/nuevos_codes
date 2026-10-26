@@ -1,0 +1,175 @@
+## Diagnóstico (confirmado con tus archivos)
+
+**1) Columnas jul/ago realmente llegaron vacías a `Produccion.xlsx`.** Lo verifiqué directamente: en tu "Producción metálica 2026.xlsx" las columnas JUL y AGO tienen **744 filas con dato cada una** (suma ~10.3M y ~10.7M respectivamente) — el dato fuente está completo. Pero en tu `Produccion.xlsx` actual, las columnas `'01/07/2026'` y `'01/08/2026'` tienen **0 valores no nulos**. O sea: el script corrió, creó la columna, pero el cruce no encontró match con ninguna fila → escribió una columna 100% vacía sin avisar.
+
+**2) Bug de tipo de dato ya metido en la base histórica.** Las columnas hasta marzo-2026 están guardadas como `datetime` (igual que toda la serie 2017-2026), pero abril-agosto 2026 quedaron como **texto** (`'01/04/2026'`, etc.). Es un bug real: el código convierte `fecha_col` a datetime en la línea 469, pero el bloque duplicado "`# cambio 16/04`" lo vuelve a generar como string más abajo y es ese el que termina usándose para escribir la columna.
+
+**3) El `KeyError: 'UNIDAD'`** pasa porque el emparejamiento de encabezados es por igualdad exacta de texto (`df1.iloc[0] == 'UNIDAD'`): si MINEM cambia el nombre de la columna, no hay ningún fallback, truena.
+
+Los tres problemas comparten la misma causa raíz: el script no tolera variaciones y no valida lo que escribe. Abajo van los 4 bloques a reemplazar (más un script de migración única para arreglar lo que ya quedó corrupto).
+
+---
+
+## Bloque 1 — Encabezados flexibles (resuelve el `KeyError`)
+
+**Busca (Ctrl+F) este texto exacto:**
+```python
+    columns = df1.columns[(df1.iloc[0] == 'MINERAL') | (df1.iloc[0] == 'ETAPA') | (df1.iloc[0] == 'PROCESO') | (
+                df1.iloc[0] == 'TITULAR') | (df1.iloc[0] == 'UNIDAD') | (df1.iloc[0] == mes_cod)]
+    dff = df1[columns]
+    header = dff.iloc[0].tolist()
+    dff.columns = header
+```
+
+**Reemplázalo por:**
+```python
+    # MEJORA: encabezados flexibles. MINEM a veces renombra columnas
+    # (p.ej. "UNIDAD" -> "UNIDAD MINERA"). Si vuelve a pasar, solo agrega
+    # la variante nueva a la lista correspondiente, no toques nada más.
+    ALIAS_ENCABEZADO = {
+        'MINERAL': ['MINERAL'],
+        'ETAPA': ['ETAPA'],
+        'PROCESO': ['PROCESO'],
+        'TITULAR': ['TITULAR'],
+        'UNIDAD': ['UNIDAD', 'UNIDAD MINERA', 'UNIDAD MINERA (UEA)'],
+    }
+    fila0 = df1.iloc[0]
+    claves0 = fila0.map(lambda x: _clave(x) if isinstance(x, str) else '')
+
+    mapa_canon = {}  # posicion -> nombre canonico
+    for canon, variantes in ALIAS_ENCABEZADO.items():
+        claves_ok = {_clave(v) for v in variantes}
+        pos = [i for i, k in enumerate(claves0) if k in claves_ok]
+        if not pos:
+            raise KeyError(
+                f"No se encontró la columna '{canon}' (se esperaba alguna de {variantes}). "
+                f"Encabezados detectados: {[c for c in fila0.tolist() if isinstance(c, str)]}")
+        if len(pos) > 1:
+            print(f"[AVISO] Varias columnas calzan con '{canon}'; se usa la primera (posición {pos[0]}).")
+        mapa_canon[pos[0]] = canon
+
+    clave_mes = _clave(mes_cod)
+    pos_mes = [i for i, k in enumerate(claves0) if k == clave_mes]
+    if not pos_mes:
+        raise KeyError(
+            f"No se encontró la columna del mes '{mes_cod}'. "
+            f"Encabezados detectados: {[c for c in fila0.tolist() if isinstance(c, str)]}")
+    mapa_canon[pos_mes[0]] = mes_cod
+
+    posiciones = sorted(mapa_canon)
+    dff = df1.iloc[:, posiciones].copy()
+    dff.columns = [mapa_canon[p] for p in posiciones]
+    header = dff.columns.tolist()
+```
+Usa comparación exacta contra una lista corta de alias (no "contiene"), así nunca confunde `UNIDAD` con `UNIDAD DE MEDIDA`.
+
+---
+
+## Bloque 2 — fecha_col como datetime (primera aparición)
+
+**Busca:**
+```python
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+
+    cols = list(Agrupado.columns)
+    cols[6] = fecha_col
+    Agrupado.columns = cols
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+```
+
+**Reemplázalo por:**
+```python
+    # FIX: guardar la columna como datetime desde el inicio (igual que el
+    # resto de la base). Antes se guardaba el string y recién después se
+    # convertía a datetime — por eso abr-ago/2026 quedaron como texto.
+    fecha_col = datetime.datetime.strptime(
+        "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio, '%d/%m/%Y')
+
+    cols = list(Agrupado.columns)
+    cols[6] = fecha_col
+    Agrupado.columns = cols
+```
+
+---
+
+## Bloque 3 — borrar el parche duplicado ("cambio 16/04")
+
+**Busca este bloque completo y bórralo entero** (ya no hace falta, el Bloque 2 ya deja todo consistente):
+```python
+    # cambio 16/04
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+
+    cols = list(Agrupado.columns)
+    cols[6] = fecha_col  # sigue siendo STRING
+    Agrupado.columns = cols
+```
+
+---
+
+## Bloque 4 — blindaje: nunca más escribir una columna vacía en silencio
+
+**Busca:**
+```python
+    DF_Total = DF_F.set_index("Key1")
+    dic_cr = DF_Total.to_dict()
+
+    BD_Total[fecha_col] = BD_Total['Key1'].map(dic_cr[fecha_col])
+
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+```
+
+**Reemplázalo por:**
+```python
+    DF_Total = DF_F.set_index("Key1")
+    dic_cr = DF_Total.to_dict()
+
+    BD_Total[fecha_col] = BD_Total['Key1'].map(dic_cr[fecha_col])
+
+    # BLINDAJE: si el mes trae filas pero el cruce no matcheó ninguna,
+    # es un desfase de Key1 (TITULAR/UNIDAD distintos a la base histórica)
+    # — exactamente lo que pasó con julio y agosto 2026, sin que nada avisara.
+    filas_con_dato = BD_Total[fecha_col].notna().sum()
+    if len(DF_F) > 0 and filas_con_dato == 0:
+        no_encontrados = sorted(set(DF_F['Key1']) - set(BD_Total['Key1']))
+        raise ValueError(
+            f"{mes_cod} {anio}: el mes trae {len(DF_F)} filas pero no se cruzó "
+            f"ninguna con la base histórica (0 valores escritos). Revisa "
+            f"TITULAR/UNIDAD, ejemplos sin match: {no_encontrados[:10]}")
+    print(f"[OK] {mes_cod} {anio}: {filas_con_dato} de {len(DF_F)} filas del mes quedaron con dato.")
+
+    with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+```
+
+---
+
+## Migración única (arreglar lo que ya está corrupto en `Produccion.xlsx`)
+
+Tus columnas abr-ago/2026 ya quedaron como texto, y jul/ago además vacías. Corre esto **una sola vez**, antes de reprocesar julio/agosto, para que abr-ago vuelvan a ser `datetime` (sin crear columnas duplicadas):
+
+```python
+import pandas as pd, datetime
+
+ruta = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\Históricos\Produccion.xlsx"
+df = pd.read_excel(ruta, sheet_name="Sheet1")
+
+nuevas_cols = []
+for c in df.columns:
+    if isinstance(c, str) and '/' in c:
+        try:
+            nuevas_cols.append(datetime.datetime.strptime(c, '%d/%m/%Y'))
+            continue
+        except ValueError:
+            pass
+    nuevas_cols.append(c)
+df.columns = nuevas_cols
+
+with pd.ExcelWriter(ruta, mode="a", engine="openpyxl", if_sheet_exists="replace") as w:
+    df.to_excel(w, sheet_name="Sheet1", index=False)
+```
+
+## Siguiente paso
+1. Aplica los Bloques 1-4.
+2. Corre la migración de arriba una vez.
+3. Vuelve a correr tu script con `inicio = "072026"`, `final = "082026"` — con el Bloque 4, si el cruce vuelve a fallar ahora **sí vas a ver el mensaje exacto** (con ejemplos de `Key1` sin match) en vez de una columna vacía silenciosa.
