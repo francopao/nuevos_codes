@@ -1,0 +1,121 @@
+Reviso la estructura del Excel.
+
+# Auditoría del Relative Valuation de Electro Dunas — "ELD Relative Valuation.xlsx"
+
+## 1. Diagnóstico del Excel
+
+**Hallazgo central: el archivo no contiene una Relative Valuation terminada.** Es una capa de *raw data* (CapIQ + Bloomberg) sin una sola fórmula de múltiplo calculada.
+
+- El workbook tiene 3 hojas: `Min y Uti` (4,131 filas × 181 columnas), `Sheet2` (una tabla de mapeo de 8 celdas) y `_CIQHiddenCacheSheet` (caché binario interno de CapIQ, oculto, no accionable).
+- Escaneé **la totalidad** de las 4,131 filas × 181 columnas buscando celdas con fórmula (`data_type='f'`). Resultado: **8 fórmulas en todo el archivo**, de las cuales 7 son simplemente el texto `="IQ_NI"` usado como etiqueta de columna, y la octava es `=TODAY()`. No existe ninguna fórmula de ratio (división, EV/EBITDA, P/E, etc.) en ningún lugar del archivo. Los campos CapIQ (`IQ_TOTAL_REV`, `IQ_TOTAL_EQUITY`, `IQ_EBITDA`) y Bloomberg (`Px_last`, `CUR_MKT_CAP`, `CURR_ENTP_VAL`) están pegados como **valores estáticos** (snapshot), no como links vivos — es decir, el archivo ya no se actualiza y cualquier número en él puede estar desactualizado sin que se note.
+- `Sheet2` es inconsistente con el propio universo de `Min y Uti`: define "Main" = **PLUZENC1** (Pluz Energía Perú, ex-Edelnor) y lista 7 "Comp" (incluyendo PLUZENC1 *dos veces*, como Main y como Comp 7), pero **Electro Dunas (EDUNASC1) no aparece en ningún lugar de esa tabla**. Si `Sheet2` se usó alguna vez para parametrizar la extracción, el archivo "olvidó" marcar a la propia Electro Dunas como sujeto. Esto sugiere una plantilla reciclada de otro ejercicio (posiblemente centrado en Pluz) y no actualizada.
+- El verdadero comp set con fundamentales completos (columnas C:AD de `Min y Uti`) son 6 comparables + Electro Dunas:
+
+| Ticker | Empresa | País |
+|---|---|---|
+| PLUZENC1 PE | Pluz Energía Perú (ex-Edelnor) | Perú |
+| EQTL3 BZ | Equatorial Energia | Brasil |
+| ENELDXCH CI | Enel Distribución Chile (ex-Chilectra) | Chile |
+| ENGI11 BZ | Energisa | Brasil |
+| CESC IN | CESC Ltd. | India |
+| COCE5 BZ | Coelce / Enel Distribuição Ceará | Brasil |
+| EDUNASC1 PE | **Electro Dunas (sujeto)** | Perú |
+
+  `LUSURC1` (Luz del Sur) solo aparece en el bloque de precios diarios (sin NI/EBITDA/Equity asociados), por lo que **no está realmente integrada** al comp set pese a ser el comparable doméstico más obvio.
+
+- **Contaminación/ruido del archivo:** las columnas `BD:FY` (126 de las 181 columnas, ~70% del ancho del archivo) contienen Market Cap y Enterprise Value de un universo de **62 tickers**, en su enorme mayoría mineras (Cerro Verde, Minsur, Nexa, Volcan, Buenaventura, BHP, Rio Tinto, Freeport, Southern Copper, Antofagasta, etc.), sin relación con la valorización de Electro Dunas — es el remanente del tracker "Dash FEN – Mining" reutilizado en el mismo libro. Esto no es un error que afecte el resultado, pero sí vuelve el archivo difícil de auditar y debería limpiarse.
+
+**Error de datos material — la serie trimestral está "congelada" antes del final del período:**
+Verificando las últimas 4 fechas trimestrales (Mar-26, Jun-26, Sep-26, Dic-26) para las 7 empresas, **Jun-26, Sep-26 y Dic-26 muestran exactamente el mismo valor** en NI, Revenue, Equity y EBITDA para absolutamente todas las compañías. Dado que hoy es 28-oct-2026, un dato "real" a Dic-26 es imposible, y uno a Sep-26 es muy improbable que ya esté reportado y cargado por todos los emisores. El patrón (idéntico en las 3 columnas, en las 7 empresas) es la firma típica de un snapshot que quedó "pegado" en el último dato real disponible (≈ 2T2026) y arrastra ese valor hacia adelante. **El último trimestre confiable es 2T2026 (30-jun-2026)**; todo lo fechado después debe descartarse para cualquier cálculo LTM.
+
+**Error/inconsistencia material — los múltiplos implícitos no son internamente creíbles, incluso para los comparables líquidos.** Construí yo mismo (el archivo no lo hace) un LTM a jun-26 sumando los 4 trimestres reales más recientes (3T25+4T25+1T26+2T26) y lo crucé con el Market Cap/EV a esa misma fecha:
+
+| Ticker | LTM EBITDA margin | ROE | EV/EBITDA | P/E | EV/Sales | P/BV |
+|---|---|---|---|---|---|---|
+| PLUZENC1 | 24.7% | 44.2% | 1.60x | 2.30x | 0.40x | 1.02x |
+| EQTL3 | 22.1% | 31.5% | 1.31x | 5.44x | 0.29x | 1.71x |
+| ENELDXCH | 5.1% | 13.0% | 1.54x | 5.62x | 0.08x | 0.73x |
+| ENGI11 | 23.5% | 37.9% | 1.88x | 2.96x | 0.44x | 1.12x |
+| CESC | 19.5% | 47.0% | 2.64x | 3.61x | 0.51x | 1.70x |
+| COCE5 | 22.5% | 28.2% | 1.15x | 1.64x | 0.26x | 0.46x |
+| **EDUNASC1** | **23.9%** | **118.4%** | **0.87x** | **1.36x** | **0.21x** | **1.61x** |
+
+Dos problemas saltan de esta tabla:
+1. **Los EV/EBITDA de 1.1x–2.6x son implausiblemente bajos** para distribuidoras eléctricas reguladas — incluso para las comparables activamente transadas (PLUZENC1, EQTL3, ENGI11 cotizan a diario, no son ilíquidas). El rango típico observado globalmente para este tipo de negocio suele ser de un dígito medio a alto, no 1x-3x. Esto indica un **desajuste de unidades o de moneda entre el bloque de EV/Market Cap (columnas BD:FY) y el bloque de fundamentales (columnas C:AD)**, o un cálculo de Enterprise Value parcial/desactualizado por parte de CapIQ (posible deuda neta mal capturada). Esto **no es un problema exclusivo de Electro Dunas** — afecta a todo el dataset y debe reconciliarse contra una fuente viva antes de usar cualquier cifra de este archivo.
+2. **El ROE de Electro Dunas (118.4%) es un outlier extremo** frente al resto (13%-47%). Esto requiere verificación directa contra el patrimonio reportado en los EEFF de Electro Dunas 2025/2026 (disponibles en el proyecto) — podría reflejar un patrimonio contable genuinamente reducido (historial de repartos de dividendos agresivos frente a utilidad retenida) o un error de captura en `IQ_TOTAL_EQUITY` para este ticker específico.
+
+**Nota adicional de datos:** el último día de la serie (26-oct-2026) muestra una caída abrupta y simultánea (~25%-35%) en precio/Market Cap/EV de COCE5, EQTL3 y ENGI11 que no se observa en el resto. Puede ser un evento corporativo real (split, escisión, ex-dividendo extraordinario) o un error de carga del último dato — debe verificarse antes de usar el día más reciente como "spot".
+
+---
+
+## 2. Evaluación de comparables y múltiplos, con ranking fundamentado
+
+**Marco Damodaran:** la selección de comparables no debe restringirse al sector, sino buscar firmas con **cash flows, crecimiento y riesgo similares** (*Show Me the Money*, "The Use of Comparables" / "Choosing Comparables"). Con utilities reguladas, esto se traduce en: marco tarifario comparable, intensidad de CapEx, geografía/riesgo-país y tamaño.
+
+Pertinencia de cada comparable:
+
+| Comparable | Modelo de negocio | Regulación | Geografía/riesgo | Observación |
+|---|---|---|---|---|
+| **PLUZENC1** (Pluz/Edelnor) | Distribución pura | Mismo marco regulatorio peruano (OSINERGMIN/VAD) que ELD | Perú — mismo riesgo país | El comparable más defendible conceptualmente; pero ~8x el tamaño de ELD (Revenue LTM S/4,885mm vs S/670mm) y cubre Lima Metropolitana (densidad y mix de clientes muy distintos a Ica/zona de ELD) |
+| **EQTL3** (Equatorial) | Holding multi-distribuidora + transmisión/generación menor | Marco ANEEL (Brasil) | Brasil — riesgo macro/regulatorio distinto | Diversificación geográfica interna y mezcla de negocios reduce comparabilidad directa del riesgo |
+| **ENELDXCH** (Enel Distribución Chile) | Distribución pura | Marco chileno (CNE) | Chile — grado de inversión, riesgo país menor que Perú | Buen comparable por modelo de negocio puro; EBITDA margin de 5% es un outlier que exige revisión antes de usarlo |
+| **ENGI11** (Energisa) | Holding multi-distribuidora | ANEEL (Brasil) | Brasil | Igual reserva que EQTL3 — estructura de holding con múltiples concesiones |
+| **CESC** | Generación + distribución integrada (verticalmente integrada) | Marco regulatorio indio (estatal/West Bengal) | India — riesgo país y marco regulatorio muy distintos | El menos comparable del set: modelo de negocio (integrado, no solo distribución) y jurisdicción regulatoria sin relación con el marco peruano |
+| **COCE5** (Coelce) | Distribución pura | ANEEL (Brasil) | Brasil | Comparable razonable en modelo de negocio; mismo riesgo macro-Brasil que EQTL3/ENGI11 (problema de redundancia/correlación, no de pertinencia individual) |
+
+**Ranking de múltiplos por defendibilidad** (usando la tabla de "companion variables" de Damodaran, *Show Me the Money*, Tabla 4.5, y *Revenue Multiples and Sector-Specific Multiples*):
+
+1. **EV/EBITDA — el más defendible, con reservas.** Su companion variable es la *reinvestment rate* (tasa de reinversión), que en un negocio de distribución regulado está directamente ligada al ciclo de CapEx tarifario (VAD) — exactamente la variable que distingue a ELD de sus pares. Es neutral a la estructura de capital (a diferencia de P/E), lo cual importa porque el leverage entre estos 7 nombres difiere materialmente. **Reserva:** dado el hallazgo de la Sección 1 (multiplos de EV implausiblemente bajos en todo el dataset), este múltiplo **no puede usarse con los datos del archivo tal como están** — requiere EV reconciliado.
+2. **EV/Sales — defendible como contraste, no como ancla.** Compañion variable = *after-tax operating margin*; es robusto frente a diferencias de apalancamiento (Damodaran: "it divides the total value of operating assets by the revenues... price-to-sales... will yield lower values for more highly levered firms"). Útil justamente porque el leverage de ELD difiere de sus pares, pero pierde toda la información de rentabilidad/margen si no se cruza con el margen EBITDA explícitamente.
+3. **EV/EBIT — no calculable con este archivo.** El campo `IQ_EBIT` **no fue extraído** (solo existe `IQ_EBITDA`); no hay cómo diferenciar la intensidad de depreciación entre comparables sin reconstruirlo.
+4. **P/E — el menos defendible para ELD específicamente**, no por ser mal múltiplo en general (su companion variable, *expected growth in EPS*, es intuitiva), sino porque su numerador es el *market price* de una acción que no ha operado en casi 10 años (ver Sección 3). Es la combinación de múltiplo + sujeto más contaminada por la iliquidez.
+5. **P/BV — poco útil aquí.** El ROE de 118.4% de ELD (outlier no verificado) contamina directamente la interpretación, ya que el companion variable de P/BV es el propio ROE (*Show Me the Money*: PBV = ROE × Payout × (1+g) / (ke-g)).
+
+---
+
+## 3. Tratamiento metodológico de la iliquidez bursátil de Electro Dunas
+
+Esta es, en mi lectura, **la falla conceptual más grave que tendría el ejercicio si se usara el archivo tal cual está** — más grave incluso que los problemas de datos de la Sección 1.
+
+**Evidencia cuantitativa (del propio archivo, columna BC "EDUNASC1" del bloque de precios diarios Bloomberg):**
+- De los 4,131 días hábiles entre enero-2011 y oct-2026, Electro Dunas tiene 3,031 observaciones de precio no-N/A — pero solo **11 valores únicos** en toda la serie.
+- El precio **no ha cambiado desde el 15 de diciembre de 2016**: se mantiene exactamente en S/0.41402 durante **2,573 sesiones consecutivas** hasta la última fecha disponible (26-oct-2026) — prácticamente 10 años.
+- En contraste, los 6 comparables muestran entre 28 y 31 valores distintos en sus últimas 30 observaciones — es decir, cotizan activamente a diario.
+
+**Implicación metodológica (Damodaran, *Show Me the Money*):** la relative valuation "is built on the presumption that the market is correct, on average" — la premisa de que el mercado, aunque se equivoque en casos individuales, es correcto *en promedio* porque hay suficiente descubrimiento de precios. Con una serie que no registra una sola transacción en 10 años, **no existe mecanismo de descubrimiento de precio que pueda sostener esa premisa para ELD específicamente**. No es que el mercado haya "decidido" que ELD vale S/0.41 — es que nadie ha vuelto a transar desde 2016, y el dato es simplemente el último *fill* fosilizado. Adicionalmente, *Upside Downside: Understanding Risk* documenta evidencia empírica de que acciones menos líquidas (menor volumen, mayor bid-ask spread) exigen un retorno esperado mayor — es decir, la literatura trata la iliquidez como una **prima de riesgo exigida por el inversionista**, no como ruido a ignorar.
+
+**Distinción explícita (como pide tu prompt): liquidez bursátil vs. liquidez operativa.**
+- La **iliquidez bursátil** (free float mínimo, ausencia de transacciones, spread no observable porque no hay *quotes* activos) es un fenómeno del mercado secundario de la acción — no dice nada sobre la caja de la empresa.
+- La **liquidez operativa** de Electro Dunas (capacidad de cubrir sus obligaciones de corto plazo, generación de caja operativa, acceso a financiamiento) es un tema completamente distinto que se evalúa con los EEFF y los informes de clasificación de riesgo (Moody's, Apoyo & Asociados) disponibles en el proyecto, no con el precio en BVL.
+- Consecuencia práctica: **Market Cap, EV y P/E/P/BV de ELD calculados a partir de su precio bursátil no son un *input* válido de valor de mercado** — son simplemente el último precio transado hace una década, indexado por el número de acciones actual. Usarlos equivale a asumir que el mercado "sabe" algo sobre ELD hoy, cuando en realidad el mercado dejó de opinar sobre ELD en 2016.
+
+**Qué sí puede sostenerse con este comp set, dada la iliquidez de ELD:** los múltiplos de los 6 comparables (una vez depurados, ver Sección 1) sí pueden aplicarse a los fundamentales *operativos* de ELD (EBITDA, Revenue, Equity contable) para producir un rango de valor implícito — eso es válido. Lo que **no** puede sostenerse es comparar ese rango implícito contra el precio/Market Cap *observado* de ELD para concluir "sobre/infravalorada", porque el denominador de esa comparación (el precio de mercado de ELD) no es un precio de mercado real y actual.
+
+---
+
+## 4. Ajustes recomendados
+
+**Imprescindibles (sin ellos, el archivo no es utilizable):**
+1. Construir las fórmulas de múltiplos (EV/EBITDA, EV/Sales, P/E, P/BV) — hoy no existen.
+2. Reconciliar el desajuste EV/fundamentales detectado en la Sección 1 contra una fuente viva (terminal CapIQ/Bloomberg o un informe de research reciente) antes de confiar en cualquier múltiplo del archivo — incluidos los de los comparables líquidos.
+3. Descartar las columnas fechadas Sep-26 y Dic-26 (dato congelado) y anclar el análisis en el último trimestre real (2T2026) o, si se dispone, en un trimestre más reciente recapturado en vivo.
+4. Verificar el patrimonio contable de ELD (`IQ_TOTAL_EQUITY`) contra los EEFF 2025/2026 del proyecto — el ROE de 118.4% implícito es un outlier que debe explicarse o corregirse antes de usar cualquier múltiplo de P/BV o cualquier regresión que incluya ROE.
+5. Eliminar a EDUNASC1 (y su precio de 2016) como insumo de *Market Cap/EV observado*; mantenerlo solo como receptor de los múltiplos de los comparables, nunca como fuente de un múltiplo propio basado en su cotización.
+6. Formalizar en `Sheet2` (o reemplazarla) cuál es el sujeto (ELD) y cuáles son los comparables, eliminando la referencia huérfana a PLUZENC1 como "Main".
+
+**Opcionales (mejoran el rigor, no son bloqueantes):**
+7. Incorporar `IQ_EBIT` para habilitar EV/EBIT y distinguir diferencias de intensidad de depreciación/CapEx entre comparables (relevante dada la alta intensidad de capital del sector).
+8. Añadir Total Debt y Cash explícitos (hoy el EV viene como campo "caja negra" de CapIQ) para poder auditar el puente Market Cap → EV de cada comparable y confirmar si incluyen o no deuda de arrendamientos (operating leases) de forma consistente (*Measuring Earnings / Estimating Risk Parameters*: capitalizar leases operativos como deuda cuando sea material).
+9. Correr una regresión de múltiplos contra variables fundamentales (growth, ROE, margen) entre los 6 comparables, siguiendo el enfoque de regresión de *Show Me the Money* / *Revenue Multiples*, para obtener un múltiplo "predicho" para ELD en función de sus propias métricas en lugar de solo un promedio/mediana simple.
+10. Depurar las columnas BD:FY (universo minero) que no aportan a este ejercicio, para que el archivo sea auditable por un tercero sin ese ruido.
+11. Incluir a Luz del Sur (LUSURC1) con fundamentales completos — hoy solo tiene precio, pese a ser el comparable doméstico más obvio después de Pluz.
+
+---
+
+## 5. Metodología final recomendada para defender el Relative Valuation ante un Portfolio Manager
+
+1. **Posicionar la Relative Valuation como contraste del DCF, no como valorización independiente.** Dado (a) el comp set reducido y geográficamente heterogéneo (solo 2 de 6 comparables comparten marco regulatorio peruano y ninguno comparte exactamente el tamaño/zona de concesión de ELD), y (b) la imposibilidad de usar el propio precio de mercado de ELD como ancla (Sección 3), el Relative Valuation no tiene base suficiente para sostenerse solo. Esto es consistente con la propia limitación estructural que señala Damodaran para relative valuation en general: las asunciones quedan implícitas, no explícitas (*Show Me the Money*, "The Fundamentals Behind Multiples") — con un comp set así de heterogéneo, esas asunciones implícitas son demasiado fuertes para sostener una conclusión de valor por sí solas.
+2. **Aplicar únicamente EV/EBITDA y EV/Sales** (no P/E ni P/BV) a los fundamentales operativos de ELD, una vez reconciliado el EV (ajuste imprescindible #2), usando mediana (no promedio, dado el outlier de ENELDXCH en margen) del set de 6 comparables.
+3. **Ponderar explícitamente por pertinencia regulatoria/geográfica**: mayor peso a PLUZENC1 (mismo marco VAD/OSINERGMIN) y ENELDXCH (distribución pura, grado de inversión), menor peso a CESC (modelo integrado, jurisdicción no comparable) y a EQTL3/ENGI11 en conjunto (para evitar sobreponderar el riesgo-Brasil al estar dos comparables correlacionados del mismo mercado).
+4. **Presentar el resultado como un rango, no un punto**, y mostrarlo explícitamente al lado del DCF como *sanity check* — si el rango del Relative Valuation y el DCF convergen, eso refuerza la tesis; si divergen, la narrativa correcta ante el PM es "la divergencia refleja que el mercado de ELD no tiene descubrimiento de precio, no que el DCF esté mal".
+5. **Nunca reportar Market Cap, EV, P/E o P/BV de ELD basados en su cotización de BVL** como si fueran de mercado actual — si se muestran, deben ir etiquetados explícitamente como "último precio transado: dic-2016", para que el PM entienda que no reflejan valor de mercado vigente.
