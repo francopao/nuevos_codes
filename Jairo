@@ -1,0 +1,258 @@
+Revisé tu `BD_G&P v66`: confirmé la estructura de `enriquecer_para_huella()` (la excepción actual solo filtra `DPZ`) y la de `_registrar_descarte()` (donde nace cada fila de Descartes.xlsx). Con eso, aquí van los 3 bloques a reemplazar.
+
+**Mejora 1 — CAJBAN/CTACOB/CTAPAG/CD_NSOL (+ DPZ, que ya estaba) en `BD1_S_Huella.xlsx`**
+
+La excepción ya solo tomaba `DPZ` de `base.qest_pct_universo` (que es 100% Integra, por eso nunca toca a las demás AFPs). La generalizo a cualquier columna que `_clasificar_qest_col` reconozca — eso ya incluye CAJ/DPZ/CPC/CPP/CDBCR. El signo negativo de CTAPAG (ya invertido desde la renormalización) se preserva tal cual.
+
+Busca:
+```python
+    # Excepción solo para este output: posiciones DPZ de Integra (QEST), que
+    # operaciones() excluyó del resto del pipeline. Mismas 13 columnas de BD1_S,
+    # mismo orden -> no cambia la estructura del archivo.
+    _univ = getattr(base, 'qest_pct_universo', None)
+    if _univ:
+        _filas_dpz = []
+        for _nombre_inf, _fcod in [('INF1', 'F1'), ('INF2', 'F2'), ('INF3', 'F3')]:
+            for _col, _w in _univ[_nombre_inf].items():
+                if not str(_col).startswith('DPZ') or not _w:
+                    continue
+                _filas_dpz.append({
+                    'SBS': _col, 'ISIN': None, 'Weight': _w, 'Fondo': _fcod,
+                    'assetclass': 'DPZ', 'Strategy': 'BU', 'Afp': 'Integra',
+                    'AUM': {'F1': base.auminf1, 'F2': base.auminf2, 'F3': base.auminf3}[_fcod],
+                    'Tipo': base.valor,
+                    'Q': base.dic_sbs.get('IN-FONDO' + _fcod[-1], {}).get(_col),
+                    'Nombre': _col, 'Fecha': base.fecha_nueva, 'codEmisor': '',
+                })
+        if _filas_dpz:
+            df = pd.concat([df, pd.DataFrame(_filas_dpz).reindex(columns=df.columns)],
+                           ignore_index=True)
+            print(f"[HUELLA] +{len(_filas_dpz)} posiciones DPZ de Integra agregadas "
+                  f"(excepción exclusiva de BD1_S_Huella).")
+```
+
+Reemplaza por:
+```python
+    # Excepción solo para este output: posiciones CAJ/DPZ/CPC/CPP/CDBCR de
+    # Integra (QEST), que operaciones() excluyó del resto del pipeline (no
+    # existen en G&P -> ninguna AFP competidora tiene este dato; QEST solo
+    # describe la cartera de Integra). Mismas 13 columnas de BD1_S, mismo
+    # orden -> no cambia la estructura del archivo. CTAPAG (CPP) ya viene con
+    # signo invertido desde la renormalización (pasivo) -> se agrega tal cual,
+    # en negativo.
+    _univ = getattr(base, 'qest_pct_universo', None)
+    if _univ:
+        _filas_qest = []
+        for _nombre_inf, _fcod in [('INF1', 'F1'), ('INF2', 'F2'), ('INF3', 'F3')]:
+            for _col, _w in _univ[_nombre_inf].items():
+                _clasif = _clasificar_qest_col(_col)
+                if _clasif is None or not _w:
+                    continue
+                _ac, _nom = _clasif
+                _filas_qest.append({
+                    'SBS': _col, 'ISIN': None, 'Weight': _w, 'Fondo': _fcod,
+                    'assetclass': _ac, 'Strategy': 'BU', 'Afp': 'Integra',
+                    'AUM': {'F1': base.auminf1, 'F2': base.auminf2, 'F3': base.auminf3}[_fcod],
+                    'Tipo': base.valor,
+                    'Q': base.dic_sbs.get('IN-FONDO' + _fcod[-1], {}).get(_col),
+                    'Nombre': _nom, 'Fecha': base.fecha_nueva, 'codEmisor': '',
+                })
+        if _filas_qest:
+            df = pd.concat([df, pd.DataFrame(_filas_qest).reindex(columns=df.columns)],
+                           ignore_index=True)
+            print(f"[HUELLA] +{len(_filas_qest)} posiciones CAJ/DPZ/CPC/CPP/CDBCR de "
+                  f"Integra agregadas (excepción exclusiva de BD1_S_Huella).")
+```
+
+**Mejora 2 — columna `Weight Normalizado`**
+
+Renormaliza `Weight` a 100% agrupando por `Fondo`+`Afp` (así sirve para cualquier AFP, no solo Integra).
+
+Busca:
+```python
+    # -----------------------------------------------------------------
+    # 9. TC_USD (constante, para que el pipeline de Huella la lea)
+    # -----------------------------------------------------------------
+    df['TC_USD'] = _tc
+
+    # -----------------------------------------------------------------
+    # 10. Escribir output
+    # -----------------------------------------------------------------
+```
+
+Reemplaza por:
+```python
+    # -----------------------------------------------------------------
+    # 9. TC_USD (constante, para que el pipeline de Huella la lea)
+    # -----------------------------------------------------------------
+    df['TC_USD'] = _tc
+
+    # -----------------------------------------------------------------
+    # 10. Weight Normalizado = Weight renormalizado a 100% por Fondo+Afp,
+    #     sobre el universo que finalmente queda en ESTE archivo (ya con las
+    #     filas CAJ/DPZ/CPC/CPP/CDBCR de Integra reincorporadas arriba).
+    # -----------------------------------------------------------------
+    _w_num = pd.to_numeric(df['Weight'], errors='coerce')
+    _suma_grupo = _w_num.groupby([df['Fondo'], df['Afp']]).transform('sum')
+    df['Weight Normalizado'] = (_w_num / _suma_grupo).replace([np.inf, -np.inf], np.nan)
+    print(f"[HUELLA] Weight Normalizado calculado (renormalizado a 100% por Fondo+Afp).")
+
+    # -----------------------------------------------------------------
+    # 11. Escribir output
+    # -----------------------------------------------------------------
+```
+
+**Mejora 3 — no reportar en Descartes instrumentos con exposición 0 en TODAS las AFPs**
+
+El mecanismo: a `_registrar_descarte()` le agrego dos parámetros opcionales. `cols_exposicion` suma `|peso|` de las 15 columnas (3 fondos × 5 "AFP") de la tabla ancha de G&P/QEST; si el total es 0, el instrumento nunca existe en el portafolio de nadie y se salta el registro. `agrupar_por_sbs` hace lo mismo para EPU/ETF, donde un mismo código se repite una fila por cada combinación AFP×Fondo — ahí agrupa por SBS antes de decidir. Solo toco las 4 llamadas que corresponden a los Motivos que mencionaste; dejo intacta la de `df_result()` ("Peso <= 0 en ese fondo"), que es un caso distinto y no la pediste.
+
+Primero, agrega la constante nueva. Busca:
+```python
+def _clasificar_qest_col(col):
+    """Clasifica una columna de DQ_IN sin código SBS real (CAJ/DPZ/CPC/CPP/CDBCR)."""
+    col = str(col)
+    if col in _QEST_SINONIMO_COL:
+        return _QEST_SINONIMO_COL[col]
+    if col.startswith('CAJ'):
+        return ('CAJ', col)
+    if col.startswith('DPZ'):
+        return ('DPZ', col)
+    return None
+```
+
+Reemplaza por:
+```python
+def _clasificar_qest_col(col):
+    """Clasifica una columna de DQ_IN sin código SBS real (CAJ/DPZ/CPC/CPP/CDBCR)."""
+    col = str(col)
+    if col in _QEST_SINONIMO_COL:
+        return _QEST_SINONIMO_COL[col]
+    if col.startswith('CAJ'):
+        return ('CAJ', col)
+    if col.startswith('DPZ'):
+        return ('DPZ', col)
+    return None
+
+# Las 15 columnas de peso (3 Fondos x 5 "AFP": Integra + 4 competidoras) que
+# representan el universo COMPLETO de exposición de un SBS. Si un instrumento
+# suma 0 en TODAS, no existe en el portafolio de nadie del sistema -> no debe
+# figurar en Descartes.xlsx como si algo se hubiera "perdido".
+_COLS_PESO_TODAS_AFP = ['INF1', 'INF2', 'INF3', 'HAF1', 'HAF2', 'HAF3',
+                        'RIF1', 'RIF2', 'RIF3', 'PFF1', 'PFF2', 'PFF3',
+                        'SIF1', 'SIF2', 'SIF3']
+```
+
+Ahora la función. Busca:
+```python
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None):
+    # NO resetear índices: df_despues es subconjunto de df_antes con las mismas
+    # etiquetas de índice. El reset previo hacía que .difference() marcara la
+    # COLA del dataframe en vez de las filas realmente eliminadas (confirmado
+    # con SBS2=30/33/34/40 apareciendo como "sin clasificar" sin sentido).
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    for i in idx_perdidos:
+        fila = df_antes.loc[i]
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        nombre = fila.get('Nombre', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Nombre': nombre,
+                            'Etapa': etapa, 'Motivo': motivo, 'Valor': valor})
+```
+
+Reemplaza por:
+```python
+def _registrar_descarte(df_antes, df_despues, etapa, motivo, col_valor=None,
+                         cols_exposicion=None, agrupar_por_sbs=False):
+    # NO resetear índices: df_despues es subconjunto de df_antes con las mismas
+    # etiquetas de índice. El reset previo hacía que .difference() marcara la
+    # COLA del dataframe en vez de las filas realmente eliminadas (confirmado
+    # con SBS2=30/33/34/40 apareciendo como "sin clasificar" sin sentido).
+    #
+    # cols_exposicion: columnas de peso por AFP/Fondo (tabla ancha, 1 fila=SBS).
+    #   Si |peso| suma 0 en TODAS, el SBS no existe en el portafolio de nadie
+    #   del sistema -> no se registra como "descartado" (no hay nada que perder).
+    # agrupar_por_sbs: para tablas donde el SBS se repite en varias filas
+    #   (p.ej. EPU/ETF: una fila por AFP x Fondo). Mismo criterio, sumando
+    #   col_valor de TODAS las filas de ese SBS en df_antes (no solo las perdidas).
+    idx_perdidos = df_antes.index.difference(df_despues.index)
+    _expo_total = None
+    if cols_exposicion:
+        _presentes = [c for c in cols_exposicion if c in df_antes.columns]
+        if _presentes:
+            _expo_total = (df_antes[_presentes].apply(pd.to_numeric, errors='coerce')
+                           .abs().sum(axis=1))
+    elif agrupar_por_sbs and col_valor and 'SBS' in df_antes.columns:
+        _v = pd.to_numeric(df_antes[col_valor], errors='coerce').abs().fillna(0)
+        _expo_total = _v.groupby(df_antes['SBS']).transform('sum')
+
+    for i in idx_perdidos:
+        if _expo_total is not None and _expo_total.loc[i] < 1e-12:
+            continue   # sin exposición en ninguna AFP/Fondo: no existe en el portafolio de nadie
+        fila = df_antes.loc[i]
+        sbs = fila.get('SBS', None)
+        isin = fila.get('ISIN', None)
+        nombre = fila.get('Nombre', None)
+        valor = fila.get(col_valor, None) if col_valor else None
+        _DESCARTES.append({'SBS': sbs, 'ISIN': isin, 'Nombre': nombre,
+                            'Etapa': etapa, 'Motivo': motivo, 'Valor': valor})
+```
+
+Las 4 llamadas (Ctrl+F uno por uno, son textos cortos y únicos):
+
+Busca:
+```python
+    _registrar_descarte(pd.concat([df, _ac_reportable]), df,
+                        'operaciones() - Asset Class',
+                        'Asset Class no admitido (excl. Derivados/Monedas)')
+```
+Reemplaza por:
+```python
+    _registrar_descarte(pd.concat([df, _ac_reportable]), df,
+                        'operaciones() - Asset Class',
+                        'Asset Class no admitido (excl. Derivados/Monedas)',
+                        cols_exposicion=_COLS_PESO_TODAS_AFP)
+```
+
+Busca:
+```python
+    _registrar_descarte(df, d, 'BU() - filtros Bottom-Up',
+                        'No calificó para BU (Gobierno/Categoría/AC Dir/SBS2)')
+```
+Reemplaza por:
+```python
+    _registrar_descarte(df, d, 'BU() - filtros Bottom-Up',
+                        'No calificó para BU (Gobierno/Categoría/AC Dir/SBS2)',
+                        cols_exposicion=_COLS_PESO_TODAS_AFP)
+```
+
+Busca:
+```python
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB')
+```
+Reemplaza por:
+```python
+    _registrar_descarte(df_temporal,
+                        df_temporal.loc[df_temporal.index.isin(_idx_validos)],
+                        'Clasificación BU/TD/SOB',
+                        'SBS2 no cae en ninguna categoría BU, TD ni SOB',
+                        cols_exposicion=_COLS_PESO_TODAS_AFP)
+```
+
+Busca:
+```python
+    _registrar_descarte(epu_antes, epu, 'EPU/ETF - generar_relacion',
+                        'Instrumento del ETF/EPU sin Weight en BD (no está en portafolio)',
+                        col_valor='Weight')
+```
+Reemplaza por:
+```python
+    _registrar_descarte(epu_antes, epu, 'EPU/ETF - generar_relacion',
+                        'Instrumento del ETF/EPU sin Weight en BD (no está en portafolio)',
+                        col_valor='Weight', agrupar_por_sbs=True)
+```
+
+Con esto: Huella trae CAJ/DPZ/CPC/CPP/CDBCR completos solo para Integra, tienes `Weight Normalizado` al 100%, y Descartes.xlsx deja de listar instrumentos que en realidad nadie tiene en cartera — pero sigue mostrando, por ejemplo, un instrumento que Habitat sí tiene pero Prima no (ese caso sigue siendo información real, no se toca).
