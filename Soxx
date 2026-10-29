@@ -1,0 +1,195 @@
+import pandas as pd
+import numpy as np
+import polars as pl
+import xlwings as xw
+from datetime import datetime, timedelta
+import datetime
+import xlrd
+import warnings
+import time
+###########################################################################################################################
+InIcIo = datetime.datetime.now()
+ini = datetime.datetime.now() - timedelta(days=1)
+fecha_inicio= pd.Timestamp("2020-01-02")
+fecha_fin= pd.Timestamp(InIcIo-timedelta(days=1))
+
+# Guarda con reintentos: cubre locks transitorios de red/antivirus en Z:, no solo "archivo abierto en Excel"
+def guardar_csv_con_reintentos(df, ruta, index=False, intentos=5, espera_seg=3):
+    for i in range(1, intentos+1):
+        try:
+            df.to_csv(ruta, index=index)
+            return
+        except PermissionError:
+            if i < intentos:
+                print(f"AVISO: '{ruta}' bloqueado (intento {i}/{intentos}). Reintentando en {espera_seg}s...")
+                time.sleep(espera_seg)
+            else:
+                print(f"ERROR: '{ruta}' sigue bloqueado tras {intentos} intentos. Verifica que nadie lo tenga abierto (Excel, OneDrive, antivirus) y vuelve a ejecutar.")
+                raise
+
+ruta=r'Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Renta Fija\Monitor RFL\Inputs Dasboard\Historico_RFL.csv'
+
+Base_Diaria_csv=pd.read_csv(ruta, delimiter=",", low_memory=False)
+ultima_fecha_actualizada=Base_Diaria_csv["Fecha"].iloc[-1]
+ultima_fecha_actualizada=pd.Timestamp(ultima_fecha_actualizada)
+
+if ultima_fecha_actualizada < fecha_fin:
+    ultima_fecha_actualizada_tmas1=ultima_fecha_actualizada+timedelta(days=1)
+    def dias_entre_fechas(fecha_inicio, fecha_fin):
+        lista_fechas=[]
+        fecha_actual= fecha_inicio
+        while fecha_actual<=fecha_fin:
+            if fecha_actual.weekday()<5:
+                lista_fechas.append(fecha_actual)
+            fecha_actual+= timedelta(days=1)
+        return lista_fechas
+    
+    
+    lista_de_fechas= dias_entre_fechas(ultima_fecha_actualizada_tmas1, fecha_fin)
+    
+    ruta_vector_rfl = 'Z:\\Benchmarking\\Vector de Precios\\Vector RF Local\\'
+    print("Se tiene la lista")
+    
+    df_diario= pd.DataFrame()
+    
+    for i in lista_de_fechas:
+        dia= f'{i.day:02}'
+        mes= f'{i.month:02}'
+        anio=f'{i.year}'
+        
+        archivo = str("Vector RF Local_"+dia+mes+anio+".xlsx")
+        ruta_archivo= ruta_vector_rfl+archivo
+        try:
+            archivoexcel=pd.read_excel(ruta_archivo)
+            archivoexcel['Fecha']=str(anio)+"-"+str(mes)+"-"+str(dia)
+            df_diario = pd.concat([df_diario,archivoexcel],axis=0)
+            #print(archivo+":   Se encontro en la ruta")
+        except FileNotFoundError:
+            print(archivo+":   No se encuentra en la ruta")
+        
+    if df_diario.empty:
+        print("La Base ya esta actualizada a la ultima fecha disponible")
+        Base_Final= Base_Diaria_csv.copy()
+    else:
+        Base_Final= pd.concat([Base_Diaria_csv,df_diario],axis=0)    
+    guardar_csv_con_reintentos(Base_Final, ruta)
+    
+##########################################################################################################################
+    
+    FiNaL = datetime.datetime.now()
+    print(fr'\(._.)/    ¡Base de RFL actualizada en {FiNaL-InIcIo}!')
+    print("   |")
+    print("   77")    
+    
+else:
+    print("La base se encuentra actualizada")
+
+##########################################################################################################################
+
+ruta = r'Z:\Mesa de Inversiones\Bottom-Up\5 Estrategia del Portafolio\Monitores\Renta Fija\Monitor RFL\Inputs Dasboard\Fondos_y_TC.csv'
+Qest = "Z:\\Benchmarking\\QEST_BD.xlsm"
+BDPrecios = "Z:\\Benchmarking\\BDPrecios_VB_IN.xlsx"    
+
+
+
+InIcIo = datetime.datetime.now()
+
+def formateando_fechas(fechas):
+    year = fechas[:4]
+    month = fechas[5:7]
+    day = fechas[8:10]
+    return f"{year}-{month}-{day}"
+
+def DQ_IN(df1):
+
+    ListaIN = ["Fondo","Dato","Fecha", 'VALFON']
+
+    #Se eliminan las primeras filas del documento que no serán usadas
+    df1 = df1.drop(df1.index[list(range(0, 10))])
+    df1 = df1.transpose()
+    df1 =df1.rename(columns={10:"Isins"})
+    filtrada=df1[df1["Isins"].isin(ListaIN)]
+    filtrada = filtrada.transpose()
+    filtrada1 = filtrada
+    filtrada1.columns=filtrada.iloc[0].to_list()
+    filtrada = filtrada1[1:]
+
+    Qest_DQ_IN_Fechas = filtrada["Fecha"].values.tolist()
+        
+    Nuevos_DQ_IN=filtrada
+    Nuevos_DQ_IN=Nuevos_DQ_IN.reset_index()
+    Nuevos_DQ_IN =Nuevos_DQ_IN.drop("index",axis=1)
+    Nuevos_DQ_IN = Nuevos_DQ_IN.loc[Nuevos_DQ_IN['Dato'].str.contains(r'PxQ')]
+    Nuevos_DQ_IN=Nuevos_DQ_IN.drop("Dato",axis=1)
+    
+    Nuevos_DQ_IN["Fecha"]= Nuevos_DQ_IN["Fecha"].apply(formateando_fechas)
+    
+    _val = pd.to_datetime(Nuevos_DQ_IN["Fecha"], format="%Y-%m-%d", errors="coerce")
+    if _val.isna().any():
+        print(f"ALERTA DQ_IN: {_val.isna().sum()} fila(s) con Fecha invalida descartada(s): {Nuevos_DQ_IN.loc[_val.isna(),'Fecha'].unique().tolist()}")
+    Nuevos_DQ_IN = Nuevos_DQ_IN[_val.notna()]
+
+    Nuevos_DQ_IN.set_index("Fecha",inplace=True)
+    Nuevos_DQ_IN=Nuevos_DQ_IN[Nuevos_DQ_IN.index>="2020-01-02"]
+    Nuevos_DQ_IN=Nuevos_DQ_IN.reset_index().drop_duplicates(subset=["Fecha","Fondo"], keep="last").set_index("Fecha")
+    Nuevos_DQ_IN_T= Nuevos_DQ_IN.pivot(columns="Fondo", values="VALFON")
+        
+    return Nuevos_DQ_IN_T
+
+def BD_TC(df2):
+
+    ListaIN = ["Campo","Fecha", 'USDPEN',"USDEUR","USDGBP","USDBRL"]
+
+    #Se eliminan las primeras filas del documento que no serán usadas
+    df2 = df2.drop(df2.index[list(range(0, 5))])
+    df2 = df2.transpose()
+    df2 =df2.rename(columns={5:"Isins"})
+    filtrada=df2[df2["Isins"].isin(ListaIN)]
+    filtrada = filtrada.transpose()
+    filtrada1 = filtrada
+    filtrada1.columns=filtrada.iloc[0].to_list()
+    filtrada = filtrada1[1:]
+
+    BD_TC_Fechas = filtrada["Fecha"].values.tolist()
+
+    Nuevos_BD_TC=filtrada
+    Nuevos_BD_TC=Nuevos_BD_TC.reset_index()
+    Nuevos_BD_TC =Nuevos_BD_TC.drop("index",axis=1)
+    Nuevos_BD_TC = Nuevos_BD_TC.loc[Nuevos_BD_TC['Campo'].str.contains(r'P')]
+    Nuevos_BD_TC=Nuevos_BD_TC.drop("Campo",axis=1)
+    
+    Nuevos_BD_TC["Fecha"]= Nuevos_BD_TC["Fecha"].apply(formateando_fechas)
+    
+    _val = pd.to_datetime(Nuevos_BD_TC["Fecha"], format="%Y-%m-%d", errors="coerce")
+    if _val.isna().any():
+        print(f"ALERTA BD_TC: {_val.isna().sum()} fila(s) con Fecha invalida descartada(s): {Nuevos_BD_TC.loc[_val.isna(),'Fecha'].unique().tolist()}")
+    Nuevos_BD_TC = Nuevos_BD_TC[_val.notna()]
+
+    Nuevos_BD_TC.set_index("Fecha",inplace=True)
+    Nuevos_BD_TC=Nuevos_BD_TC[Nuevos_BD_TC.index>="2020-01-02"]
+        
+    return Nuevos_BD_TC
+
+df1=pl.read_excel(Qest, sheet_name="DQ_IN", has_header=False).to_pandas()
+df2=pl.read_excel(BDPrecios, sheet_name="BDTC", has_header=False).to_pandas()
+
+Base_Integra = DQ_IN(df1)
+Base_TC = BD_TC(df2)
+
+Base_Final= Base_Integra.join(Base_TC)
+Base_Final.reset_index(inplace=True)
+
+if Base_Final["Fecha"].isna().any():
+    print(f"ALERTA: {Base_Final['Fecha'].isna().sum()} fila(s) con Fecha vacia en Fondos_y_TC, se descartan antes de exportar")
+    Base_Final = Base_Final[Base_Final["Fecha"].notna()]
+if Base_Final["Fecha"].duplicated().any():
+    print(f"ALERTA: Fecha duplicada en Fondos_y_TC: {Base_Final.loc[Base_Final['Fecha'].duplicated(keep=False),'Fecha'].unique().tolist()}")
+
+guardar_csv_con_reintentos(Base_Final, ruta)
+
+##########################################################################################################################
+FiNaL = datetime.datetime.now()
+print("     ")
+print(fr'\(._.)/    ¡Base AUM y TC actualizada en {FiNaL-InIcIo}!')
+print("   |")
+print("   77")
