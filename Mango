@@ -1,0 +1,187 @@
+Good — there's already a `_periodo_actual()` helper that returns labels like `"1S26"`/`"2S25"`. Let me see its full body and the surrounding helper functions (`_sem_hoja_anterior`, `_sem_hoja_a_nombre`), plus the exact context of each of the 4 filename-building lines.
+
+All unique, single occurrences each. Now let me check the widths/hidden-columns lines and the cols list block for exact text and uniqueness.
+
+Both unique. Now the `cols` block:
+
+Good, unique. Now let's double check all the file-renaming anchor lines for uniqueness:
+
+Unique (single definition). Now check the call-site block for uniqueness:
+
+Ya ubiqué exactamente dónde generar cada cambio dentro de tu script. Buenas noticias: el archivo **"Exposición Riesgo CENEPRED"** y **"Riesgos Climáticos"** ya usan tu función `_periodo_actual()` (devuelve `"1S26"`, `"2S25"`, etc. atado a `CORTE_MES`/`CORTE_ANIO`), así que solo faltan renombrar 3 outputs. Para las columnas, hay que insertar 2 columnas nuevas antes de "Clasificación ERR" en las 3 hojas por peligro.
+
+Cada bloque abajo trae el texto **exacto** a buscar con Ctrl+F (es único en el archivo) y con qué reemplazarlo. Van en orden de aparición en el archivo.
+
+## PARTE 1 — Renombrar outputs por semestre (1S/2S + año)
+
+**Bloque 1** — dentro de `_generar_fen_chart` (línea ~5325), arregla `FEN_Impacto...`:
+
+BUSCAR:
+```python
+        html_out = os.path.join(out_dir, f"FEN_Impacto_{stamp}.html")
+```
+REEMPLAZAR POR:
+```python
+        periodo = _periodo_actual(r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos\Python\Inputs\Mitigantes.xlsx")
+        html_out = os.path.join(out_dir, f"FEN_Impacto - {periodo}.html")
+```
+
+**Bloque 2** — dentro de `generar_dashboard_activos` (línea ~5789), arregla `Dashboard_Activos_Riesgo...`:
+
+BUSCAR:
+```python
+    out_path = os.path.join(out_dir, f"Dashboard_Activos_Riesgo_{stamp}.html")
+```
+REEMPLAZAR POR:
+```python
+    periodo = _periodo_actual(mitigantes_path)
+    out_path = os.path.join(out_dir, f"Dashboard_Activos_Riesgo - {periodo}.html")
+```
+
+**Bloque 3** — dentro de `main()` (línea ~8297-8298), arregla `Riesgos_Fisicos_Cartera...` y define `periodo` para el bloque 4:
+
+BUSCAR:
+```python
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    xlsx_out = os.path.join(OUT_DIR, f"Riesgos_Fisicos_Cartera_{stamp}.xlsx")
+```
+REEMPLAZAR POR:
+```python
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    periodo = _periodo_actual(r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\21. TCFD\Reporte TCFD\Reporte TCFD\Mapeo de Distribución de Distritos - Riesgos Fisicos\Python\Inputs\Mitigantes.xlsx")
+    xlsx_out = os.path.join(OUT_DIR, f"Riesgos_Fisicos_Cartera - {periodo}.xlsx")
+```
+
+**Bloque 4** — dentro de `main()` (línea ~8366), la copia TCFD busca el archivo FEN por su nombre viejo; hay que alinearlo al nuevo:
+
+BUSCAR:
+```python
+        _fen_html_path = os.path.join(OUT_DIR, f"FEN_Impacto_{stamp}.html")
+```
+REEMPLAZAR POR:
+```python
+        _fen_html_path = os.path.join(OUT_DIR, f"FEN_Impacto - {periodo}.html")
+```
+
+*(No toqué `EXCLUDE_OUTPUTS` en línea 255 — sigue funcionando porque hace match por substring de `"Riesgos_Fisicos_Cartera"`, que no cambia.)*
+
+## PARTE 2 — Columnas "Score" y "Score Ajustado" en "Exposición Riesgo CENEPRED"
+
+Todo esto es dentro de `generar_excel_tabla_resumen`. Inserto las 2 columnas justo antes de "Clasificación ERR" (que hoy es la penúltima columna *visible*; después de ella solo queda visible "Cobertura por Activos"). Para el mitigante "—" (sin dato) uso factor 1.0 por defecto — dímelo si prefieres otro criterio para ese caso.
+
+**Bloque 5** — encabezados (línea ~6102):
+
+BUSCAR:
+```python
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Clasificación ERR",
+                 "Cobertura por Activos", "Activos totales", "Activos sin cobertura"]
+```
+REEMPLAZAR POR:
+```python
+        cols += ["Score MM", "Score Inund.", "Score Sequía", "Score Global",
+                 f"Mitigante ({periodo})", "Score", "Score Ajustado", "Clasificación ERR",
+                 "Cobertura por Activos", "Activos totales", "Activos sin cobertura"]
+```
+
+**Bloque 6** — cálculo de los valores (línea ~6116, dentro del `for e in emisores:`):
+
+BUSCAR:
+```python
+            mit = _mit_lookup(e, mitigantes)
+            err = "; ".join(err_map.get(e, [])) or "—"
+```
+REEMPLAZAR POR:
+```python
+            mit = _mit_lookup(e, mitigantes)
+            err = "; ".join(err_map.get(e, [])) or "—"
+            # NUEVO: Score CENEPRED global del emisor y su versión ajustada por mitigante
+            # (Bajo: x1 | Medio: x1 - 10% | Alto: x1 - 30%).
+            score_val = sc["global"]
+            factor_mit = {"Bajo": 1.0, "Medio": 0.90, "Alto": 0.70}.get(mit, 1.0)
+            score_ajustado = score_val * factor_mit
+```
+
+**Bloque 7** — insertarlos en la fila (línea ~6149):
+
+BUSCAR:
+```python
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit, err,
+                     cob, n_tot, n_sin]
+```
+REEMPLAZAR POR:
+```python
+            fila += [sc["mm"], sc["inu"], sc["seq"], sc["global"], mit,
+                     score_val, score_ajustado, err,
+                     cob, n_tot, n_sin]
+```
+
+**Bloques 8-11** — el formateo de celdas usa posiciones de columna fijas (índices `j`) que ahora se corren +2 a partir de "Clasificación ERR". Son 4 micro-cambios en el mismo `for j, v in enumerate(fila, start=1):` (línea ~6158):
+
+BUSCAR:
+```python
+                if j == 25:                                  # Clasificación ERR (última de bloque)
+```
+REEMPLAZAR POR:
+```python
+                if j == 27:                                  # Clasificación ERR (última de bloque)
+```
+
+BUSCAR:
+```python
+                elif j == 24 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+```
+REEMPLAZAR POR:
+```python
+                elif j == 24 and fill_mit(v):                # mitigante
+                    c.fill = fill_mit(v)
+                elif j in (25, 26):                          # NUEVO: Score / Score Ajustado
+                    c.number_format = FMT_SC; c.fill = fill_score(v)
+```
+
+BUSCAR:
+```python
+                elif j == 26:                                # Cobertura por Activos (%)
+```
+REEMPLAZAR POR:
+```python
+                elif j == 28:                                # Cobertura por Activos (%)
+```
+
+BUSCAR:
+```python
+                elif j in (27, 28):                          # Activos totales / sin cobertura
+```
+REEMPLAZAR POR:
+```python
+                elif j in (29, 30):                          # Activos totales / sin cobertura
+```
+
+**Bloque 12** — anchos de columna (línea ~6189):
+
+BUSCAR:
+```python
+        widths = [26, 16, 18, 18, 18, 13, 13, 26] + [11, 16] * 5 + [12,
+                                                                     10, 11, 11, 12, 16, 30,
+                                                                     16, 13, 18]
+```
+REEMPLAZAR POR:
+```python
+        widths = [26, 16, 18, 18, 18, 13, 13, 26] + [11, 16] * 5 + [12,
+                                                                     10, 11, 11, 12, 16, 10, 15, 30,
+                                                                     16, 13, 18]
+```
+
+**Bloque 13** — columnas ocultas (línea ~6198). "Score" y "Score Ajustado" quedan visibles; solo se corren los índices de "Activos totales/sin cobertura":
+
+BUSCAR:
+```python
+        for j in (8, 10, 12, 14, 16, 18, 20, 21, 22, 23, 27, 28):
+```
+REEMPLAZAR POR:
+```python
+        for j in (8, 10, 12, 14, 16, 18, 20, 21, 22, 23, 29, 30):
+```
+
+No hace falta tocar `ws.auto_filter.ref` ni `freeze_panes`: el filtro usa `len(cols)` dinámicamente y se ajusta solo a la nueva última columna.
