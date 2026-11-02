@@ -1,0 +1,53 @@
+No hay ningún `try/except` alrededor del loop que pueda estar tragándose un error, así que si fallara una excepción real, la verías en consola (y dices que no). Eso apunta a la causa más probable: **el archivo destino está abierto en Excel** (aunque sea en modo lectura) — pandas/openpyxl a veces logra escribir en disco igual, pero Excel sigue mostrando la versión vieja en memoria hasta que lo cierras y reabres, dando la sensación de "no exportó nada".
+
+Para no arriesgar la estructura, en vez de "arreglar a ciegas" te doy un parche de diagnóstico: es 100% aditivo (no toca tu lógica de negocio), y en la próxima corrida te va a decir con certeza si el archivo cambió de verdad en disco, o si hubo una excepción real.
+
+**Este mismo bloque de escritura aparece 2 veces en tu script** (idéntico en `main()` y en `main2()`, solo cambia `Ruta_Base`). Hazlo con Ctrl+H, pero reemplaza manualmente cada aparición con su bloque correspondiente (no uses "Reemplazar todo"):
+
+---
+
+**BUSCAR** (aparece 2 veces):
+```python
+    with pd.ExcelWriter(Ruta_Base ,  mode="a", engine="openpyxl",if_sheet_exists = 'replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Sheet1", index = False)
+```
+
+**1ª aparición** (dentro de `main()`, justo después de la línea con `"1. BD Produccion.xlsx"`) → **REEMPLAZAR con Bloque A**:
+```python
+    mtime_antes = os.path.getmtime(Ruta_Base)
+    try:
+        with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+            BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+        mtime_despues = os.path.getmtime(Ruta_Base)
+        if mtime_despues == mtime_antes:
+            print(f"⚠️ {mes}{anio} BD Produccion: el archivo NO cambió su fecha de modificación (¿abierto en Excel?)")
+        else:
+            print(f"✅ {mes}{anio} BD Produccion: escrito OK, {len(BD_Total)} filas.")
+    except Exception as e:
+        print(f"❌ {mes}{anio} BD Produccion: FALLÓ -> {type(e).__name__}: {e}")
+```
+
+**2ª aparición** (dentro de `main2()`, justo después de la línea con `"7. Produccion por Tipo.xlsx"`) → **REEMPLAZAR con Bloque B**:
+```python
+    mtime_antes = os.path.getmtime(Ruta_Base)
+    try:
+        with pd.ExcelWriter(Ruta_Base, mode="a", engine="openpyxl", if_sheet_exists='replace') as writer:
+            BD_Total.to_excel(writer, sheet_name="Sheet1", index=False)
+        mtime_despues = os.path.getmtime(Ruta_Base)
+        if mtime_despues == mtime_antes:
+            print(f"⚠️ {mes}{anio} Produccion por Tipo: el archivo NO cambió su fecha de modificación (¿abierto en Excel?)")
+        else:
+            print(f"✅ {mes}{anio} Produccion por Tipo: escrito OK, {len(BD_Total)} filas.")
+    except Exception as e:
+        print(f"❌ {mes}{anio} Produccion por Tipo: FALLÓ -> {type(e).__name__}: {e}")
+```
+
+---
+
+Corre el script una vez (con ambos archivos **cerrados** en Excel) y mira la consola:
+
+- Si ves `⚠️ ... NO cambió su fecha` → confirmado, es el archivo abierto en otro lado (o permisos de red); no es un bug de código.
+- Si ves `❌ ... FALLÓ -> ...` → ahí tienes el error real y la línea exacta, y te doy el parche puntual para eso.
+- Si ves `✅ ... escrito OK` pero igual no ves los datos al abrir el Excel → entonces el problema es que estás abriendo una copia distinta (red/caché/OneDrive) y hay que revisar la ruta `Ruta_Base` contra la que realmente abres.
+
+Pégame la salida de consola y te doy el fix definitivo puntual.
