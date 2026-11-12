@@ -1,0 +1,152 @@
+import os
+import requests
+import bcchapi
+import pandas as pd
+from openpyxl import load_workbook
+from datetime import date
+
+# ----------------------------------------------------------------------------
+# 1) Credenciales y descarga de series IMCE desde el BCCh
+# ----------------------------------------------------------------------------
+siete = bcchapi.Siete(
+    "miguel.munoz@sura.pe",
+    "Apichile2024!"
+)
+
+Series_IMCE = siete.cuadro(
+    series=[
+        'G089.IME.IND.A0.M',  # Total
+        'G089.IME.IND.A4.M',  # Minería
+        'G089.IME.IND.A1.M',  # Comercio
+        'G089.IME.IND.A2.M',  # Industria
+        'G089.IME.IND.A3.M'   # Construcción
+    ],
+
+    nombres=[
+        'IMCE: Total',
+        'IMCE: Minería',
+        'IMCE: Comercio',
+        'IMCE: Industria',
+        'IMCE: Construcción'
+    ],
+
+    desde="2014-10-01",
+    hasta=pd.Timestamp.today().strftime("%Y-%m-01"),
+    frecuencia="ME",
+
+    observado={
+        'IMCE: Total': 'last',
+        'IMCE: Minería': 'last',
+        'IMCE: Comercio': 'last',
+        'IMCE: Industria': 'last',
+        'IMCE: Construcción': 'last'
+    }
+)
+
+# Fila más reciente con al menos un dato publicado
+ultima_fila_serie = Series_IMCE.dropna(how="all").iloc[-1]
+fecha_dato = pd.Timestamp(ultima_fila_serie.name)
+# Solo valores no nulos (si algún subíndice aún no publica ese mes, se omite)
+valores_dato = {k: v for k, v in ultima_fila_serie.to_dict().items() if pd.notna(v)}
+
+# ----------------------------------------------------------------------------
+# 2) Insertar el dato en la hoja existente identificando posiciones dinámicamente
+# ----------------------------------------------------------------------------
+Ruta_Base = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Construcción\BD\Chile\BCR\IMCE.xls"
+
+FILA_HEADERS = 7
+COL_FECHA = 1          # Columna A
+COL_INICIO_DATOS = 2   # Columna B
+COL_FIN_DATOS = 6      # Columna F
+
+if not os.path.exists(Ruta_Base):
+    raise FileNotFoundError(f"No se encontró el archivo base en: {Ruta_Base}")
+
+wb = load_workbook(Ruta_Base)
+ws = wb[wb.sheetnames[0]]  # primera y única hoja
+
+# --- 2a) Mapear encabezados (fila 7, columnas B:F) -> índice de columna ---
+mapa_headers = {}
+for col in range(COL_INICIO_DATOS, COL_FIN_DATOS + 1):
+    header = ws.cell(row=FILA_HEADERS, column=col).value
+    if header is not None:
+        mapa_headers[str(header).strip()] = col
+
+faltantes = [h for h in valores_dato.keys() if h not in mapa_headers]
+if faltantes:
+    raise ValueError(f"No se encontraron en la fila {FILA_HEADERS} los encabezados: {faltantes}")
+
+
+def es_fecha(valor):
+    if isinstance(valor, (pd.Timestamp, date)):
+        return True
+    if isinstance(valor, str):
+        return pd.to_datetime(valor, dayfirst=True, errors="coerce") is not pd.NaT
+    return False
+
+
+# --- 2b) Última fila con fecha válida en columna A (se recorre todo lo usado) ---
+ultima_fila_fecha = None
+for row in range(FILA_HEADERS + 1, ws.max_row + 1):
+    valor = ws.cell(row=row, column=COL_FECHA).value
+    if valor is not None and es_fecha(valor):
+        ultima_fila_fecha = row
+
+if ultima_fila_fecha is None:
+    raise ValueError("No se encontraron fechas válidas en la columna A.")
+
+# --- 2c) Última fila con valores numéricos en B:F (filas no numéricas, p.ej. la 8, se omiten) ---
+ultima_fila_numeros = None
+for row in range(FILA_HEADERS + 1, ws.max_row + 1):
+    fila_tiene_numero = any(
+        isinstance(ws.cell(row=row, column=col).value, (int, float))
+        for col in range(COL_INICIO_DATOS, COL_FIN_DATOS + 1)
+    )
+    if fila_tiene_numero:
+        ultima_fila_numeros = row
+
+if ultima_fila_numeros is None:
+    raise ValueError("No se encontraron valores numéricos en las columnas B:F.")
+
+ultima_fila_valida = max(ultima_fila_fecha, ultima_fila_numeros)
+fila_nueva = ultima_fila_valida + 1
+
+# --- 2d) No duplicar si el mes descargado ya está cargado en el archivo ---
+fecha_ultima_existente = ws.cell(row=ultima_fila_fecha, column=COL_FECHA).value
+if isinstance(fecha_ultima_existente, str):
+    fecha_ultima_existente = pd.to_datetime(fecha_ultima_existente, dayfirst=True)
+fecha_ultima_existente = pd.Timestamp(fecha_ultima_existente).normalize()
+
+if fecha_dato.normalize() <= fecha_ultima_existente:
+    print(f"El dato más reciente ({fecha_dato:%d/%m/%Y}) ya está cargado "
+          f"(última fila con fecha: {fecha_ultima_existente:%d/%m/%Y}). No se insertó nada nuevo.")
+else:
+    # --- 2e) Escribir la fecha del nuevo mes, sin hora, con el mismo formato que el resto de la columna ---
+    celda_fecha = ws.cell(row=fila_nueva, column=COL_FECHA, value=fecha_dato.date())
+    celda_fecha.number_format = "DD/MM/YYYY"
+
+    # --- 2f) Escribir cada valor IMCE en la columna que corresponde a su encabezado ---
+    for nombre_col, valor in valores_dato.items():
+        col_destino = mapa_headers[nombre_col]
+        ws.cell(row=fila_nueva, column=col_destino, value=valor)
+
+    wb.save(Ruta_Base)
+    print(f"IMCE actualizado correctamente. Se insertó la fila {fila_nueva} con fecha {fecha_dato:%d/%m/%Y}.")
+
+# ----------------------------------------------------------------------------
+# 3) Descargar IMACEC.xlsx del Banco Central de Chile y guardarlo, sobrescribiendo si ya existe
+# ----------------------------------------------------------------------------
+URL_IMACEC = "https://si3.bcentral.cl/estadisticas/Principal1/excel/CCNN/IMACEC/Excel/IMACEC.xlsx"
+CARPETA_DESTINO = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Construcción\BD\Chile\BCR"
+RUTA_IMACEC = os.path.join(CARPETA_DESTINO, "IMACEC.xlsx")
+
+os.makedirs(CARPETA_DESTINO, exist_ok=True)
+
+try:
+    resp = requests.get(URL_IMACEC, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+    resp.raise_for_status()
+    with open(RUTA_IMACEC, "wb") as f:  # "wb" sobrescribe sin preguntar aunque el archivo ya exista
+        f.write(resp.content)
+    print(f"IMACEC.xlsx descargado y guardado en: {RUTA_IMACEC}")
+except Exception as e:
+    print(f"No se pudo descargar/guardar IMACEC.xlsx: {e}")
