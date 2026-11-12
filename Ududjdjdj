@@ -1,0 +1,62 @@
+El error es casi seguro un **bloqueo de archivo**: el `.xlsm` está abierto en Excel por alguien (o por un proceso anterior que no lo cerró bien), o el share de red (`Z:\`) tiene el archivo lockeado momentáneamente. Ya tuviste este mismo patrón de `PermissionError` por bloqueo de red en el pipeline de IC Chile, así que la solución es la misma idea: reintentos con backoff, y de paso cerrar la instancia de Excel que lo tenga abierto antes de reintentar.
+
+Como usas `xlwings`/COM en otros scripts, asumo que `pywin32` ya está instalado en tu entorno.
+
+**1) Agrega estos imports/funciones** (arriba del script, junto a los otros imports):
+
+```python
+import win32com.client
+import time
+
+def cerrar_si_esta_abierto_en_excel(ruta_archivo):
+    """Si el archivo está abierto en una instancia de Excel, lo cierra sin guardar
+    para liberar el bloqueo antes de reintentar con openpyxl."""
+    try:
+        excel = win32com.client.GetActiveObject("Excel.Application")
+    except Exception:
+        return False  # No hay ninguna instancia de Excel abierta
+
+    ruta_norm = os.path.normcase(os.path.abspath(ruta_archivo))
+    for wb_abierto in excel.Workbooks:
+        try:
+            if os.path.normcase(os.path.abspath(wb_abierto.FullName)) == ruta_norm:
+                wb_abierto.Close(SaveChanges=False)
+                print(f"Se cerró '{wb_abierto.Name}' que estaba abierto en Excel.")
+                return True
+        except Exception:
+            continue
+    return False
+
+def guardar_con_reintentos(wb, ruta_archivo, intentos=5, espera=5):
+    """Reintenta wb.save() ante PermissionError (archivo bloqueado en red/Excel)."""
+    for intento in range(1, intentos + 1):
+        try:
+            wb.save(ruta_archivo)
+            print(f"Archivo guardado correctamente (intento {intento}/{intentos}).")
+            return True
+        except PermissionError:
+            print(f"Intento {intento}/{intentos}: '{os.path.basename(ruta_archivo)}' está bloqueado.")
+            if intento == 1:
+                cerrar_si_esta_abierto_en_excel(ruta_archivo)
+            time.sleep(espera)
+    return False
+```
+
+**2) Reemplaza el bloque final** (busca `wb.save(ruta_excel)` seguido de `wb.close()` al final del script) por:
+
+```python
+if guardar_con_reintentos(wb, ruta_excel):
+    wb.close()
+    print("Encabezados convertidos correctamente.")
+else:
+    wb.close()
+    raise PermissionError(
+        f"No se pudo guardar '{ruta_excel}' tras varios intentos. "
+        "Verifica que nadie lo tenga abierto manualmente en Excel."
+    )
+```
+
+Notas rápidas:
+- `GetActiveObject` solo engancha una instancia de Excel que ya esté corriendo (no abre una nueva), así que si nadie lo tiene abierto, simplemente pasa al reintento con espera.
+- Si el bloqueo persiste tras los 5 intentos, probablemente sea OneDrive/antivirus escaneando el archivo en el share — en ese caso basta con subir `intentos` o `espera`.
+- Si prefieres no depender de `win32com` (por ejemplo si corres esto en un servidor sin Excel instalado), puedo darte la versión que solo hace retry con backoff, sin el intento de cierre automático — avísame.
