@@ -1,0 +1,179 @@
+import os
+import requests
+import bcchapi
+import xlwings as xw
+import pandas as pd
+from openpyxl import load_workbook
+from datetime import date
+
+# ----------------------------------------------------------------------------
+# 1) Credenciales y descarga de series IMCE desde el BCCh
+# ----------------------------------------------------------------------------
+siete = bcchapi.Siete(
+    "miguel.munoz@sura.pe",
+    "Apichile2024!"
+)
+
+Series_IMCE = siete.cuadro(
+    series=[
+        'G089.IME.IND.A0.M',  # Total
+        'G089.IME.IND.A4.M',  # Minería
+        'G089.IME.IND.A1.M',  # Comercio
+        'G089.IME.IND.A2.M',  # Industria
+        'G089.IME.IND.A3.M'   # Construcción
+    ],
+
+    nombres=[
+        'IMCE: Total',
+        'IMCE: Minería',
+        'IMCE: Comercio',
+        'IMCE: Industria',
+        'IMCE: Construcción'
+    ],
+
+    desde="2014-10-01",
+    hasta=pd.Timestamp.today().strftime("%Y-%m-01"),
+    frecuencia="ME",
+
+    observado={
+        'IMCE: Total': 'last',
+        'IMCE: Minería': 'last',
+        'IMCE: Comercio': 'last',
+        'IMCE: Industria': 'last',
+        'IMCE: Construcción': 'last'
+    }
+)
+
+# ----------------------------------------------------------------------------
+# 2) Insertar el dato en la hoja existente identificando posiciones dinámicamente
+# ----------------------------------------------------------------------------
+Ruta_Base_XLS = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Construcción\BD\Chile\BCR\IMCE.xls"
+
+# openpyxl no puede leer ni escribir el formato .xls antiguo (de ahí el InvalidFileException).
+# Si todavía no existe la versión .xlsx equivalente, se convierte una sola vez usando Excel vía
+# xlwings (requiere Excel instalado; paquete: pip install xlwings). Las corridas siguientes ya
+# encuentran el .xlsx y se saltan esta conversión.
+Ruta_Base = os.path.splitext(Ruta_Base_XLS)[0] + ".xlsx"
+
+if not os.path.exists(Ruta_Base):
+    if not os.path.exists(Ruta_Base_XLS):
+        raise FileNotFoundError(f"No se encontró el archivo base en: {Ruta_Base_XLS}")
+
+    app = xw.App(visible=False)
+    try:
+        wb_antiguo = app.books.open(Ruta_Base_XLS)
+        wb_antiguo.save(Ruta_Base)  # guarda como .xlsx junto al .xls original
+        wb_antiguo.close()
+    finally:
+        app.quit()
+    print(f"Se convirtió {Ruta_Base_XLS} a {Ruta_Base} (conversión única).")
+
+FILA_HEADERS = 7
+COL_FECHA = 1          # Columna A
+COL_INICIO_DATOS = 2   # Columna B
+COL_FIN_DATOS = 6      # Columna F
+
+wb = load_workbook(Ruta_Base)
+ws = wb[wb.sheetnames[0]]  # primera y única hoja
+
+# --- 2a) Mapear encabezados (fila 7, columnas B:F) -> índice de columna ---
+mapa_headers = {}
+for col in range(COL_INICIO_DATOS, COL_FIN_DATOS + 1):
+    header = ws.cell(row=FILA_HEADERS, column=col).value
+    if header is not None:
+        mapa_headers[str(header).strip()] = col
+
+faltantes = [h for h in Series_IMCE.columns if h not in mapa_headers]
+if faltantes:
+    raise ValueError(f"No se encontraron en la fila {FILA_HEADERS} los encabezados: {faltantes}")
+
+
+def es_fecha(valor):
+    if isinstance(valor, (pd.Timestamp, date)):
+        return True
+    if isinstance(valor, str):
+        return pd.to_datetime(valor, dayfirst=True, errors="coerce") is not pd.NaT
+    return False
+
+
+# --- 2b) Última fila con fecha válida en columna A (se recorre todo lo usado) ---
+ultima_fila_fecha = None
+for row in range(FILA_HEADERS + 1, ws.max_row + 1):
+    valor = ws.cell(row=row, column=COL_FECHA).value
+    if valor is not None and es_fecha(valor):
+        ultima_fila_fecha = row
+
+if ultima_fila_fecha is None:
+    raise ValueError("No se encontraron fechas válidas en la columna A.")
+
+# --- 2c) Última fila con valores numéricos en B:F (filas no numéricas, p.ej. la 8, se omiten) ---
+ultima_fila_numeros = None
+for row in range(FILA_HEADERS + 1, ws.max_row + 1):
+    fila_tiene_numero = any(
+        isinstance(ws.cell(row=row, column=col).value, (int, float))
+        for col in range(COL_INICIO_DATOS, COL_FIN_DATOS + 1)
+    )
+    if fila_tiene_numero:
+        ultima_fila_numeros = row
+
+if ultima_fila_numeros is None:
+    raise ValueError("No se encontraron valores numéricos en las columnas B:F.")
+
+ultima_fila_valida = max(ultima_fila_fecha, ultima_fila_numeros)
+fila_nueva = ultima_fila_valida + 1
+
+# --- 2d) Fecha más reciente ya presente en el archivo ---
+fecha_ultima_existente = ws.cell(row=ultima_fila_fecha, column=COL_FECHA).value
+if isinstance(fecha_ultima_existente, str):
+    fecha_ultima_existente = pd.to_datetime(fecha_ultima_existente, dayfirst=True)
+fecha_ultima_existente = pd.Timestamp(fecha_ultima_existente).normalize()
+
+# --- 2e) Meses publicados por el BCCh que todavía no están en el archivo ---
+# Solo se consideran meses POSTERIORES a la última fecha ya cargada: no se intenta
+# "rellenar" huecos antiguos anteriores a esa fecha, aunque la serie descargada
+# arranque desde 2014 — eso se ignora a propósito.
+datos_pendientes = Series_IMCE.dropna(how="all").sort_index()
+datos_pendientes = datos_pendientes[datos_pendientes.index > fecha_ultima_existente]
+
+if datos_pendientes.empty:
+    print(f"El archivo ya está al día (última fecha cargada: {fecha_ultima_existente:%d/%m/%Y}). "
+          f"No hay meses nuevos que insertar.")
+else:
+    fila = fila_nueva
+    for fecha_mes, fila_datos in datos_pendientes.iterrows():
+        fecha_mes = pd.Timestamp(fecha_mes)
+        # Solo valores no nulos (si algún subíndice aún no publica ese mes puntual, se omite esa celda)
+        valores_mes = {k: v for k, v in fila_datos.to_dict().items() if pd.notna(v)}
+
+        # Fecha del mes, sin hora, con el mismo formato que el resto de la columna A
+        celda_fecha = ws.cell(row=fila, column=COL_FECHA, value=fecha_mes.date())
+        celda_fecha.number_format = "DD/MM/YYYY"
+
+        # Valor IMCE en la columna que corresponde a su encabezado
+        for nombre_col, valor in valores_mes.items():
+            col_destino = mapa_headers[nombre_col]
+            ws.cell(row=fila, column=col_destino, value=valor)
+
+        fila += 1
+
+    wb.save(Ruta_Base)
+    print(f"IMCE actualizado correctamente. Se insertaron {len(datos_pendientes)} mes(es) nuevo(s), "
+          f"desde {datos_pendientes.index.min():%d/%m/%Y} hasta {datos_pendientes.index.max():%d/%m/%Y}.")
+
+# ----------------------------------------------------------------------------
+# 3) Descargar IMACEC.xlsx del Banco Central de Chile y guardarlo, sobrescribiendo si ya existe
+# ----------------------------------------------------------------------------
+URL_IMACEC = "https://si3.bcentral.cl/estadisticas/Principal1/excel/CCNN/IMACEC/Excel/IMACEC.xlsx"
+CARPETA_DESTINO = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Construcción\BD\Chile\BCR"
+RUTA_IMACEC = os.path.join(CARPETA_DESTINO, "IMACEC.xlsx")
+
+os.makedirs(CARPETA_DESTINO, exist_ok=True)
+
+try:
+    resp = requests.get(URL_IMACEC, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+    resp.raise_for_status()
+    with open(RUTA_IMACEC, "wb") as f:  # "wb" sobrescribe sin preguntar aunque el archivo ya exista
+        f.write(resp.content)
+    print(f"IMACEC.xlsx descargado y guardado en: {RUTA_IMACEC}")
+except Exception as e:
+    print(f"No se pudo descargar/guardar IMACEC.xlsx: {e}")
