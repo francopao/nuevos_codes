@@ -1,0 +1,37 @@
+Confirmado con tu Excel: la fila sin espacio tiene datos de 2018-01 a 2026-08, y la fila con espacio extra solo tiene el dato de 2026-09 (el período que acabas de correr). El causante es `renombrar_valor()`: se aplica **después** de `limpiar_etiqueta_sbs()`, así que si el diccionario (`Diccionario_SBS.xlsx`, columna `Nombre_Nuevo`) trae ese espacio extra, lo reintroduce sin que nada lo vuelva a limpiar.
+
+Fix: volver a aplicar `limpiar_etiqueta_sbs` justo después de cada `renombrar_valor`.
+
+**Reemplazo 1 (bloque "Detallada", función `procesar_institucion`):**
+
+Buscar:
+```python
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+        DF["Detallada"] = DF["Detallada"].apply(normalizar_detallada)
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+```
+
+Reemplazar por:
+```python
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+        DF["Detallada"] = DF["Detallada"].apply(normalizar_detallada)
+        DF["Detallada"] = DF.apply(lambda r: renombrar_valor(r, "Detallada", dic_ren), axis=1)
+        DF["Detallada"] = DF["Detallada"].apply(limpiar_etiqueta_sbs)
+```
+
+**Reemplazo 2 (bloque "Index", misma función):**
+
+Buscar:
+```python
+        DF["Index"] = DF["Index"].apply(limpiar_etiqueta_sbs)
+        DF["Index"] = DF.apply(lambda r: renombrar_valor(r, "Index", dic_ren), axis=1)
+```
+
+Reemplazar por:
+```python
+        DF["Index"] = DF["Index"].apply(limpiar_etiqueta_sbs)
+        DF["Index"] = DF.apply(lambda r: renombrar_valor(r, "Index", dic_ren), axis=1)
+        DF["Index"] = DF["Index"].apply(limpiar_etiqueta_sbs)
+```
+
+Esto no limpia las ~57 filas duplicadas ya guardadas en la base histórica (seguirán como keys separadas hasta que les hagas un merge manual o re-corras el período), pero evita que vuelva a pasar en las próximas corridas.
