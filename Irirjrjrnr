@@ -1,0 +1,290 @@
+#%% md
+### Máxima Demanda — script saneado y blindado
+#%%
+# Parametros
+inicio = "062026"
+final = "102026"
+#%%
+import os
+import re
+import shutil
+import datetime
+import warnings
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1), int(a2) + 1)
+
+meses_n = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+meses_ = ['en', 'fe', 'ma', 'ab', 'my', 'jn', 'jl', 'ag', 'se', 'oc', 'no', 'di']
+#%% md
+### Generador de backups
+#%%
+RUTA_BASE_HISTORICA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\8. Maxima Demanda.xlsx"
+CARPETA_BACKUP = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\Backup"
+RUTA_DICCIONARIO = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Diccionarios\Diccionario_Utilities.xlsx"
+CARPETA_BD_MENSUAL = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Máxima demanda"
+
+
+def copiar_archivo_a_backup(origen, carpeta_destino):
+    """Guarda una copia de seguridad antes de tocar la base historica.
+    Si la unidad de red no esta disponible o el archivo no existe, se avisa
+    y el proceso continua: un backup fallido no debe impedir la actualizacion."""
+    try:
+        if not os.path.isfile(origen):
+            print(f"No se encontro el archivo a respaldar en {origen}. Se omite el backup y se continua con el proceso.")
+            return False
+        if not os.path.exists(carpeta_destino):
+            os.makedirs(carpeta_destino)
+        nombre_archivo = os.path.basename(origen)
+        marca_tiempo = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        nombre_con_fecha = f"{os.path.splitext(nombre_archivo)[0]}_{marca_tiempo}{os.path.splitext(nombre_archivo)[1]}"
+        destino = os.path.join(carpeta_destino, nombre_con_fecha)
+        shutil.copyfile(origen, destino)
+        print(f"Backup creado correctamente en {destino}.")
+        return True
+    except Exception as error:
+        print(f"No se pudo crear el backup. Motivo: {error}. Se continua con el proceso de todas formas.")
+        return False
+
+
+copiar_archivo_a_backup(RUTA_BASE_HISTORICA, CARPETA_BACKUP)
+#%%
+array_rutas = []
+for i in rango_anios:
+    if rango_anios[-1] == i:
+        if len(rango_anios) == 1:
+            for j in range(int(m1), int(m2) + 1):
+                j = str(j).zfill(2)
+                array_rutas.append(j + str(i))
+        else:
+            for j in range(1, int(m2) + 1):
+                j = str(j).zfill(2)
+                array_rutas.append(j + str(i))
+    elif i != rango_anios[0]:
+        for j in range(1, 13):
+            j = str(j).zfill(2)
+            array_rutas.append(j + str(i))
+    else:
+        if len(rango_anios) == 1:
+            for j in range(int(m1), int(m2) + 1):
+                j = str(j).zfill(2)
+                array_rutas.append(j + str(i))
+        else:
+            for j in range(int(m1), 13):
+                j = str(j).zfill(2)
+                array_rutas.append(j + str(i))
+#%% md
+### Funciones de apoyo
+#%%
+def localizar_fila_encabezado(df, columna, etiqueta):
+    """Busca la fila donde empieza la tabla real (la que tiene 'Empresa' como
+    titulo) en lugar de asumir siempre la misma posicion fija. Cada reporte
+    mensual puede traer una cantidad distinta de filas de resumen arriba,
+    y por eso la posicion del encabezado puede moverse de un mes a otro."""
+    objetivo = etiqueta.strip().lower()
+    for idx in range(len(df)):
+        valor = df.iat[idx, columna]
+        if isinstance(valor, str) and valor.strip().lower() == objetivo:
+            return idx
+    return None
+
+
+def encontrar_columna(df, objetivo):
+    objetivo_norm = objetivo.strip().lower()
+    cols_norm = {c: str(c).strip().lower().replace('\ufeff', '') for c in df.columns}
+    for original, norm in cols_norm.items():
+        if norm == objetivo_norm:
+            return original
+    for original, norm in cols_norm.items():
+        if objetivo_norm in norm:
+            print(f"Se esta usando la columna '{original}' como equivalente de '{objetivo}'.")
+            return original
+    return None
+
+
+def cargar_diccionario(ruta_diccionario, hoja="Utilities"):
+    df_ren = pd.read_excel(ruta_diccionario, sheet_name=hoja)
+    mapa = df_ren.set_index("Nombre_Antiguo")["Nombre_Nuevo"].to_dict()
+    return mapa
+
+
+def guardar_diccionario(ruta_diccionario, hoja, mapa_nombres):
+    """Escribe de vuelta el diccionario con los nombres nuevos ya incluidos,
+    para que la proxima vez no haga falta abrirlo ni completarlo a mano.
+    Si el guardado falla, el proceso principal no se detiene: simplemente
+    esos nombres se volveran a detectar como nuevos la siguiente vez."""
+    try:
+        df_actualizado = pd.DataFrame({
+            "Nombre_Antiguo": list(mapa_nombres.keys()),
+            "Nombre_Nuevo": list(mapa_nombres.values()),
+        })
+        with pd.ExcelWriter(ruta_diccionario, mode="a", engine="openpyxl", if_sheet_exists="replace") as escritor:
+            df_actualizado.to_excel(escritor, sheet_name=hoja, index=False)
+        return True
+    except Exception as error:
+        print(f"No se pudo guardar el diccionario actualizado. Motivo: {error}. Esos nombres se detectaran de nuevo en la proxima ejecucion.")
+        return False
+#%% md
+### Procesamiento mensual
+#%%
+class MesOmitido(Exception):
+    """Se usa para saltar un mes de forma controlada cuando ocurre un caso
+    especial esperado (archivo faltante, mes sin datos, etc), sin que esto
+    se confunda con un error real del codigo."""
+    pass
+
+
+def main(mes, anio, mes_, mapa_nombres, nombres_nuevos_globales):
+    archivo = os.path.join(CARPETA_BD_MENSUAL, mes + anio + ".xlsx")
+    print(f"Procesando {mes} {anio}. Archivo esperado: {archivo}")
+
+    if not os.path.isfile(archivo):
+        raise MesOmitido(f"No se encontro el archivo para {mes} {anio}. Se omite este mes y se continua con el siguiente.")
+
+    BD = pd.read_excel(archivo, header=None)
+
+    fila_encabezado = localizar_fila_encabezado(BD, columna=1, etiqueta="Empresa")
+    if fila_encabezado is None:
+        raise MesOmitido(f"No se encontro la fila de encabezado 'Empresa' en el archivo de {mes} {anio}. Revisa si el formato del reporte cambio este mes.")
+
+    BD = BD.iloc[fila_encabezado:, 1:5].copy().reset_index(drop=True)
+
+    Titulos = BD.iloc[0].tolist()
+    BD = BD[1:]
+    BD.columns = Titulos
+    BD.columns = (pd.Index([str(c) for c in BD.columns])
+                    .str.replace('\ufeff', '', regex=False)
+                    .str.strip())
+
+    BD_Fill = BD.ffill(axis=0)
+
+    if len(BD_Fill) == 0:
+        raise MesOmitido(f"El archivo de {mes} {anio} no trae ninguna empresa registrada debajo del encabezado. Puede ser un reporte todavia incompleto para ese mes. Se omite y se continua con el siguiente.")
+
+    col_empresa = encontrar_columna(BD_Fill, 'Empresa')
+    col_central = encontrar_columna(BD_Fill, 'Central')
+    col_unidad = encontrar_columna(BD_Fill, 'Unidad')
+
+    if not col_empresa or not col_central or not col_unidad:
+        raise MesOmitido(f"No se encontraron las columnas Empresa, Central o Unidad en el archivo de {mes} {anio}. Columnas presentes: {list(BD_Fill.columns)}.")
+
+    nombres_nuevos_de_este_mes = {}
+
+    def dic_renombre_cambio(fila):
+        clave = str(fila).strip()
+        if clave in mapa_nombres:
+            return mapa_nombres[clave]
+        # Caso especial: nombre que todavia no existe en el diccionario.
+        # En vez de detener todo el proceso, se registra con su mismo nombre
+        # como valor temporal y se avisa para que alguien lo revise despues.
+        mapa_nombres[clave] = clave
+        nombres_nuevos_de_este_mes[clave] = clave
+        nombres_nuevos_globales[clave] = clave
+        return clave
+
+    BD_Fill[col_empresa] = BD_Fill[col_empresa].apply(dic_renombre_cambio)
+    BD_Fill[col_central] = BD_Fill[col_central].apply(dic_renombre_cambio)
+    BD_Fill[col_unidad] = BD_Fill[col_unidad].apply(dic_renombre_cambio)
+
+    if nombres_nuevos_de_este_mes:
+        print(f"Se encontraron {len(nombres_nuevos_de_este_mes)} nombres que no estaban en el diccionario para {mes} {anio}: {list(nombres_nuevos_de_este_mes.keys())}. Se agregaron con el mismo nombre como valor temporal. Conviene revisarlos y asignarles el nombre estandarizado correcto.")
+
+    Total = BD_Fill.copy()
+    Total[col_central] = "TOTAL"
+    Total[col_unidad] = "TOTAL"
+    Total = Total.groupby([col_empresa, col_central, col_unidad], as_index=False).sum()
+
+    TotalTotal = Total.copy()
+    TotalTotal[col_empresa] = "MÁXIMA DEMANDA TOTAL"
+    TotalTotal = TotalTotal.groupby([col_empresa, col_central, col_unidad], as_index=False).sum()
+
+    BD_Fill = pd.concat([BD_Fill, Total, TotalTotal])
+
+    fecha_col_str = "01/" + meses_n[meses_.index(mes_)] + "/" + anio
+    fecha_col = datetime.datetime.strptime(fecha_col_str, '%d/%m/%Y')
+
+    if len(BD_Fill.columns) >= 4:
+        cols = list(BD_Fill.columns)
+        cols[3] = fecha_col
+        BD_Fill.columns = cols
+    else:
+        raise MesOmitido(f"El archivo de {mes} {anio} no tiene las cuatro columnas esperadas para asignarle la fecha. Columnas encontradas: {list(BD_Fill.columns)}.")
+
+    # Antes esta suma de columnas fallaba cuando los tipos de datos quedaban
+    # mezclados entre texto normal y texto vacio. Se fuerza aqui el mismo
+    # tipo de dato en las tres columnas para que la union siempre funcione.
+    key = (BD_Fill[col_empresa].astype(str)
+           + BD_Fill[col_central].astype(str)
+           + BD_Fill[col_unidad].astype(str))
+    BD_Fill.insert(0, "Key1", key)
+    DF_Max_Demanda = BD_Fill.copy()
+
+    if not os.path.isfile(RUTA_BASE_HISTORICA):
+        raise MesOmitido(f"No se encontro la base historica en {RUTA_BASE_HISTORICA}. No se puede actualizar {mes} {anio} sin esa base.")
+
+    DF_F = DF_Max_Demanda.copy()
+
+    with pd.ExcelFile(RUTA_BASE_HISTORICA) as lector:
+        BD_Total = lector.parse(sheet_name='Sheet1')
+
+    BD_Total_ = BD_Total.copy()
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("Key1")
+    dic_Total_ = BD_Total_.to_dict()
+
+    DF_Total2 = DF_F.copy()
+    DF_Total2['Indicador'] = DF_Total2['Key1'].map(dic_Total_['Indicador'])
+    DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True)
+    DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+    BD_Total = pd.concat([BD_Total, DF_Total2])
+
+    DF_Total = DF_F.set_index("Key1")
+    dic_cr = DF_Total.to_dict()
+    BD_Total[fecha_col] = BD_Total['Key1'].map(dic_cr[fecha_col])
+
+    with pd.ExcelWriter(RUTA_BASE_HISTORICA, mode="a", engine="openpyxl", if_sheet_exists='replace') as escritor:
+        BD_Total.to_excel(escritor, sheet_name="Sheet1", index=False)
+
+    print(f"{mes} {anio} actualizado correctamente en la base historica.")
+    return nombres_nuevos_de_este_mes
+#%% md
+### Ejecucion
+#%%
+mapa_nombres = cargar_diccionario(RUTA_DICCIONARIO, hoja="Utilities")
+nombres_nuevos_globales = {}
+
+meses_ok = []
+meses_omitidos = []
+meses_con_error = []
+
+for i in array_rutas:
+    m = i[0:2]
+    mes = meses_n[int(m) - 1]
+    anio = i[2::]
+    mes_ = meses_[int(m) - 1]
+    try:
+        main(mes, anio, mes_, mapa_nombres, nombres_nuevos_globales)
+        meses_ok.append(f"{mes} {anio}")
+    except MesOmitido as motivo:
+        print(f"Aviso: {motivo}")
+        meses_omitidos.append((f"{mes} {anio}", str(motivo)))
+    except Exception as error:
+        print(f"Ocurrio un error inesperado procesando {mes} {anio}. Motivo: {error}. Se continua con el siguiente mes.")
+        meses_con_error.append((f"{mes} {anio}", str(error)))
+
+if nombres_nuevos_globales:
+    print(f"Se detectaron en total {len(nombres_nuevos_globales)} nombres nuevos durante esta corrida: {list(nombres_nuevos_globales.keys())}.")
+    guardar_diccionario(RUTA_DICCIONARIO, "Utilities", mapa_nombres)
+    print("El diccionario quedo actualizado automaticamente. No es necesario abrirlo a mano.")
+else:
+    print("No se detectaron nombres nuevos. El diccionario no necesito cambios.")
+
+print("Resumen final:")
+print(f"Meses actualizados sin problemas: {meses_ok if meses_ok else 'ninguno'}.")
+print(f"Meses omitidos por casos especiales: {[m for m, _ in meses_omitidos] if meses_omitidos else 'ninguno'}.")
+print(f"Meses con error inesperado: {[m for m, _ in meses_con_error] if meses_con_error else 'ninguno'}.")
