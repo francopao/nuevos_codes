@@ -1,0 +1,360 @@
+"""
+Script de descarga de reportes periodicos de COES y Osinergmin para la Mesa de Inversiones.
+
+Construye los enlaces de descarga para cada seccion a partir de un rango de periodos,
+descarga los archivos correspondientes, los guarda en la ruta de red asignada a cada
+seccion y al finalizar imprime un reporte de incidencias detectadas durante la ejecucion.
+
+Las secciones de Evaluacion Mensual, Entregas y Retiros de Energia, Tarifa de Energia en
+Barra y Reporte LVTP quedan pendientes de configuracion porque la formula de enlace
+llego cortada en las instrucciones originales, antes de mostrar la ruta completa de COES.
+La seccion de Maxima Demanda tampoco tenia formula definida. Para esas secciones el script
+deja la estructura lista pero reporta la falta de configuracion como una incidencia en vez
+de inventar una ruta que podria estar mal.
+
+Requiere la libreria requests (pip install requests).
+"""
+
+import os
+from urllib.parse import quote
+
+import requests
+
+
+class ConfiguracionPendiente(Exception):
+    """Se lanza cuando una seccion todavia no tiene la formula de enlace completa."""
+
+
+MESES = {
+    1: {"largo_cap": "Enero", "largo_min": "enero", "corto_cap": "Ene", "corto_min": "ene", "corto_mayus": "ENE"},
+    2: {"largo_cap": "Febrero", "largo_min": "febrero", "corto_cap": "Feb", "corto_min": "feb", "corto_mayus": "FEB"},
+    3: {"largo_cap": "Marzo", "largo_min": "marzo", "corto_cap": "Mar", "corto_min": "mar", "corto_mayus": "MAR"},
+    4: {"largo_cap": "Abril", "largo_min": "abril", "corto_cap": "Abr", "corto_min": "abr", "corto_mayus": "ABR"},
+    5: {"largo_cap": "Mayo", "largo_min": "mayo", "corto_cap": "May", "corto_min": "may", "corto_mayus": "MAY"},
+    6: {"largo_cap": "Junio", "largo_min": "junio", "corto_cap": "Jun", "corto_min": "jun", "corto_mayus": "JUN"},
+    7: {"largo_cap": "Julio", "largo_min": "julio", "corto_cap": "Jul", "corto_min": "jul", "corto_mayus": "JUL"},
+    8: {"largo_cap": "Agosto", "largo_min": "agosto", "corto_cap": "Ago", "corto_min": "ago", "corto_mayus": "AGO"},
+    9: {"largo_cap": "Setiembre", "largo_min": "setiembre", "corto_cap": "Set", "corto_min": "sep", "corto_mayus": "SET"},
+    10: {"largo_cap": "Octubre", "largo_min": "octubre", "corto_cap": "Oct", "corto_min": "oct", "corto_mayus": "OCT"},
+    11: {"largo_cap": "Noviembre", "largo_min": "noviembre", "corto_cap": "Nov", "corto_min": "nov", "corto_mayus": "NOV"},
+    12: {"largo_cap": "Diciembre", "largo_min": "diciembre", "corto_cap": "Dic", "corto_min": "dic", "corto_mayus": "DIC"},
+}
+
+
+RUTAS_DESTINO = {
+    "Evaluacion Mensual": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Evaluaciones Mensuales",
+    "Entregas y Retiros Energia": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Entregas y Retiros",
+    "Costo de Combustible Gas": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Costo de Combustible",
+    "Tarifa de Energia en Barra": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Tarifa de Energia en Barra",
+    "Maxima Demanda": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Máxima demanda",
+    "Reporte LVTP": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Reporte LVTP",
+    "Potencia Despachada": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Potencia despachada",
+    "Mercado Libre de Electricidad": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Distribución\Mercado Libre de Electricidad",
+    "Tarifas y Mercado Electrico": r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Distribución\Tarifas y Mercado Eléctrico",
+}
+
+
+def generar_periodos_mensuales(inicio, final):
+    """Devuelve una lista de tuplas (anio, mes) para cada periodo entre inicio y final,
+    ambos en formato MMYYYY, inclusive."""
+    mes_actual = int(inicio[:2])
+    anio_actual = int(inicio[2:])
+    mes_final = int(final[:2])
+    anio_final = int(final[2:])
+
+    periodos = []
+    while (anio_actual, mes_actual) <= (anio_final, mes_final):
+        periodos.append((anio_actual, mes_actual))
+        mes_actual += 1
+        if mes_actual > 12:
+            mes_actual = 1
+            anio_actual += 1
+    return periodos
+
+
+def construir_url_coes(ruta_interna):
+    """Arma un enlace de descarga de COES codificando la ruta interna como parametro url,
+    igual que lo hace el portal: barras, espacios y tildes quedan percent encoded."""
+    return "https://www.coes.org.pe/portal/browser/download?url=" + quote(ruta_interna, safe="")
+
+
+def sanear_nombre_archivo(nombre):
+    """Quita caracteres no permitidos en nombres de archivo de Windows. Devuelve el
+    nombre original si ya era valido."""
+    caracteres_invalidos = '<>:"/\\|?*'
+    nombre_limpio = "".join(caracter for caracter in nombre if caracter not in caracteres_invalidos)
+    return nombre_limpio if nombre_limpio else "archivo_sin_nombre"
+
+
+def crear_generador_pendiente(nombre_seccion, motivo):
+    """Genera la funcion de una seccion que todavia no tiene formula de enlace completa."""
+
+    def generar():
+        raise ConfiguracionPendiente(f"{nombre_seccion}: {motivo}")
+
+    return generar
+
+
+def crear_generador_costo_gas(periodos):
+    """Seccion 3, costo de combustible gas. Formula confirmada con ejemplos completos."""
+
+    def generar():
+        entradas = []
+        for anio, mes in periodos:
+            mes_mm = f"{mes:02d}"
+            mes_corto = MESES[mes]["corto_min"]
+            nombre_archivo = f"{mes_mm}{anio}_Actualización_Costo_GN_{mes_corto}{anio}.xlsx"
+            ruta = f"Operación/Estudios/Costos Variables/02_GAS NATURAL/{anio}/{nombre_archivo}"
+            url = construir_url_coes(ruta)
+            periodo_str = f"{mes_mm}/{anio}"
+            entradas.append((periodo_str, [(url, nombre_archivo)]))
+        return entradas
+
+    return generar
+
+
+def crear_generador_potencia_despachada(periodos):
+    """Seccion 7, potencia despachada de Osinergmin. Prueba el nombre base y, si no esta
+    disponible, intenta las variantes con sufijo de version v2 y v3."""
+
+    def generar():
+        entradas = []
+        base_url = "https://www2.osinergmin.gob.pe/publicacionesgrt/pdf/OperSecElectrico/"
+        for anio, mes in periodos:
+            mes_mayus = MESES[mes]["corto_mayus"]
+            candidatos = []
+            for sufijo in ("", "v2", "v3"):
+                nombre_archivo = f"OSE{mes_mayus}{anio}{sufijo}.pdf"
+                candidatos.append((base_url + nombre_archivo, nombre_archivo))
+            periodo_str = f"{mes:02d}/{anio}"
+            entradas.append((periodo_str, candidatos))
+        return entradas
+
+    return generar
+
+
+def crear_generador_mercado_libre(periodos):
+    """Seccion 8, mercado libre de electricidad de Osinergmin."""
+
+    def generar():
+        entradas = []
+        base_url = "https://www2.osinergmin.gob.pe/publicacionesgrt/pdf/MerLibElectricidad/"
+        for anio, mes in periodos:
+            aa = f"{anio % 100:02d}"
+            mm = f"{mes:02d}"
+            mes_largo = MESES[mes]["largo_cap"]
+            nombre_archivo = f"Año {aa}-Nro {mm}-{mes_largo} {anio}.xlsx"
+            url = base_url + quote(nombre_archivo)
+            periodo_str = f"{mm}/{anio}"
+            entradas.append((periodo_str, [(url, nombre_archivo)]))
+        return entradas
+
+    return generar
+
+
+def crear_generador_tarifas_mercado(periodos):
+    """Seccion 9, tarifas y mercado electrico de Osinergmin."""
+
+    def generar():
+        entradas = []
+        base_url = "https://www2.osinergmin.gob.pe/publicacionesgrt/pdf/TarMercadoElectrico/"
+        for anio, mes in periodos:
+            mes_corto = MESES[mes]["corto_cap"]
+            nombre_archivo = f"TyME - {mes_corto} {anio}.pdf"
+            url = base_url + quote(nombre_archivo)
+            periodo_str = f"{mes:02d}/{anio}"
+            entradas.append((periodo_str, [(url, nombre_archivo)]))
+        return entradas
+
+    return generar
+
+
+def descargar_archivo(url, nombre_archivo, carpeta_destino, incidencias, seccion, periodo, timeout=30):
+    """Descarga un archivo y lo guarda en la carpeta de destino. Devuelve True si tuvo
+    exito. Cualquier problema queda registrado en la lista de incidencias con el detalle
+    necesario para repararlo."""
+
+    nombre_saneado = sanear_nombre_archivo(nombre_archivo)
+    if nombre_saneado != nombre_archivo:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"El nombre de archivo generado '{nombre_archivo}' contenia caracteres invalidos para Windows.",
+            "accion": f"Se uso el nombre saneado '{nombre_saneado}'. Revisar el patron del nombre de archivo de la seccion.",
+        })
+        nombre_archivo = nombre_saneado
+
+    if not os.path.isdir(carpeta_destino):
+        try:
+            os.makedirs(carpeta_destino, exist_ok=True)
+        except PermissionError:
+            incidencias.append({
+                "seccion": seccion, "periodo": periodo, "url": url,
+                "descripcion": f"No se pudo crear la ruta de destino '{carpeta_destino}' por falta de permisos.",
+                "accion": "Verificar permisos de escritura sobre la carpeta de red o solicitar acceso.",
+            })
+            return False
+        except OSError as error:
+            incidencias.append({
+                "seccion": seccion, "periodo": periodo, "url": url,
+                "descripcion": f"La ruta de destino '{carpeta_destino}' no existe y no pudo crearse: {error}",
+                "accion": "Confirmar que la unidad de red Z esta montada y que la ruta es correcta.",
+            })
+            return False
+
+    ruta_completa = os.path.join(carpeta_destino, nombre_archivo)
+
+    try:
+        respuesta = requests.get(url, timeout=timeout)
+    except requests.exceptions.Timeout:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": "Se agoto el tiempo de espera al conectarse al servidor.",
+            "accion": "Reintentar la descarga mas tarde o aumentar el timeout del script.",
+        })
+        return False
+    except requests.exceptions.ConnectionError:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": "Error de conexion al intentar acceder al servidor.",
+            "accion": "Verificar conectividad a internet y que el dominio este disponible.",
+        })
+        return False
+    except requests.exceptions.RequestException as error:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"Error inesperado de conexion: {error}",
+            "accion": "Revisar el detalle del error y, de ser necesario, reportarlo al equipo de soporte.",
+        })
+        return False
+
+    if respuesta.status_code == 404:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": "El archivo no esta disponible para este periodo (404).",
+            "accion": "Confirmar en el portal si el archivo fue publicado con otro nombre o aun no esta disponible.",
+        })
+        return False
+
+    if respuesta.status_code != 200:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"El servidor respondio con el codigo {respuesta.status_code}.",
+            "accion": "Revisar manualmente el enlace en el navegador para identificar el motivo.",
+        })
+        return False
+
+    contenido = respuesta.content
+    if not contenido:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": "El archivo descargado llego con tamanio cero.",
+            "accion": "Reintentar la descarga y, si persiste, verificar el archivo directamente en el portal.",
+        })
+        return False
+
+    try:
+        with open(ruta_completa, "wb") as archivo:
+            archivo.write(contenido)
+    except PermissionError:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"Permisos insuficientes para guardar el archivo en '{ruta_completa}'.",
+            "accion": "Verificar permisos de escritura sobre la carpeta de destino.",
+        })
+        return False
+    except OSError as error:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"No se pudo guardar el archivo en '{ruta_completa}': {error}",
+            "accion": "Revisar si el nombre de archivo es valido y si hay espacio disponible en el destino.",
+        })
+        return False
+
+    if os.path.getsize(ruta_completa) == 0:
+        incidencias.append({
+            "seccion": seccion, "periodo": periodo, "url": url,
+            "descripcion": f"El archivo guardado en '{ruta_completa}' quedo con tamanio cero o corrupto.",
+            "accion": "Eliminar el archivo y reintentar la descarga.",
+        })
+        return False
+
+    print(f"  {periodo}: descargado {nombre_archivo}")
+    return True
+
+
+def procesar_seccion(nombre_seccion, carpeta_destino, generar_entradas, incidencias):
+    print(f"Procesando seccion: {nombre_seccion}")
+    try:
+        entradas = generar_entradas()
+    except ConfiguracionPendiente as error:
+        incidencias.append({
+            "seccion": nombre_seccion, "periodo": "todos", "url": "no disponible",
+            "descripcion": str(error),
+            "accion": "Completar la formula de enlace de la seccion en el codigo con la ruta real de COES u Osinergmin.",
+        })
+        return
+
+    for periodo, candidatos in entradas:
+        for url, nombre_archivo in candidatos:
+            try:
+                if descargar_archivo(url, nombre_archivo, carpeta_destino, incidencias, nombre_seccion, periodo):
+                    break
+            except Exception as error:
+                incidencias.append({
+                    "seccion": nombre_seccion, "periodo": periodo, "url": url,
+                    "descripcion": f"Error inesperado durante la descarga o el almacenamiento: {error}",
+                    "accion": "Revisar el detalle del error y ejecutar la descarga de este periodo manualmente.",
+                })
+
+
+def imprimir_reporte(incidencias):
+    print()
+    print("REPORTE DE INCIDENCIAS")
+    if not incidencias:
+        print("Ejecución completada sin incidencias.")
+        return
+    for numero, incidencia in enumerate(incidencias, start=1):
+        print(f"{numero}. Seccion: {incidencia['seccion']}")
+        print(f"   Periodo: {incidencia['periodo']}")
+        print(f"   URL: {incidencia['url']}")
+        print(f"   Descripcion: {incidencia['descripcion']}")
+        print(f"   Accion sugerida: {incidencia['accion']}")
+        print()
+
+
+if __name__ == "__main__":
+    inicio = "062026"
+    final = "102026"
+    periodos = generar_periodos_mensuales(inicio, final)
+
+    secciones = [
+        ("Evaluacion Mensual", RUTAS_DESTINO["Evaluacion Mensual"],
+         crear_generador_pendiente("Evaluacion Mensual",
+             "la ruta base de COES (Post Operación/Informes/Evaluación/...) llego cortada en las instrucciones originales, falta confirmar la estructura de carpetas y el nombre exacto del archivo")),
+        ("Entregas y Retiros Energia", RUTAS_DESTINO["Entregas y Retiros Energia"],
+         crear_generador_pendiente("Entregas y Retiros Energia",
+             "la ruta base de COES (Mercado Mayorista/Liquidaciones del MME...) llego cortada en las instrucciones originales, falta confirmar el tramo intermedio antes de la carpeta del anio")),
+        ("Costo de Combustible Gas", RUTAS_DESTINO["Costo de Combustible Gas"],
+         crear_generador_costo_gas(periodos)),
+        ("Tarifa de Energia en Barra", RUTAS_DESTINO["Tarifa de Energia en Barra"],
+         crear_generador_pendiente("Tarifa de Energia en Barra",
+             "comparte la misma ruta base cortada de COES que la seccion de Entregas y Retiros, falta confirmarla")),
+        ("Maxima Demanda", RUTAS_DESTINO["Maxima Demanda"],
+         crear_generador_pendiente("Maxima Demanda",
+             "no se proporciono ninguna formula de enlace para esta seccion")),
+        ("Reporte LVTP", RUTAS_DESTINO["Reporte LVTP"],
+         crear_generador_pendiente("Reporte LVTP",
+             "la ruta base de COES (Mercado Mayorista/Liquidaciones...) llego cortada en las instrucciones originales, falta confirmar el tramo intermedio")),
+        ("Potencia Despachada", RUTAS_DESTINO["Potencia Despachada"],
+         crear_generador_potencia_despachada(periodos)),
+        ("Mercado Libre de Electricidad", RUTAS_DESTINO["Mercado Libre de Electricidad"],
+         crear_generador_mercado_libre(periodos)),
+        ("Tarifas y Mercado Electrico", RUTAS_DESTINO["Tarifas y Mercado Electrico"],
+         crear_generador_tarifas_mercado(periodos)),
+    ]
+
+    incidencias = []
+    for nombre, carpeta, generador in secciones:
+        procesar_seccion(nombre, carpeta, generador, incidencias)
+
+    imprimir_reporte(incidencias)
