@@ -1,0 +1,452 @@
+#%%
+# Parameters
+inicio = "062025"
+final = "092025"
+
+#%%
+import pandas as pd
+import numpy as np
+import re
+import datetime
+import os
+import time
+#%%
+# mes = 'Febrero'
+# anio = '2023'
+# mes_ = "fe"
+# meses_n = "02"
+# meses_ = "fe"
+#%%
+a1, a2, m1, m2 = inicio[2::], final[2::], inicio[0:2], final[0:2]
+rango_anios = range(int(a1),int(a2)+1)
+#%%
+meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Setiembre', 'Octubre', 'Noviembre', 'Diciembre']
+meses_ = ['en','fe','ma','ab','my','jn','jl','ag','se','oc','no','di']
+meses_n = ['01','02','03','04','05','06','07','08','09','10','11','12']
+meses_m = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'setiembre', 'octubre', 'noviembre', 'diciembre']
+#%% md
+### Blindaje de acceso a archivos (nuevo)
+
+#%%
+def archivo_esta_bloqueado(ruta):
+    """
+    Prueba si el archivo puede abrirse en modo lectura/escritura.
+    Si otro proceso (típicamente Excel) lo tiene abierto, Windows
+    devuelve PermissionError al intentar abrirlo en modo 'r+b'.
+    Si el archivo no existe todavía, no se considera "bloqueado".
+    """
+    if not os.path.isfile(ruta):
+        return False
+    try:
+        with open(ruta, 'r+b'):
+            pass
+        return False
+    except PermissionError:
+        return True
+
+def esperar_archivo_libre(ruta, intentos=6, espera_seg=10, avisar=True):
+    """
+    Reintenta hasta que el archivo deje de estar bloqueado (p. ej. mientras
+    alguien lo tiene abierto en Excel, o mientras OneDrive/el share todavía
+    retiene el lock tras una escritura anterior) o se agoten los intentos.
+    Devuelve True si quedó libre, False si se agotaron los intentos.
+    """
+    for intento in range(1, intentos + 1):
+        if not archivo_esta_bloqueado(ruta):
+            return True
+        if avisar:
+            print(f"⚠ Archivo en uso/bloqueado: {ruta}")
+            print(f"  Ciérralo si lo tienes abierto en Excel. "
+                  f"Reintentando en {espera_seg}s... (intento {intento}/{intentos})")
+        time.sleep(espera_seg)
+    return not archivo_esta_bloqueado(ruta)
+
+#%% md
+### Generador de backups
+
+#%%
+import os
+import shutil
+
+source_file = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\3. BD Entregas y Retiros.xlsx"
+destination_dir = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\Backup"
+
+def copy_file_to_directory(source, des):
+    # Crear el directorio de destino si no existe
+    if not os.path.exists(des):
+        os.makedirs(des)
+    # Extraer el nombre del archivo de la ruta de origen
+    file_name = os.path.basename(source)
+    # Construir la ruta de destino completa
+    dest_file = os.path.join(des, file_name)
+
+    # Nuevo: si el archivo de destino del backup está bloqueado (abierto en
+    # Excel), esperamos antes de intentar sobrescribirlo.
+    esperar_archivo_libre(dest_file, intentos=3, espera_seg=5, avisar=True)
+
+    try:
+        # Copiar el archivo
+        shutil.copyfile(source, dest_file)
+        print(f"Archivo copiado exitosamente.")
+    except PermissionError as e:
+        print(f"⚠ No se pudo generar el backup porque el archivo está en uso: {dest_file}")
+        print(f"  Detalle: {str(e)}")
+        print("  Se continúa sin backup para esta corrida.")
+    except Exception as e:
+        print(f"Error al copiar el archivo: {str(e)}")
+
+copy_file_to_directory(source_file, destination_dir)
+#%%
+array_rutas = []
+for i in rango_anios:
+    if(rango_anios[-1]==i):
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0'+ str(j)
+                    
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(1,int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i) 
+                array_rutas.append(ruta)
+                
+    elif(i != rango_anios[0]):
+        for j in range(1,13):
+            if(len(str(j))==1):
+                j = '0' + str(j)
+            ruta = str(j) + str(i)
+            array_rutas.append(ruta)
+        
+    else:
+        if (len(rango_anios)==1):
+            for j in range(int(m1),int(m2)+1):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+
+        else:
+            for j in range(int(m1),13):
+                if(len(str(j))==1):
+                    j = '0' + str(j)
+                ruta = str(j) + str(i)
+                array_rutas.append(ruta)
+#%%
+def main(mes, anio):
+    
+    archivo= r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\BD\Entregas y Retiros\\"  +mes +anio + ".xlsx"
+
+    # Corregido: el loop original (range(12,0,-1)) nunca cambiaba `archivo`,
+    # así que si el archivo mensual no existía, el script igual seguía
+    # adelante e igual terminaba crasheando con FileNotFoundError en el
+    # pd.read_excel de abajo. Ahora, si no existe, se informa y se salta
+    # el mes sin romper la corrida completa.
+    if not os.path.isfile(archivo):
+        print("Error Base: " + mes + " " + anio + " -> archivo no encontrado, se omite este mes.")
+        return
+
+    #Retiro no declarado
+
+    df0 = pd.read_excel(archivo,"CUADRO 2")
+
+    dfnd = df0.iloc[6:,1:].copy()
+    dfnd=dfnd.iloc[::,:7]
+
+    header0=dfnd.iloc[0].tolist()
+    dfnd=dfnd[1:]
+    dfnd.columns=header0
+
+    dfnd.rename(columns={np.nan:'RETIRO NO DECLARADO'},inplace=True)
+    dfRND= dfnd.drop(["RENTAS DE CONGESTIÓN","INGRESO TARIFARIO DEL MME","SALDOS DE MESES ANTERIORES", "SALDO NETO DE TRANSFERENCIA"],axis=1, errors = "ignore")
+    dfRND.drop(index=7,inplace=True)
+
+    dfRND = dfRND.reset_index()
+    dfRND=dfRND.iloc[::,1:]
+    index_fin=dfRND[dfRND['EMPRESA']=='Total'].index[0]+1
+    dfRND=dfRND.iloc[:index_fin]
+
+    dfsaldo=dfRND.drop(['RETIRO NO DECLARADO'], axis=1)
+    dfsaldo.insert(1,"PLANTA","SALDO DE TRANSFERENCIAS")
+    dfsaldo.columns.values[2]="VALORIZACIÓN S/."
+
+    dfretiro=dfRND.drop(['SALDO DE TRANSFERENCIAS'], axis=1)
+    dfretiro.insert(1,"PLANTA","RETIRO NO DECLARADO")
+    dfretiro.columns.values[2]="VALORIZACIÓN S/."
+
+    ## Entregas y retiros
+
+    df = pd.read_excel(archivo,"CUADRO 4")
+
+    df1 = df.iloc[6:,1:].copy()
+    df1=df1.iloc[::,:10]
+    Header= df1.iloc[0].tolist()
+    df1=df1[1:]
+    df1.columns=Header
+
+# Cambio 21/04
+    df1.columns = (
+    df1.columns
+        .astype(str)
+        .str.strip()
+        .str.replace('\n', ' ', regex=False))
+# Cambio 21/04
+# AGREGAR O QUITAR FILA EN LA HOJA "CUADRO 4"
+    col_entrega = next(
+    c for c in df1.columns
+    if "ENTREGA" in c.upper() and "RETIRO" in c.upper())
+
+    EntRet = df1[col_entrega]
+
+
+    def EntregaRetiro(fila):
+        if fila[0] == "C":
+            nom = "Retiro"
+        elif fila[0]== "U":
+            nom = "Retiro"
+        elif fila[0]=="E":
+            nom = "Entrega"
+        else:
+            nom="Ninguno"
+        return nom
+
+    EntRet=EntRet.apply(EntregaRetiro)
+    df1.insert(5,"RetiroEntrega",EntRet)
+
+    #########################
+
+    dfind=df1.copy()
+
+    dfind.insert(6,"Precio Implicito","")
+
+    ener= dfind['ENERGÍA (MW.h)']
+
+    def Precio(fila):
+        if fila==0:
+            nom = np.nan
+        else:
+            nom=fila
+        return nom
+
+    ener=ener.apply(Precio)
+    dfind.insert(6,"NUEVA ENERGÍA",ener)
+
+    dfind["Precio Implicito"]=dfind["VALORIZACIÓN S/."]/dfind["NUEVA ENERGÍA"]
+    dfind= dfind.drop(['NUEVA ENERGÍA'],axis=1)
+
+    #########################
+
+
+
+    dfER= df1.drop(["BARRA DE TRANSFERENCIA","TIPO DE USUARIO","TIPO DE CONTRATO", "ENTREGA/RETIRO","CLIENTE / CENTRAL GENERACIÓN"],axis=1)
+    dfTU= df1.drop(["BARRA DE TRANSFERENCIA","TIPO DE CONTRATO","ENTREGA/RETIRO","RetiroEntrega","CLIENTE / CENTRAL GENERACIÓN","ENERGÍA (MW.h)","RENTA DE CONGESTIÓN DE LICITACIÓN S/.","RENTA DE CONGESTIÓN DE BILATERAL S/."],axis=1)
+    dfTC= df1.drop(["BARRA DE TRANSFERENCIA","TIPO DE USUARIO","ENTREGA/RETIRO","RetiroEntrega","CLIENTE / CENTRAL GENERACIÓN","ENERGÍA (MW.h)","RENTA DE CONGESTIÓN DE LICITACIÓN S/.","RENTA DE CONGESTIÓN DE BILATERAL S/."],axis=1)
+
+    dfTU["TIPO DE USUARIO"]=dfTU["TIPO DE USUARIO"].fillna("No tiene Usuario")
+    dfTC["TIPO DE CONTRATO"]=dfTC["TIPO DE CONTRATO"].fillna("No tiene Contrato")
+
+    dfER = dfER.groupby(["EMPRESA","RetiroEntrega"],as_index=False).sum()
+    dfTU = dfTU.groupby(["EMPRESA","TIPO DE USUARIO"],as_index=False).sum()
+    dfTC = dfTC.groupby(["EMPRESA","TIPO DE CONTRATO"],as_index=False).sum()
+
+
+    ###### Diccionario
+    Diccionario = r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Diccionarios\Diccionario_Utilities.xlsx' 
+    df_ren = pd.read_excel(Diccionario, sheet_name="Utilities")
+    df_ren = df_ren.set_index("Nombre_Antiguo")
+    dic_ren = df_ren.to_dict()
+
+    def dic_renombre_cambio(fila):
+        try:
+            nom = dic_ren["Nombre_Nuevo"][fila]
+        except KeyError:
+            print(f"Nombre no encontrado: {fila}")
+            raise KeyError(f"Nombre no encontrado: {fila}")
+        return nom
+
+    dfER['EMPRESA']=dfER['EMPRESA'].apply(dic_renombre_cambio)
+    dfTU['EMPRESA']=dfTU['EMPRESA'].apply(dic_renombre_cambio)
+    dfTC['EMPRESA']=dfTC['EMPRESA'].apply(dic_renombre_cambio)
+    dfsaldo['EMPRESA']=dfsaldo['EMPRESA'].apply(dic_renombre_cambio)
+    dfretiro['EMPRESA']= dfretiro['EMPRESA'].apply(dic_renombre_cambio)
+    dfind['EMPRESA']=dfind['EMPRESA'].apply(dic_renombre_cambio)
+
+
+    ##############################
+    orygen = dfind.loc[dfind['EMPRESA'] == 'ORYGEN']
+    endis = dfind.loc[dfind['EMPRESA'] == 'PLUZ ENERGÍA - D'] #Desde Agosto 2024
+    engie = dfind.loc[dfind['EMPRESA'] == 'ENGIE']
+    DF_Ind= pd.concat([orygen,endis,engie])
+    fecha1='01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+    fecha1= datetime.datetime.strptime(fecha1, '%d/%m/%Y')
+    DF_Ind.insert(0,"FECHA",fecha1)
+
+    Key = DF_Ind["FECHA"].astype(str) + DF_Ind["EMPRESA"] +DF_Ind["ENTREGA/RETIRO"]+ DF_Ind["Precio Implicito"].astype(str)+DF_Ind["CLIENTE / CENTRAL GENERACIÓN"]+ DF_Ind["ENERGÍA (MW.h)"].astype(str)
+    DF_Ind.insert(0, "Key1", Key)
+    ##############################
+
+    #KEYSSSSS
+
+    KeyER= dfER["EMPRESA"]+dfER["RetiroEntrega"]
+    dfER.insert(0,"Key",KeyER)
+    KeyTU= dfTU["EMPRESA"]+dfTU["TIPO DE USUARIO"]
+    dfTU.insert(0,"Key",KeyTU)
+    KeyTC= dfTC["EMPRESA"]+dfTC["TIPO DE CONTRATO"]
+    dfTC.insert(0,"Key",KeyTC)
+    Keysaldo= dfsaldo["EMPRESA"]+dfsaldo["PLANTA"]
+    dfsaldo.insert(0,"Key",Keysaldo)
+    Keyretiro= dfretiro["EMPRESA"]+dfretiro["PLANTA"]
+    dfretiro.insert(0,"Key",Keyretiro)
+
+    # TIPO DE USUARIO Y CONTRATO
+    AgrupadoTipo = pd.concat([dfTU,dfTC])
+    AgrupadoTipo = AgrupadoTipo.sort_values("EMPRESA")
+    AgrupadoTipo=AgrupadoTipo.fillna("")
+    AgrupadoTipo["TIPO DE USUARIO"]=AgrupadoTipo["TIPO DE USUARIO"].astype(str)+AgrupadoTipo["TIPO DE CONTRATO"].astype(str)
+    AgrupadoTipo=AgrupadoTipo.drop("TIPO DE CONTRATO",axis=1).copy()
+    AgrupadoTipo.insert(3,"Tipo","VALORIZACIÓN S/.")
+    AgrupadoTipo=AgrupadoTipo.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    # # RETIROS NO DECLRADOS
+
+    dfretiro.insert(3,"Tipo","VALORIZACIÓN S/.")
+    print("ARCHIVO:", archivo)
+    print("SHAPE:", dfretiro.shape)
+    print("COLUMNAS:", dfretiro.columns.tolist())
+    dfretiro=dfretiro.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    # SALDO DE VALORIZACIÓN
+
+    dfsaldo.insert(3,"Tipo","VALORIZACIÓN S/.")
+    dfsaldo=dfsaldo.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    #Entregas y Retiros
+    print(dfretiro.columns)
+    print(len(dfretiro.columns))
+    print(dfretiro.columns.tolist())
+    print(len(dfretiro.columns))
+
+    dfER1=dfER[["Key","EMPRESA","RetiroEntrega","ENERGÍA (MW.h)"]]
+    dfER1.insert(3,"Tipo","ENERGÍA (MW.h)")
+    dfER1=dfER1.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    dfER2=dfER[["Key","EMPRESA","RetiroEntrega","VALORIZACIÓN S/."]]
+    dfER2.insert(3,"Tipo","VALORIZACIÓN S/.")
+    dfER2=dfER2.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    dfER3=dfER[["Key","EMPRESA","RetiroEntrega","RENTA DE CONGESTIÓN DE LICITACIÓN S/."]]
+    dfER3.insert(3,"Tipo","RENTA DE CONGESTIÓN DE LICITACIÓN S/.")
+    dfER3=dfER3.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    dfER4=dfER[["Key","EMPRESA","RetiroEntrega","RENTA DE CONGESTIÓN DE BILATERAL S/."]]
+    dfER4.insert(3,"Tipo","RENTA DE CONGESTIÓN DE BILATERAL S/.")
+    dfER4=dfER4.set_axis(["Key1","Empresa","Planta","Tipo","Valor"],axis=1)
+
+    dfERJunto=pd.concat([dfER1,dfER2,dfER3,dfER4])
+
+    Junto=pd.concat([dfERJunto,dfretiro,dfsaldo,AgrupadoTipo])
+
+    fecha_col = "01" + "/" + meses_n[meses_.index(mes_)] + "/" + anio
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')
+
+    # cambio Franco
+    cols = list(Junto.columns)
+    cols[4] = fecha_col   # fecha_col es datetime
+    Junto.columns = cols
+    # cambio Franco
+
+    Key= Junto["Empresa"]+Junto["Planta"]+Junto["Tipo"]
+    Junto.insert(0,"Key2",Key)
+
+    #Base total
+    Ruta_Base=r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\3. BD Entregas y Retiros.xlsx"
+
+    DF_F = Junto.copy()
+
+
+    with pd.ExcelFile(Ruta_Base) as writer:
+        BD_Total = writer.parse(sheet_name='Todo')
+
+    BD_Total_=BD_Total.copy()
+    BD_Total_['Indicador'] = 'Mapeado'
+    BD_Total_ = BD_Total_.set_index("Key2")
+    dic_Total_ = BD_Total_.to_dict()
+
+    DF_Total2 = DF_F.copy()
+    DF_Total2['Indicador'] =  DF_Total2['Key2'].map(dic_Total_['Indicador'])
+
+    DF_Total2 = DF_Total2.loc[DF_Total2['Indicador'].isin([np.nan])].sort_index(ignore_index=True) 
+    DF_Total2 = DF_Total2.drop(['Indicador'], axis=1)
+    BD_Total = pd.concat([BD_Total, DF_Total2])
+
+    DF_Total = DF_F.set_index("Key2")
+    dic_cr = DF_Total.to_dict()
+    fecha_col = '01' +'/'+ meses_n[meses_.index(mes_)] +'/'+ anio
+    fecha_col = datetime.datetime.strptime(fecha_col, '%d/%m/%Y')  
+    BD_Total[fecha_col] = BD_Total['Key2'].map(dic_cr[fecha_col])  
+
+    # Nuevo: antes de escribir, esperamos a que el archivo esté libre
+    # (p. ej. si alguien lo tiene abierto en Excel). Si tras los reintentos
+    # sigue bloqueado, se detiene con un mensaje claro de qué cerrar.
+    if not esperar_archivo_libre(Ruta_Base):
+        raise PermissionError(
+            f"No se pudo escribir en '{Ruta_Base}' tras varios intentos.\n"
+            f"Verifica que el archivo no esté abierto en Excel (por ti o por otra "
+            f"persona en la red) y que tengas permisos de escritura en la carpeta, "
+            f"luego vuelve a correr el script."
+        )
+
+    with pd.ExcelWriter(Ruta_Base ,  mode="a", engine="openpyxl",if_sheet_exists = 'replace') as writer:
+        BD_Total.to_excel(writer, sheet_name="Todo", index = False)
+
+    # #Base total Individual
+    DF_F = DF_Ind.copy()
+
+    # Ruta base y nombre de la hoja
+    ruta_base = r'Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Utilities\Históricos\3. BD Entregas y Retiros.xlsx'
+    sheet_name = 'Individual'
+
+    # Cargar el archivo Excel y la hoja específica
+    excel_df = pd.read_excel(ruta_base, sheet_name=sheet_name)
+
+    # Crear un conjunto de los valores de la columna 'key1' en el Excel
+    existing_keys = set(excel_df['Key1'])
+
+    # Filtrar el DataFrame para obtener solo las filas con 'key1' que no están en el Excel
+    new_rows = DF_F[~DF_F['Key1'].isin(existing_keys)]
+
+    # Si hay nuevas filas, añadirlas al Excel
+    if not new_rows.empty:
+        # Nuevo: mismo blindaje de archivo bloqueado antes de esta segunda escritura
+        if not esperar_archivo_libre(ruta_base):
+            raise PermissionError(
+                f"No se pudo escribir la hoja 'Individual' en '{ruta_base}' tras "
+                f"varios intentos.\nCierra el archivo si está abierto en Excel y "
+                f"vuelve a correr el script."
+            )
+        with pd.ExcelWriter(ruta_base, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
+            new_rows.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=len(excel_df) + 1)
+
+#     print("Proceso completado.")
+
+
+#%%
+import warnings
+warnings.filterwarnings("ignore")
+
+
+#%%
+for i in array_rutas[::1]:
+    m = i[0:2]
+    mes = meses_n[int(m)-1]
+    anio = i[2::] 
+    mes_ = meses_[int(m)-1]
+    print(mes + ' ' + anio)
+    main(mes, anio)
+#%%
+
+#%%
