@@ -1,0 +1,216 @@
+### Slide 1: El Gancho y la Tesis Central
+*Monopolio regulado con flujo de caja sólido, pero cuyo colchón de apalancamiento se adelgaza mes a mes.*
+
+* **Objetivo Narrativo:** Mostrar que el crecimiento operativo es real y sostenido (ingresos y EBITDA al alza), pero que el apalancamiento se disparó en los últimos 18 meses — esa tensión es el hilo que explican los siguientes 4 slides.
+* **Texto en pantalla:**
+  - EBITDA creció de S/147.6mm (2022) a S/171.3mm (2025).
+  - Deuda bruta/EBITDA saltó de 2.23x a 3.10x en 18 meses.
+  - Tesis: negocio sólido, pero colchón financiero cada vez más delgado.
+* **Especificación de Charts:**
+  * **Chart A:** Líneas (dos series). Eje X = Año (2022-2027E) | Eje Y = S/ miles.
+    * **Insight visual:** Ingresos y EBITDA crecen de forma consistente; resaltar en rojo que el Margen EBITDA se mantiene plano (~29-30%) en vez de expandirse.
+
+| Año | Ingresos totales | EBITDA | Margen EBITDA |
+|---|---|---|---|
+| 2022 | 488,583 | 147,638 | 30% |
+| 2023 | 540,753 | 156,268 | 29% |
+| 2024 | 570,523 | 168,687 | 30% |
+| 2025 | 581,421 | 171,271 | 29% |
+| 2026E | 610,746 | 180,698 | 30% |
+| 2027E | 641,409 | 191,834 | 30% |
+
+  * **Chart B:** Barras. Eje X = Periodo | Eje Y = Deuda/EBITDA (veces).
+    * **Insight visual:** Resaltar en rojo el salto de 2025 a 2T2026 (2.73x → 3.10x), el punto más alto de toda la serie.
+
+| Periodo | Deuda bruta/EBITDA LTM | Deuda neta/EBITDA LTM |
+|---|---|---|
+| 2022 | 2.27x | 2.14x |
+| 2023 | 2.02x | 1.92x |
+| 2024 | 2.23x | 2.17x |
+| 2025 | 2.73x | 2.58x |
+| 2T2026 | 3.10x | 2.98x |
+
+---
+
+### Slide 2: Ventaja Competitiva y Regulación
+*El negocio es un monopolio legal con demanda creciente, pero el precio que cobra lo fija el Estado, no el mercado.*
+
+* **Objetivo Narrativo:** Explicar por qué Electro Dunas no tiene riesgo de "perder clientes" (es monopolio de red en Ica/Huancavelica/Ayacucho), pero sí riesgo de "precio" vía el reseteo cuatrienal del VAD — esto conecta directamente con la presión de margen del Slide 1 y prepara el terreno para los riesgos del Slide 4.
+* **Texto en pantalla:**
+  - VAD cae 9.5% desde nov-2026; tarifa 2027 bajo nivel 2019.
+  - Ingresos por servicio crecieron de S/480.8mm a S/573.9mm (2022-2025).
+  - Monopolio regulado: sin evidencia de riesgo por demanda de IA.
+* **Especificación de Charts:**
+  * **Chart A:** Barras. Eje X = Periodo regulatorio | Eje Y = VAD (índice S//kWh).
+    * **Insight visual:** Resaltar que, pese a "ganar" la apelación, el VAD 2027 (66.1) queda por debajo del VAD 2019 (67.3) — ocho años de crecimiento de clientes pagados a un precio más bajo.
+
+| Periodo | VAD (índice) |
+|---|---|
+| 2019 | 67.3 |
+| Recorte definitivo nov-2026 | -9.5% |
+| 2027 (post-apelación) | 66.1 |
+
+  * **Chart B:** Líneas. Eje X = Año (2022-2027E) | Eje Y = S/ miles.
+    * **Insight visual:** El ingreso por servicio sigue subiendo todos los años incluso con el reset tarifario — el "volumen" compensa el "precio" regulado a la baja.
+
+| Año | Ingresos por servicio de distribución |
+|---|---|
+| 2022 | 480,828 |
+| 2023 | 531,848 |
+| 2024 | 562,856 |
+| 2025 | 573,857 |
+| 2026E | 602,894 |
+| 2027E | 633,401 |
+
+---
+
+### Slide 3: Respaldo Financiero y Valuación (Credit Metrics)
+*La operación genera caja de sobra para el CAPEX; el problema está más abajo en la cascada de flujo de caja.*
+
+* **Objetivo Narrativo:** Probar con cifras exactas que el flujo de caja operativo cubre la inversión en red todos los años — descartando que el CAPEX sea la causa del estrés financiero — para que el Slide 4 pueda enfocar el riesgo donde realmente está: dividendos y deuda de corto plazo.
+* **Texto en pantalla:**
+  - FCO cubre CAPEX entre 1.4x y 1.6x todos los años.
+  - Cobertura EBITDA/intereses cae de 5.88x (2024) a 4.82x (2026E).
+  - Deuda bruta/EBITDA: 3.10x en 2T2026, el nivel más alto.
+* **Especificación de Charts:**
+  * **Chart A:** Barras (FCO vs. CAPEX) + línea de ratio. Eje X = Año | Eje Y = S/ miles (barras) y veces (línea secundaria).
+    * **Insight visual:** El FCO (barra azul) siempre supera al CAPEX (barra gris); resaltar que el ratio de cobertura es "ajustado, no amplio" (1.4x-1.6x, no 3x o 4x).
+
+| Año | FCO | CAPEX (PP&E+intangibles) | FCO/CAPEX |
+|---|---|---|---|
+| 2024 | 139,666 | 88,110 | 1.59x |
+| 2025 | 151,733 | 109,313 | 1.39x |
+| 2026E | 180,998 | 111,900 | 1.62x |
+| 2027E | 169,708 | 111,800 | 1.52x |
+
+  * **Chart B:** Barras agrupadas. Eje X = Periodo | Eje Y = Veces (x).
+    * **Insight visual:** Ambas coberturas decrecen de forma sostenida; resaltar en rojo el salto de 2025 a 2026E (EBITDA/GF: 5.46x→4.82x).
+
+| Periodo | EBITDA/Gastos financieros | EBIT/Gastos financieros |
+|---|---|---|
+| 2024 | 5.88x | 3.97x |
+| 2025 | 5.46x | 3.51x |
+| 2T2026 | 5.43x | 3.37x |
+| 2026E | 4.82x | 3.10x |
+| 2027E | 5.11x | 3.31x |
+
+---
+
+### Slide 4: Riesgos y Mitigantes
+*El riesgo no es la inversión en red: es la política de dividendos y la pared de vencimientos de corto plazo.*
+
+* **Objetivo Narrativo:** Aislar las tres variables que realmente explican el estrés financiero (liquidez corriente, payout casi total, concentración de vencimientos) y mostrar que cada una es una decisión reversible o manejable, no un problema estructural del negocio — tendiendo el puente hacia la recomendación del Slide 5.
+* **Texto en pantalla:**
+  - Ratio corriente cae de 1.10x (2022) a 0.15x (2027E).
+  - Dividendos absorben ~100% de la utilidad neta cada año.
+  - S/274mm de deuda vence en 2026-2027, exige refinanciamiento.
+* **Especificación de Charts:**
+  * **Chart A:** Líneas. Eje X = Año (2022-2027E) | Eje Y = Ratio corriente (x).
+    * **Insight visual:** Trazar una línea roja en 1.0x; la serie cruza por debajo ya en 2023 y sigue cayendo — riesgo de liquidez técnica, en gran parte por reclasificación de deuda a corto plazo.
+
+| Año | Ratio corriente |
+|---|---|
+| 2022 | 1.10x |
+| 2023 | 0.66x |
+| 2024 | 0.52x |
+| 2025 | 0.52x |
+| 2T2026 | 0.35x |
+| 2026E | 0.28x |
+| 2027E | 0.15x |
+
+  * **Chart B:** Barras agrupadas (Dividendos vs. Utilidad neta). Eje X = Año | Eje Y = S/ miles.
+    * **Insight visual:** Resaltar que el dividendo de cada año iguala casi exactamente la utilidad neta del año anterior (payout mecánico ~100% hacia la matriz GEB).
+
+| Año | Dividendos pagados | Utilidad neta (mismo año) |
+|---|---|---|
+| 2022 | 50,868 | 53,638 |
+| 2023 | 46,875 | 57,645 |
+| 2024 | 59,161 | 61,658 |
+| 2025 | 64,168 | 63,359 |
+| 2026E | 63,359 | 58,750 |
+| 2027E | 58,750 | 64,357 |
+
+  * **Chart C:** Barras. Eje X = Año de vencimiento | Eje Y = S/ miles.
+    * **Insight visual:** Resaltar la concentración en 2027 (S/233.8mm) — la verdadera pared de refinanciamiento de corto/mediano plazo, frente al bono 2030 ya fijo a largo plazo.
+
+| Año de vencimiento | Monto (saldo a 2T2026) |
+|---|---|
+| 2026 | 40,580 |
+| 2027 | 233,841 |
+| 2030 | 229,973 |
+
+---
+
+### Slide 5: Catalizadores próximos y Cierre
+*Si no hay deuda nueva, el apalancamiento baja solo hacia 2027 — la pregunta es si el dividendo lo permite.*
+
+* **Objetivo Narrativo:** Cerrar la historia mostrando el camino de desapalancamiento mecánico que el propio modelo proyecta, condicionado a dos catalizadores de corto plazo (resolución de apelaciones VAD y refinanciamiento 2026-2027), y dar una recomendación de inversión concreta.
+* **Texto en pantalla:**
+  - Apalancamiento bajaría a 2.63x en 2027E si no hay nuevo CAPEX.
+  - Catalizador: resolución definitiva de apelaciones VAD en dic-2026.
+  - Recomendación: mantener, exigiendo covenants más estrictos en nueva deuda.
+* **Especificación de Charts:**
+  * **Chart A:** Barras (EBITDA) + línea (Deuda/EBITDA). Eje X = Año | Eje Y = S/ miles (barras) y veces (línea).
+    * **Insight visual:** Con deuda bruta fija en S/504.4mm (supuesto del modelo) y EBITDA creciendo, el ratio cae mecánicamente — resaltar que esto depende de NO emitir deuda nueva, lo que choca con la presión de dividendos del Slide 4.
+
+| Año | EBITDA | Deuda bruta | Deuda/EBITDA |
+|---|---|---|---|
+| 2025 | 171,271 | 467,647 | 2.73x |
+| 2T2026 | 162,641 (LTM) | 504,394 | 3.10x |
+| 2026E | 180,698 | 504,394 | 2.79x |
+| 2027E | 191,834 | 504,394 | 2.63x |
+
+  * **Chart B:** Barras horizontales (línea de tiempo). Eje X = Fecha | Eje Y = Hito (categórico).
+    * **Insight visual:** Agrupar los catalizadores en dos clústeres — "corto plazo" (nov-dic 2026) y "próximo ciclo" (2029-2030) — para mostrar que la decisión de inversión actual depende casi toda de eventos de los próximos 13 meses.
+
+| Fecha | Hito |
+|---|---|
+| 06-nov-2026 | Resolución apelación VAD (tramo 1) |
+| 22-dic-2026 | Resolución apelación VAD (tramo definitivo) |
+| 2026-2027 | Refinanciamiento de S/274mm en deuda bancaria corriente |
+| jun/dic-2027 | Vencimiento banca mediano plazo (S/233.8mm) |
+| 31-dic-2029 | Corte para nuevo VNR (ciclo VAD 2030-2034) |
+
+---
+
+## Guía de Defensa y Conceptos Clave
+
+* **VAD (Valor Agregado de Distribución):**
+  * **En lenguaje técnico:** Componente tarifario fijado por Osinergmin cada cuatro años que remunera exclusivamente el servicio de distribución (transporte en baja/media tensión), calculado para generar una TIR cercana a 12% sobre el VNR reconocido.
+  * **En simple:** Es el "peaje" que te cobran por usar los cables, no por la electricidad en sí.
+  * **Pregunta difícil:** *"¿Por qué cae el VAD si Electro Dunas invierte más?"* → Porque el VAD se resetea cada 4 años con fórmulas de economía de escala que descuentan automáticamente el beneficio de atender más clientes con la misma red; no es una penalización, es el diseño regulatorio.
+
+* **VNR (Valor Nuevo de Reemplazo):**
+  * **En lenguaje técnico:** Costo de reconstruir hoy, con tecnología y precios vigentes, la totalidad de la red regulada; es el insumo base para calcular la TIR que sustenta el VAD.
+  * **En simple:** Es "cuánto costaría hacer de cero la misma red de cables y postes hoy".
+  * **Pregunta difícil:** *"¿El VNR de Electro Dunas es alto o bajo?"* → A S/545.8mm, es la mayor entre las distribuidoras medianas del interior, pero muy por debajo de Luz del Sur (S/7,469mm) o Pluz (S/8,387mm); es una empresa de escala media-baja en el sector.
+
+* **Covenant de apalancamiento (Deuda/EBITDA):**
+  * **En lenguaje técnico:** Resguardo financiero contractual que limita la relación deuda financiera/EBITDA; su incumplimiento puede gatillar exigibilidad anticipada.
+  * **En simple:** Es la regla del banco que dice "tu deuda no puede pasar de X años de tu sueldo".
+  * **Pregunta difícil:** *"¿Está rompiendo el covenant Electro Dunas?"* → Con el modelo financiero actual (deuda fija, EBITDA creciendo), el ratio baja de 3.10x a 2.63x hacia 2027; el riesgo de ruptura surge en el escenario de más largo plazo (2028-2030) si la empresa vuelve a emitir deuda para financiar dividendos, no en la proyección 2026-2027 de este modelo.
+
+* **Cobertura de intereses (EBITDA / Gastos financieros):**
+  * **En lenguaje técnico:** Número de veces que el EBITDA cubre el gasto financiero del periodo; mide el colchón antes de incumplir obligaciones de deuda.
+  * **En simple:** Cuántas veces te sobra plata para pagar solo los intereses del préstamo.
+  * **Pregunta difícil:** *"¿Es peligroso que la cobertura caiga a 4.82x?"* → No en términos absolutos (sigue siendo holgada), pero la tendencia es decreciente desde 5.88x en 2024; lo relevante es la dirección, no el nivel actual.
+
+* **Margen EBITDA:**
+  * **En lenguaje técnico:** EBITDA como porcentaje de los ingresos operativos totales; mide la rentabilidad operativa antes de depreciación, intereses e impuestos.
+  * **En simple:** De cada sol que entra, cuánto queda antes de pagar intereses, impuestos y "desgaste" de los activos.
+  * **Pregunta difícil:** *"¿Por qué el margen no mejora si los ingresos crecen?"* → Porque el costo de energía comprada (~70% de ingresos) y el reset del VAD comprimen el margen al mismo ritmo que crecen los ingresos; el crecimiento es de volumen, no de rentabilidad unitaria.
+
+* **CAPEX (Capital Expenditures):**
+  * **En lenguaje técnico:** Desembolsos en activos de largo plazo (red, equipos, intangibles) capitalizados en el balance y depreciados en el tiempo.
+  * **En simple:** La plata que se gasta en construir y mejorar la red, no en operarla día a día.
+  * **Pregunta difícil:** *"¿El CAPEX es lo que está ahogando la caja?"* → No: el FCO cubre el CAPEX entre 1.4x y 1.6x todos los años (2024-2027E); el problema de caja, si existe, viene de después del CAPEX en la cascada (intereses, arrendamientos, dividendos).
+
+* **Payout Ratio:**
+  * **En lenguaje técnico:** Porcentaje de la utilidad neta distribuido como dividendos; en el modelo de Electro Dunas se fija en 100% de la utilidad neta del año anterior.
+  * **En simple:** De cada sol que ganan, cuánto mandan a los dueños (GEB) y cuánto se quedan de colchón.
+  * **Pregunta difícil:** *"¿Por qué no retienen utilidades si están apalancados?"* → Es una decisión discrecional de la matriz colombiana GEB, no una obligación contractual; el dividendo de cada año iguala casi exactamente la utilidad neta del año anterior (ej. 2026E: S/63.4mm = utilidad neta 2025), lo que deja a Electro Dunas sin colchón propio pese a que el negocio genera caja suficiente.
+
+* **Ratio de Liquidez Corriente (Current Ratio):**
+  * **En lenguaje técnico:** Activos corrientes sobre pasivos corrientes; mide la capacidad de cubrir obligaciones de corto plazo con activos líquidos.
+  * **En simple:** Si tuvieras que pagar todas tus deudas del próximo año hoy mismo, ¿tienes con qué?
+  * **Pregunta difícil:** *"¿Un ratio de 0.15x en 2027E significa quiebra inminente?"* → No necesariamente: refleja en gran parte la reclasificación contable de deuda bancaria de corto plazo (S/274mm) hacia el pasivo corriente, no una falta real de generación de caja; pero sí exige refinanciamiento exitoso y oportuno como condición para sostener la tesis.
