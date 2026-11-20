@@ -1,0 +1,97 @@
+Reví el script completo y encontré el punto exacto del problema: todo el Excel "Riesgos Climáticos" (las 3 hojas por peligro, "Resumen", "Score por Empresa" y "Score por Sector") saca su "Score Global" de una sola función, `_calc_scores_py()`, que sigue dividiendo siempre entre 3 sin excluir ceros. El HTML, en cambio, usa otra función (`calcScores()` en JS) que ya filtra los "sin dato" — así que ese ya cumple tu mandato (lo explico abajo, por si igual quieres dejarlo blindado).
+
+## Bloque 1 — el fix central (arregla TODO el Excel de un solo golpe)
+
+**BUSCAR** (dentro de `_calc_scores_py`):
+```python
+        g = (amm + ainu + aseq) / 3
+        out[e] = {"mm": round(amm, 2), "inu": round(ainu, 2),
+                  "seq": round(aseq, 2), "global": round(g, 2)}
+```
+
+**REEMPLAZAR CON:**
+```python
+        # Score Global = promedio de los scores con valor positivo distinto de
+        # cero/vacío; si alguno sale en 0, se excluye y se promedia solo entre
+        # los que queden (>0).
+        _componentes = [amm, ainu, aseq]
+        _validos = [v for v in _componentes if v and v > 0]
+        g = (sum(_validos) / len(_validos)) if _validos else 0.0
+        out[e] = {"mm": round(amm, 2), "inu": round(ainu, 2),
+                  "seq": round(aseq, 2), "global": round(g, 2)}
+```
+
+Esta función se llama en solo 2 sitios (`scores = _calc_scores_py(districts)`), y de ahí salen **todas** las columnas "Score Global" y "Score"/"Score Ajustado" (el de factor-mitigante) de las 3 hojas por peligro, "Resumen", "Score por Empresa" y "Score por Sector". Con este único cambio, no hace falta tocar nada más en el Excel.
+
+## Bloque 2 (opcional) — blindaje del HTML
+
+`calcScores()` ya excluye distritos "sin cobertura" (`null`), y como los scores CENEPRED nunca bajan de 1, en la práctica nunca te va a llegar un 0 "válido" ahí — por eso el HTML ya debería estar bien. Si quieres igual que el texto coincida 100% con tu regla ("vacío **o** cero"):
+
+**BUSCAR:**
+```js
+    const vv=[mm,inu,seq].filter(z=>z!==null);
+```
+**REEMPLAZAR CON:**
+```js
+    const vv=[mm,inu,seq].filter(z=>z!==null && z!==0);
+```
+
+Si después del Bloque 1 el HTML sigue mostrando números viejos, probablemente sea que falta regenerarlo (no un tema de código).
+
+## Bloque 3 — columna nueva "Score Ajustado" en "Score por Empresa"
+
+Asumí que te referís al mismo "Score Ajustado" que ya usas en las hojas por peligro (Score Global × factor del Mitigante: Bajo=1.0, Medio=0.90, Alto=0.80) — dime si en realidad querías otra cosa. Lo armé como fórmula de Excel para que se recalcule si editas a mano el Score Global o el Mitigante:
+
+**BUSCAR:**
+```python
+    header_row(ws, 4, ["Empresa", "Sector", "AUM Total (S/)", "Score MM", "Score Inund.",
+                       "Score Sequía", "Score Global", "Mitigante (" + str(periodo) + ")"],
+               [26, 16, 18, 11, 12, 12, 13, 18])
+    r = 5
+    for e in sorted(emisores, key=lambda z: -scores[z]["global"]):
+        s = scores[e]; mit = _mit_lookup(e, mitigantes)
+        fila = [e, emp_sector.get(e, ""), aum_emp.get(e, 0),
+                s["mm"], s["inu"], s["seq"], s["global"], mit]
+        for j, v in enumerate(fila, start=1):
+            c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+            c.alignment = A_L if j in (1, 2) else (A_R if j == 3 else A_C)
+            if j == 3: c.number_format = FMT_S
+            if j in (4, 5, 6, 7): c.number_format = FMT_SC; c.fill = fill_score(v)
+            if j == 8 and fill_mit(v): c.fill = fill_mit(v)
+        r += 1
+    ws.freeze_panes = "A5"
+    if r > 5: ws.auto_filter.ref = f"A4:H{r-1}"
+```
+
+**REEMPLAZAR CON:**
+```python
+    header_row(ws, 4, ["Empresa", "Sector", "AUM Total (S/)", "Score MM", "Score Inund.",
+                       "Score Sequía", "Score Global", "Mitigante (" + str(periodo) + ")",
+                       "Score Ajustado"],
+               [26, 16, 18, 11, 12, 12, 13, 18, 13])
+    r = 5
+    for e in sorted(emisores, key=lambda z: -scores[z]["global"]):
+        s = scores[e]; mit = _mit_lookup(e, mitigantes)
+        factor_mit = FACTOR_MITIGANTE.get(mit, 1.0)
+        score_ajustado = s["global"] * factor_mit        # solo para el color de la celda
+        fila = [e, emp_sector.get(e, ""), aum_emp.get(e, 0),
+                s["mm"], s["inu"], s["seq"], s["global"], mit]
+        for j, v in enumerate(fila, start=1):
+            c = ws.cell(row=r, column=j, value=v); c.font = F_BODY; c.border = BORDER
+            c.alignment = A_L if j in (1, 2) else (A_R if j == 3 else A_C)
+            if j == 3: c.number_format = FMT_S
+            if j in (4, 5, 6, 7): c.number_format = FMT_SC; c.fill = fill_score(v)
+            if j == 8 and fill_mit(v): c.fill = fill_mit(v)
+        # NUEVO: Score Ajustado = Score Global x factor del Mitigante, como
+        # fórmula de Excel (columna G = Score Global, columna H = Mitigante).
+        c9 = ws.cell(row=r, column=9,
+                     value=f'=ROUND(G{r}*IF(H{r}="Bajo",1,IF(H{r}="Medio",0.9,'
+                           f'IF(H{r}="Alto",0.8,1))),2)')
+        c9.font = F_BODY; c9.border = BORDER; c9.alignment = A_C
+        c9.number_format = FMT_SC; c9.fill = fill_score(score_ajustado)
+        r += 1
+    ws.freeze_panes = "A5"
+    if r > 5: ws.auto_filter.ref = f"A4:I{r-1}"
+```
+
+Después de aplicar el Bloque 1, basta con volver a correr el script para que "Resumen", las 3 hojas por peligro, "Score por Empresa" y "Score por Sector" queden todas con el promedio corregido.
