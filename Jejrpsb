@@ -1,0 +1,59 @@
+He revisado tu script completo (8,398 líneas) y ubiqué los puntos exactos donde se calculan ambos valores. Aquí van los bloques a reemplazar vía Ctrl+F (Buscar y reemplazar), sin tocar nada más del proceso.
+
+## 1️⃣ Score Global — función `_calc_scores_py` (línea ~5926)
+
+Esta es la función que calcula el Score Global que termina en el Excel (hojas "Score por Empresa", "Score por Sector" y la hoja por desastre).
+
+**Buscar:**
+```python
+        g = (amm + ainu + aseq) / 3
+        out[e] = {"mm": round(amm, 2), "inu": round(ainu, 2),
+                  "seq": round(aseq, 2), "global": round(g, 2)}
+```
+
+**Reemplazar por:**
+```python
+        # NUEVO: Score Global = promedio solo de los scores que NO estén vacíos
+        # ni en 0 (si un peligro quedó en 0 por falta de cobertura/score, se
+        # excluye del promedio y se divide solo entre los que sí tienen dato).
+        _validos = [x for x in (amm, ainu, aseq) if x and x > 0]
+        g = (sum(_validos) / len(_validos)) if _validos else 0.0
+        out[e] = {"mm": round(amm, 2), "inu": round(ainu, 2),
+                  "seq": round(aseq, 2), "global": round(g, 2)}
+```
+
+## 2️⃣ Factores del Mitigante editables — agregar constante en la zona de CONFIG (línea ~144)
+
+**Buscar:**
+```python
+UNIDAD_LABEL = {"tmf": "TMF", "grsf": "Grs. f.", "kgf": "Kg. f.",
+                "credmiles": "Miles S/", "mw": "MW", "mt": "MT", "pct": "%"}
+```
+
+**Reemplazar por:**
+```python
+UNIDAD_LABEL = {"tmf": "TMF", "grsf": "Grs. f.", "kgf": "Kg. f.",
+                "credmiles": "Miles S/", "mw": "MW", "mt": "MT", "pct": "%"}
+
+# --- Factores de ajuste del Score Ajustado según nivel de Mitigante ---------
+# Editar a mano estos 3 valores si cambia la política de ajuste por mitigante.
+FACTOR_MITIGANTE = {"Bajo": 1.0, "Medio": 0.90, "Alto": 0.80}
+```
+
+## 3️⃣ Score Ajustado — usar la constante editable (línea ~6124)
+
+**Buscar:**
+```python
+            factor_mit = {"Bajo": 1.0, "Medio": 0.90, "Alto": 0.70}.get(mit, 1.0)
+```
+
+**Reemplazar por:**
+```python
+            factor_mit = FACTOR_MITIGANTE.get(mit, 1.0)
+```
+
+### Nota importante sobre tu mensaje
+Escribiste "Bajo" dos veces para los factores (1 → Bajo, 0.9 → Medio, 0.8 → "Bajo" de nuevo). Asumí que el tercer caso es **"Alto" → 0.8** (antes estaba en 0.70), ya que "Bajo" y "Medio" ya estaban cubiertos. Si en realidad querías otra combinación, solo edita los tres números dentro de `FACTOR_MITIGANTE` en el bloque 2 — quedó ahí precisamente para que lo ajustes a mano sin tocar el resto del código.
+
+### Un detalle adicional a considerar (opcional)
+El dashboard HTML interactivo tiene su **propia** función JS `calcScores()` (línea ~7697) que también calcula "Score Global", pero de forma independiente a la del Excel — y actualmente excluye solo los `null` (sin cobertura), no los ceros. Si quieres que el número que se ve en el HTML coincida con el del Excel una vez hagas este cambio, avísame y te paso el bloque equivalente en JavaScript (son 2 líneas). Si no te importa esa diferencia (por ejemplo si el HTML no muestra "Score Ajustado" y solo usas el Excel para ese reporte), puedes dejarlo como está.
