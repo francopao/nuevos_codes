@@ -1,0 +1,228 @@
+Confirmado, cada bloque de búsqueda es único en el archivo. Aquí van los 7 parches (BUSCAR → REEMPLAZAR), en el orden en que aparecen en el script:
+
+---
+
+**1) Agregar el switch de config — justo antes de `def build_model`**
+
+BUSCAR:
+```python
+def build_model(df_prod, exp, scores, geo_idx, universo=None, sector=SECTOR_MINERIA):
+```
+REEMPLAZAR CON:
+```python
+FORZAR_SCORE_SIN_EXPOSICION = True
+# Si una empresa tiene ubicaciones mapeadas pero AUM=0 en "Valorización" (col H),
+# por defecto el script la excluye por completo de scores/outputs. Con esto en True
+# se le calcula el Score MM/Inund./Sequía/Global igual (peso igualitario entre sus
+# ubicaciones conocidas); el AUM real que se reporta en los excel/html de plata
+# sigue en S/ 0 para esas empresas — no se inventa exposición monetaria.
+
+
+def build_model(df_prod, exp, scores, geo_idx, universo=None, sector=SECTOR_MINERIA):
+```
+
+---
+
+**2) `build_model` — asignación de exposición por distrito**
+
+BUSCAR:
+```python
+    for e in universo:
+        sub = df_assign[df_assign["empresa"] == e]
+        E = exp.get(e, 0.0)
+        if sub.empty or E == 0:
+            continue
+        if METODO_ASIGNACION == "tmf_share" and sub["tmf"].sum() > 0:
+            w = sub["tmf"] / sub["tmf"].sum()
+        elif METODO_ASIGNACION == "units_share":
+            nun = sub["ubigeo"].map(lambda u: max(1, len(um.get((e, u), []))))
+            w = nun / nun.sum()
+        else:  # equal o tmf=0
+            w = pd.Series(1.0 / len(sub), index=sub.index)
+        df_assign.loc[sub.index, "exposicion"] = (E * w).values
+```
+REEMPLAZAR CON:
+```python
+    df_assign["peso_score"] = 0.0          # NUEVO: peso solo para calcular el score
+    for e in universo:
+        sub = df_assign[df_assign["empresa"] == e]
+        if sub.empty:
+            continue
+        E = exp.get(e, 0.0)
+        if METODO_ASIGNACION == "tmf_share" and sub["tmf"].sum() > 0:
+            w = sub["tmf"] / sub["tmf"].sum()
+        elif METODO_ASIGNACION == "units_share":
+            nun = sub["ubigeo"].map(lambda u: max(1, len(um.get((e, u), []))))
+            w = nun / nun.sum()
+        else:  # equal o tmf=0
+            w = pd.Series(1.0 / len(sub), index=sub.index)
+        if E == 0 and FORZAR_SCORE_SIN_EXPOSICION:
+            df_assign.loc[sub.index, "peso_score"] = w.values
+        elif E != 0:
+            df_assign.loc[sub.index, "exposicion"] = (E * w).values
+            df_assign.loc[sub.index, "peso_score"] = (E * w).values
+```
+
+---
+
+**3) `build_model` — acumulador `dist_rows`**
+
+BUSCAR:
+```python
+        d = dist_rows.setdefault(u, {"ubigeo": u, "tmf": 0.0, "exposicion": 0.0,
+                                     "empresas": {}})
+        d["tmf"] += r["tmf"]
+        d["exposicion"] += r["exposicion"]
+        d["empresas"][r["empresa"]] = d["empresas"].get(r["empresa"], 0.0) + r["exposicion"]
+```
+REEMPLAZAR CON:
+```python
+        d = dist_rows.setdefault(u, {"ubigeo": u, "tmf": 0.0, "exposicion": 0.0,
+                                     "empresas": {}, "empresas_score": {}})
+        d["tmf"] += r["tmf"]
+        d["exposicion"] += r["exposicion"]
+        d["empresas"][r["empresa"]] = d["empresas"].get(r["empresa"], 0.0) + r["exposicion"]
+        d["empresas_score"][r["empresa"]] = d["empresas_score"].get(r["empresa"], 0.0) + r["peso_score"]
+```
+
+---
+
+**4) `build_model` — construcción de `aportes`**
+
+BUSCAR:
+```python
+        aportes = []
+        for emp_n, monto in d["empresas"].items():
+            if monto <= 0:
+                continue
+
+            # Expandir por conteo físico: cada tienda es un activo (retail pesa por
+            # 'acum'; minería/banca/malls quedan 1 a 1). Así len(activos) = nº físico
+            # y mapa, Excel y FEN cuentan tiendas reales desde la misma fuente.
+            _det = um_det.get((emp_n, u), {})
+            activos = [nm for nm, k in sorted(_det.items()) for _ in range(int(k))]
+
+            aportes.append({"emisor": emp_n, "sector": sector,
+                            "monto": round(monto, 2), "activos": activos})
+```
+REEMPLAZAR CON:
+```python
+        aportes = []
+        for emp_n in set(d["empresas"]) | set(d.get("empresas_score", {})):
+            monto = d["empresas"].get(emp_n, 0.0)
+            peso = d.get("empresas_score", {}).get(emp_n, 0.0)
+            if monto <= 0 and peso <= 0:
+                continue
+
+            # Expandir por conteo físico: cada tienda es un activo (retail pesa por
+            # 'acum'; minería/banca/malls quedan 1 a 1). Así len(activos) = nº físico
+            # y mapa, Excel y FEN cuentan tiendas reales desde la misma fuente.
+            _det = um_det.get((emp_n, u), {})
+            activos = [nm for nm, k in sorted(_det.items()) for _ in range(int(k))]
+
+            aportes.append({"emisor": emp_n, "sector": sector,
+                            "monto": round(monto, 2),
+                            "peso_score": round(peso, 6) if peso > 0 else round(monto, 2),
+                            "activos": activos})
+```
+
+---
+
+**5) `_calc_scores_py` — usar el peso forzado si existe**
+
+BUSCAR:
+```python
+        for a in d.get("aportes", []):
+            m = a.get("monto", 0) or 0
+            if m > 0:
+                acc[a["emisor"]] = acc.get(a["emisor"], 0) + m
+```
+REEMPLAZAR CON (ojo: esta línea exacta aparece **4 veces** en el archivo — reemplaza SOLO la que está dentro de `def _calc_scores_py`, no las de `generar_excel_tabla_resumen`/`generar_excel_riesgos`):
+```python
+        for a in d.get("aportes", []):
+            m = a.get("peso_score") or a.get("monto", 0) or 0
+            if m > 0:
+                acc[a["emisor"]] = acc.get(a["emisor"], 0) + m
+```
+
+---
+
+**6) `generar_excel_tabla_resumen` — universo de empresas (`emisores_all`)**
+
+BUSCAR:
+```python
+    aum_emp_tot = {}
+    for d in districts:
+        for a in d.get("aportes", []):
+            m = a.get("monto", 0) or 0
+            if m > 0:
+                aum_emp_tot[a["emisor"]] = aum_emp_tot.get(a["emisor"], 0) + m
+    emisores_all = sorted(aum_emp_tot.keys())
+```
+REEMPLAZAR CON:
+```python
+    aum_emp_tot = {}
+    emisores_set = set()
+    for d in districts:
+        for a in d.get("aportes", []):
+            m = a.get("monto", 0) or 0
+            if m > 0:
+                aum_emp_tot[a["emisor"]] = aum_emp_tot.get(a["emisor"], 0) + m
+                emisores_set.add(a["emisor"])
+            if (a.get("peso_score") or 0) > 0:
+                emisores_set.add(a["emisor"])
+    emisores_all = sorted(emisores_set)
+```
+
+---
+
+**7) `_trim_districts` — feed del dashboard HTML principal**
+
+BUSCAR:
+```python
+        ap = []
+        for a in d.get("aportes", []):
+            if a.get("monto", 0) <= 0:
+                continue
+            ap.append({
+                "e": a.get("emisor"),
+                "s": a.get("sector"),
+                "m": round(float(a.get("monto", 0.0)), 2),
+                "ac": list(a.get("activos", []) or []),
+            })
+```
+REEMPLAZAR CON:
+```python
+        ap = []
+        for a in d.get("aportes", []):
+            _m = a.get("monto", 0) or 0
+            _w = a.get("peso_score") or 0
+            if _m <= 0 and _w <= 0:
+                continue
+            ap.append({
+                "e": a.get("emisor"),
+                "s": a.get("sector"),
+                "m": round(float(_m), 2),
+                "w": round(float(_w if _w > 0 else _m), 6),
+                "ac": list(a.get("activos", []) or []),
+            })
+```
+
+---
+
+**8) JS `calcScores()` dentro del HTML — usar el peso forzado**
+
+BUSCAR (esta línea exacta aparece 5 veces en el JS; reemplaza SOLO la que está dentro de `function calcScores(){`, inmediatamente después de `const tot={}, perDist={};` y `D.forEach(d=>{ const acc={};`):
+```javascript
+    (d.ap||[]).forEach(a=>{ const m=a.m*classFrac(a.e); if(m>0) acc[a.e]=(acc[a.e]||0)+m; });
+```
+REEMPLAZAR CON:
+```javascript
+    (d.ap||[]).forEach(a=>{ const base=(a.w!==undefined?a.w:a.m); const m=base*classFrac(a.e); if(m>0) acc[a.e]=(acc[a.e]||0)+m; });
+```
+
+---
+
+Con esto: el dashboard HTML, la hoja "Score por Empresa"/"Score por Sector"/"Activos por Empresa" (`generar_excel_riesgos`) y las 3 hojas por desastre (`generar_excel_tabla_resumen`) deberían mostrarte ya los scores de Rutas de Lima, Integratel, Intursa, Colegios Peruanos, Casa Andina y Lima Expresa, manteniendo su AUM en S/ 0 en todas las columnas de plata.
+
+Para **Orazen** este parche no aplica (su AUM no es 0) — sigue pendiente el print de diagnóstico que te mencioné para confirmar la causa real antes de tocar nada ahí.
