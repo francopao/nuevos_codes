@@ -1,0 +1,102 @@
+Diseño limpio: tratamos "Marcobre" como empresa canónica independiente (sus activos reportan su 100% bajo su propio nombre, sin tocarla), y agregamos una tabla genérica y reutilizable de **participaciones cruzadas** que simplemente *agrega* filas de producción duplicadas a nombre de la empresa dueña, con el % que definas. No resta nada a la hija, y sirve para cualquier otro caso similar que te salga en el futuro (no es un parche solo-Marcobre).
+
+---
+
+**1) `EQUIV_EMPRESAS_PRODUCCION` — Marcobre deja de colapsar a Minsur**
+
+BUSCAR:
+```python
+    "MARCOBRE S.A.C.": "Minsur",
+```
+REEMPLAZAR CON:
+```python
+    "MARCOBRE S.A.C.": "Marcobre",
+```
+
+---
+
+**2) `EQUIV_MINERAS_MENSUAL` — mismo cambio para la serie mensual**
+
+BUSCAR:
+```python
+    "MARCOBRE": "Minsur",
+```
+REEMPLAZAR CON:
+```python
+    "MARCOBRE": "Marcobre",
+```
+
+---
+
+**3) `EMPRESAS_CANONICAS` — agregar Marcobre + nueva tabla `PARTICIPACIONES_CRUZADAS`**
+
+BUSCAR:
+```python
+# Empresas canónicas que son el universo de análisis (orden de reporte).
+EMPRESAS_CANONICAS = ["Buenaventura", "Volcan", "Minsur", "Nexa Resources Perú",
+                      "Hochschild", "Cerro Verde", "Hudbay"]
+```
+REEMPLAZAR CON:
+```python
+# Empresas canónicas que son el universo de análisis (orden de reporte).
+EMPRESAS_CANONICAS = ["Buenaventura", "Volcan", "Minsur", "Nexa Resources Perú",
+                      "Hochschild", "Cerro Verde", "Hudbay", "Marcobre"]
+
+# --- Participaciones cruzadas (lado PRODUCCIÓN) -------------------------------
+# Una empresa "hija" ya es canónica por sí misma (reporta el 100% de su
+# producción bajo su propio nombre), pero además parte de esa producción debe
+# sumarse a otra empresa "dueña" por su % de participación accionaria — SIN
+# restarle nada a la hija. Clave = empresa canónica hija; valor = lista de
+# (empresa canónica dueña, fracción 0-1). Admite más de un dueño o más de una
+# hija sin tocar el resto del script.
+PARTICIPACIONES_CRUZADAS = {
+    "Marcobre": [("Minsur", 0.60)],
+}
+```
+
+---
+
+**4) `load_produccion` — duplicar filas ya geocodificadas hacia la empresa dueña**
+
+BUSCAR:
+```python
+        f"{df['empresa'].nunique()} empresa(s) del universo con geografía.")
+    return df, sheet
+```
+REEMPLAZAR CON:
+```python
+        f"{df['empresa'].nunique()} empresa(s) del universo con geografía.")
+
+    # --- Participaciones cruzadas: duplica (ya geocodificadas) a nombre de la
+    # empresa dueña, aplicando su % de participación. La fila original de la
+    # empresa "hija" queda 100% intacta; esto solo AGREGA filas, nunca resta.
+    _extra = []
+    for _, _r in df.iterrows():
+        for _dueno, _frac in PARTICIPACIONES_CRUZADAS.get(_r["empresa"], []):
+            _g = _r.to_dict()
+            _g["empresa"] = _dueno
+            _g["acum"] = _r["acum"] * _frac
+            _g["tmf"] = _r["tmf"] * _frac
+            _g["unidad_minera"] = f"{_r['unidad_minera']} ({_frac*100:.0f}% part. en {_r['empresa']})"
+            _extra.append(_g)
+    if _extra:
+        df = pd.concat([df, pd.DataFrame(_extra)], ignore_index=True)
+        log(f"Participaciones cruzadas: {len(_extra)} fila(s) extra agregadas por "
+            f"participación accionaria (ver PARTICIPACIONES_CRUZADAS).")
+
+    return df, sheet
+```
+
+---
+
+### Por qué funciona así (y no antes de geocodificar)
+
+La duplicación se hace **después** de que `depto/prov/dist` ya están resueltos (línea justo antes del `return`), copiando esa geografía directamente en vez de volver a buscarla. Si duplicara las filas más arriba (antes de geocodificar), el nombre de unidad con el sufijo `"(60% part. en Marcobre)"` no haría match en los diccionarios de override por nombre de unidad, y esas filas se irían a "sin geografía".
+
+Como las filas duplicadas quedan con `empresa = "Minsur"`, `build_model()` las toma automáticamente al construir `sub = df_assign[df_assign["empresa"]=="Minsur"]` — no necesitas tocar nada más del pipeline. Resultado:
+- **Marcobre**: 100% de su producción, sus propios activos físicos, su propio score — igual que antes pero ya no "es" Minsur.
+- **Minsur**: conserva el 100% de su propia producción, y además suma el 60% de cada activo físico de Marcobre (aparecerá en su lista de activos como, por ejemplo, *"Mina Justa (60% part. en Marcobre)"*), lo que jala parte de su AUM real hacia esos distritos vía `tmf_share`.
+
+### Un detalle a verificar de tu lado
+
+Si en "Valorización de Instrumentos" (col H) **no** hay una fila con AUM a nombre de "Marcobre" (es común si solo cotizan bonos/acciones de Minsur), Marcobre quedará con AUM = S/ 0. Con el fix de `FORZAR_SCORE_SIN_EXPOSICION` que ya aplicaste la sesión pasada, igual te calculará su Score MM/Inund./Sequía/Global — simplemente lo verás con AUM Total en S/ 0, que es correcto si Marcobre no es un emisor directo en tu cartera.
