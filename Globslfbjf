@@ -1,0 +1,501 @@
+# -*- coding: utf-8 -*-
+"""
+Arma "ESG Core F.xlsx" juntando lo que hoy se pega a mano en Reporte Mensual
+ESG.xlsm: los 8 reportes de MSCI (BD F1/F2/F3/M + Sobs), el archivo mensual
+de Inversión Temática (hoja GRAF PIE), Peores Contribuyentes BD, y Analisis
+BD (de ahí sale la cobertura, no se guarda el detalle a nivel ISIN, solo el
+agregado -- si se necesitara el detalle crudo, está en el archivo original).
+
+Correr de nuevo cada vez que haya archivos nuevos: se lee todo de nuevo, se
+junta con lo que ya había en ESG Core F.xlsx y se deduplica por fecha, así
+que da igual si un mes se corre dos veces.
+"""
+
+import os
+import re
+from datetime import datetime, date
+
+import pandas as pd
+import openpyxl
+
+# ---------------------------------------------------------------------------
+# RUTAS -- ajustar según corresponda
+# ---------------------------------------------------------------------------
+
+RUTA_PSR = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\2. Reportes\Comité Mensual\1. Portfolio Summary Reports"
+RUTA_TEMATICA = os.path.join(RUTA_PSR, "Inversión Temática")
+
+# Peores Contribuyentes BD y Analisis BD viven en la misma carpeta
+RUTA_BASE_COMITE = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\1.Data Histórica\Output\Base Comité Mensual"
+
+ARCHIVO_SALIDA = os.path.join(RUTA_PSR, "ESG Core F.xlsx")
+
+# ---------------------------------------------------------------------------
+# utilidades chicas
+# ---------------------------------------------------------------------------
+
+
+def num(v):
+    """Castea a float sin romperse con celdas vacías, '#N/A', '-', etc."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return None if pd.isna(v) else float(v)
+    s = str(v).strip().replace("%", "").replace(",", ".")
+    if s in ("", "N/A", "n/a", "#N/A", "#REF!", "-"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def fecha_de_yyyymm(s):
+    return date(int(s[0:4]), int(s[4:6]), 1)
+
+
+def fecha_de_mmyyyy(s):
+    return date(int(s[2:6]), int(s[0:2]), 1)
+
+
+def leer_grid(ws):
+    """ws.cell(fila, col) es lentísimo en modo read_only (vuelve a escanear
+    la hoja en cada llamada). Mejor cargar todo una vez con iter_rows y
+    después leer del arreglo en memoria."""
+    filas = [()]
+    for fila in ws.iter_rows(values_only=True):
+        filas.append(fila)
+    return filas
+
+
+def v(grid, fila, col):
+    if fila <= 0 or fila >= len(grid):
+        return None
+    f = grid[fila]
+    return f[col - 1] if 0 < col <= len(f) else None
+
+
+def fila_con_etiqueta(grid, col, etiqueta, f0, f1):
+    """Primera fila entre f0 y f1 donde la columna `col` dice exactamente
+    `etiqueta`. MSCI no siempre deja el layout en la misma fila de un mes a
+    otro, así que mejor buscar por texto que confiar en el número de fila."""
+    for f in range(f0, min(f1, len(grid) - 1) + 1):
+        val = v(grid, f, col)
+        if val is not None and str(val).strip() == etiqueta:
+            return f
+    return None
+
+
+def listar_archivos(carpeta, patron, orden="yyyymm"):
+    if not os.path.isdir(carpeta):
+        return []
+    convertir = fecha_de_yyyymm if orden == "yyyymm" else fecha_de_mmyyyy
+    archivos = []
+    for nombre in os.listdir(carpeta):
+        if nombre.startswith("~$") or not nombre.lower().endswith((".xlsx", ".xlsm")):
+            continue
+        m = patron.search(nombre)
+        if not m:
+            continue
+        try:
+            fecha = convertir(m.group(1))
+        except ValueError:
+            continue
+        archivos.append({"path": os.path.join(carpeta, nombre), "nombre": nombre, "fecha": fecha})
+    return archivos
+
+
+# ---------------------------------------------------------------------------
+# 1) Reportes MSCI "Portfolio Report" (BD F1/F2/F3/M [+Sobs])
+# ---------------------------------------------------------------------------
+
+PAT_MSCI = re.compile(r"(\d{6})[ _]*BD[ _]*(F1|F2|F3|M)(Sobs)?", re.IGNORECASE)
+
+# Ventanas de búsqueda por bloque (generosas, para aguantar si MSCI corre
+# el layout un par de filas de un mes a otro)
+V_SCORECARD, V_RATING_DIST = (295, 350), (300, 340)
+V_RATING_SUMMARY, V_RATING_MOMENTUM = (95, 130), (125, 145)
+V_RISK, V_MV_COVERAGE = (345, 395), (615, 645)
+
+SCORECARD = [
+    ("ESG QUALITY SCORE(0-10)", "ESG Quality Score (0-10)", 22, 28, 34),
+    ("ENVIRONMENTAL SCORE", "Environmental Score", 22, 28, 34),
+    ("SOCIAL SCORE", "Social Score", 22, 28, 34),
+    ("GOVERNANCE SCORE", "Governance Score", 22, 28, 34),
+]
+
+# grupo, etiqueta (columna B), col Portfolio, col Benchmark, col Activo
+RIESGO_AMBIENTAL = [
+    ("Environmental Risk", "Carbon Risk (T CO2E/$M SALES)", 23, 29, 36),
+    ("Environmental Risk", "Fossil Fuel Reserves (%)", 23, 29, 36),
+    ("Environmental Risk", "High Impact Fossil Fuel Reserves (%)", 23, 29, 36),
+    ("Environmental Risk", "Exposure to High Water\nRisk (%)", 23, 29, 36),
+    ("Environmental Risk", "Freshwater Withdrawal Intensity (m3/$M SALES)", 20, 29, 36),
+    ("Environmental Risk", "Total Water Withdrawal Intensity (m3/$M SALES)", 20, 29, 36),
+    ("Environmental Risk", "Freshwater Withdrawal Coverage (%)", 23, 29, 36),
+    ("Environmental Risk", "Total Water Withdrawal Coverage (%)", 23, 29, 36),
+]
+# Reputational / Governance Risk están en las mismas filas, más a la derecha
+RIESGO_REPUTACIONAL = [
+    ("Overall Reputation Risk (%)", 64, 70, 77), ("Environmental (%)", 64, 70, 77),
+    ("Customer (%)", 64, 70, 77), ("Human Rights (%)", 64, 70, 77),
+    ("Labor (%)", 64, 70, 77), ("Governance (%)", 64, 70, 77),
+]
+RIESGO_GOBIERNO = [
+    ("Governance Leaders (%)", 106, 112, 119), ("Governance Laggards (%)", 106, 112, 119),
+    ("Board Flag (%)", 106, 112, 119), ("Lack of Independent Board (%)", 106, 112, 119),
+    ("No Female Directors (%)", 106, 112, 119), ("Female Rep. 30% of Directors (%)", 106, 112, 119),
+    ("Accounting Flag (%)", 106, 112, 119), ("Pay Flag (%)", 106, 112, 119),
+    ("Ownership & Control Flag (%)", 106, 112, 119),
+]
+ORDEN_RATINGS = ["AAA", "AA", "A", "BBB", "BB", "B", "CCC", "Not Rated"]
+
+
+def rating_distribution(grid, fila_aaa, col_label, c_comp, c_fun, c_tot):
+    filas, f = [], fila_aaa
+    for rating in ORDEN_RATINGS:
+        etq = v(grid, f, col_label)
+        if str(etq).strip() if etq is not None else None != rating:
+            if (str(etq).strip() if etq is not None else None) != rating:
+                break
+        filas.append({"Rating": rating, "Companies": num(v(grid, f, c_comp)),
+                       "Funds": num(v(grid, f, c_fun)), "Total": num(v(grid, f, c_tot))})
+        f += 1
+    return filas
+
+
+def leer_msci(archivo):
+    wb = openpyxl.load_workbook(archivo["path"], data_only=True, read_only=True)
+    ws = wb["Portfolio Report"]
+    grid = leer_grid(ws)
+    wb.close()
+
+    base = {"Fecha": archivo["fecha"], "Fondo": archivo["fondo"], "Variante": archivo["variante"]}
+    out = {"mv_coverage": [], "scorecard": [], "rating_dist": [],
+           "rating_summary": [], "rating_momentum": [], "risk": []}
+
+    # fecha "as of" real del reporte (distinta al mes-llave del nombre de archivo)
+    fecha_reporte = next((v(grid, f, 127) for f in range(90, 115)
+                          if isinstance(v(grid, f, 127), (datetime, date))), None)
+    base["Fecha_Reporte_MSCI"] = fecha_reporte
+
+    for etq, nombre, cp, cb, ca in SCORECARD:
+        f = fila_con_etiqueta(grid, 2, etq, *V_SCORECARD)
+        if f:
+            out["scorecard"].append({**base, "Metrica": nombre, "Portfolio": num(v(grid, f, cp)),
+                                      "Benchmark": num(v(grid, f, cb)), "Activo": num(v(grid, f, ca))})
+
+    f0, f1 = V_RATING_DIST
+    filas_aaa = [f for f in range(f0, min(f1, len(grid) - 1) + 1)
+                 if str(v(grid, f, 127) or "").strip() == "AAA"]
+    for dim, f_aaa in zip(["Overall", "Environmental"], filas_aaa):
+        for fila in rating_distribution(grid, f_aaa, 127, 128, 129, 130):
+            out["rating_dist"].append({**base, "Dimension": dim, **fila})
+
+    f0, f1 = V_RISK
+    for grupo, etq, cp, cb, ca in RIESGO_AMBIENTAL:
+        f = fila_con_etiqueta(grid, 2, etq, f0, f1)
+        if f:
+            out["risk"].append({**base, "Grupo": grupo, "Metrica": etq.replace("\n", " "),
+                                 "Portfolio": num(v(grid, f, cp)), "Benchmark": num(v(grid, f, cb)),
+                                 "Activo": num(v(grid, f, ca))})
+    for etq, cp, cb, ca in RIESGO_REPUTACIONAL:
+        f = fila_con_etiqueta(grid, 43, etq, f0, f1)
+        if f:
+            out["risk"].append({**base, "Grupo": "Reputational Risk", "Metrica": etq,
+                                 "Portfolio": num(v(grid, f, cp)), "Benchmark": num(v(grid, f, cb)),
+                                 "Activo": num(v(grid, f, ca))})
+    for etq, cp, cb, ca in RIESGO_GOBIERNO:
+        f = fila_con_etiqueta(grid, 84, etq, f0, f1)
+        if f:
+            out["risk"].append({**base, "Grupo": "Governance Risk", "Metrica": etq,
+                                 "Portfolio": num(v(grid, f, cp)), "Benchmark": num(v(grid, f, cb)),
+                                 "Activo": num(v(grid, f, ca))})
+
+    f_leader = fila_con_etiqueta(grid, 127, "Leader", *V_RATING_SUMMARY)
+    if f_leader:
+        for i, cat in enumerate(["Leader", "Average", "Laggard", "Not Covered"]):
+            f = f_leader + i
+            if str(v(grid, f, 127) or "").strip() != cat:
+                break
+            out["rating_summary"].append({
+                **base, "Categoria": cat,
+                "Portfolio_Companies": num(v(grid, f, 128)), "Portfolio_Funds": num(v(grid, f, 129)),
+                "Portfolio_Total": num(v(grid, f, 130)), "Benchmark_Companies": num(v(grid, f, 131)),
+                "Benchmark_Funds": num(v(grid, f, 132)), "Benchmark_Total": num(v(grid, f, 133)),
+            })
+
+    f_up = fila_con_etiqueta(grid, 127, "Upward", *V_RATING_MOMENTUM)
+    if f_up:
+        for i, cat in enumerate(["Upward", "Stable", "Downward", "Not Rated"]):
+            f = f_up + i
+            if str(v(grid, f, 127) or "").strip() != cat:
+                break
+            out["rating_momentum"].append({
+                **base, "Categoria": cat,
+                "Portfolio_Companies": num(v(grid, f, 128)), "Portfolio_Funds": num(v(grid, f, 129)),
+                "Portfolio_Govt": num(v(grid, f, 130)), "Portfolio_Total": num(v(grid, f, 131)),
+                "Benchmark_Companies": num(v(grid, f, 132)), "Benchmark_Funds": num(v(grid, f, 133)),
+                "Benchmark_Govt": num(v(grid, f, 134)), "Benchmark_Total": num(v(grid, f, 135)),
+            })
+
+    f_port = fila_con_etiqueta(grid, 2, "Portfolio", *V_MV_COVERAGE)
+    f_bench = fila_con_etiqueta(grid, 2, "Primary Benchmark", *V_MV_COVERAGE)
+    categorias = [("ESG Quality", 45), ("Carbon Risk", 65), ("Reputational Risk", 85), ("Governance Risk", 105)]
+    for serie, fila_serie in [("Portfolio", f_port), ("Primary Benchmark", f_bench)]:
+        if fila_serie:
+            for cat, col in categorias:
+                out["mv_coverage"].append({**base, "Serie": serie, "Categoria": cat,
+                                            "Cobertura_pct": num(v(grid, fila_serie, col))})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 2) Inversión Temática y Controversias MMYYYY.xlsm -> hoja GRAF PIE
+# ---------------------------------------------------------------------------
+
+PAT_TEMATICA = re.compile(r"(\d{6})(?=\.xls[xm]$)", re.IGNORECASE)
+
+
+def leer_graf_pie(archivo):
+    wb = openpyxl.load_workbook(archivo["path"], data_only=True, read_only=True)
+    ws = wb["GRAF PIE"]
+    grid = leer_grid(ws)
+    wb.close()
+    fecha = archivo["fecha"]
+
+    resumen = []
+    for f in range(2, 5):
+        cat = v(grid, f, 1)
+        if cat is not None:
+            resumen.append({"Fecha": fecha, "Categoria": str(cat).strip(), "Inv_MMUSD": num(v(grid, f, 2))})
+
+    detalle = []
+    clase = None
+    for f in range(2, 11):
+        clase_celda = v(grid, f, 8)
+        emisor, etiqueta, aum, pct = v(grid, f, 9), v(grid, f, 10), v(grid, f, 11), v(grid, f, 12)
+        if clase_celda is not None:
+            clase = str(clase_celda).strip()
+        if emisor is None and aum is None:
+            continue
+        detalle.append({
+            "Fecha": fecha, "Clase": clase, "Es_Total": bool(clase and clase.lower().startswith("total")),
+            "Emisor": str(emisor).strip() if emisor is not None else None,
+            "Etiqueta": str(etiqueta).strip() if etiqueta is not None else None,
+            "AUM_MMUSD": num(aum), "Pct_Clase_Activo": num(pct),
+        })
+
+    return resumen, detalle
+
+
+# ---------------------------------------------------------------------------
+# 3) Peores Contribuyentes BD (mismo layout que la hoja "BD")
+# ---------------------------------------------------------------------------
+
+PAT_PEORES = re.compile(r"^(\d{6})[ _]*Peores[ _]*Contribuyentes[ _]*BD", re.IGNORECASE)
+
+COLS_PEORES = ["Fecha_Dato", "Afp", "Strategy", "Fondo", "AssetClass", "Factor",
+               "Nombre", "Rating", "Weight", "Score", "ESG", "Controversies",
+               "CO2_Sales", "Cod_OriginadorBU"]
+
+
+def leer_peores_contribuyentes(archivo):
+    wb = openpyxl.load_workbook(archivo["path"], data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    grid = leer_grid(ws)
+    wb.close()
+
+    filas = []
+    f, vacios = 2, 0
+    while vacios < 20 and f <= len(grid) - 1:
+        valores = [v(grid, f, c) for c in range(1, 15)]
+        if all(x is None for x in valores):
+            vacios += 1
+            f += 1
+            continue
+        vacios = 0
+        fila = dict(zip(COLS_PEORES, valores))
+        if fila["Nombre"] not in (None, "", "#N/A", "#REF!"):
+            fila["Weight"] = num(fila["Weight"])
+            fila["Score"] = num(fila["Score"])
+            fila["ESG"] = num(fila["ESG"])
+            fila["Controversies"] = num(fila["Controversies"])
+            fila["CO2_Sales"] = num(fila["CO2_Sales"])
+            fila["Fecha"] = archivo["fecha"]
+            filas.append(fila)
+        f += 1
+    return filas
+
+
+# ---------------------------------------------------------------------------
+# 4) Cobertura de holdings (sale de "Analisis BD")
+# ---------------------------------------------------------------------------
+# Analisis BD tiene una fila por ISIN x Fondo (varios miles por mes), pero lo
+# único que necesitamos de ahí es el % de cobertura por Fondo x Afp -- no hay
+# que guardar el detalle línea por línea en el maestro, solo el agregado.
+# (si alguna vez hace falta el detalle, está en el archivo original de la
+# carpeta "Base Comité Mensual"). BD1_S no aporta nada que no esté ya acá,
+# así que no se procesa.
+
+PAT_ANALISIS_BD = re.compile(r"(\d{6})[ _]*Analisis[ _]*BD", re.IGNORECASE)
+
+# posiciones de columna dentro de "Analisis BD" (66 columnas en total)
+COL_ISIN, COL_WEIGHT, COL_FONDO, COL_AFP, COL_COBERTURA = 3, 4, 5, 8, 53
+
+
+def grupo_afp(afp):
+    # Las fórmulas de cobertura que se usaban en la hoja "BD1_S" agrupaban
+    # todo lo que no fuera Integra (Habitat/Profuturo/Prima/Ex_Integra) en
+    # un solo bucket "Ex_Integra". Se mantiene esa misma agrupación acá.
+    return "Integra" if afp == "Integra" else "Ex_Integra"
+
+
+def leer_cobertura_analisis_bd(archivo):
+    wb = openpyxl.load_workbook(archivo["path"], data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    grid = leer_grid(ws)
+    wb.close()
+    fecha = archivo["fecha"]
+
+    if str(v(grid, 1, COL_ISIN) or "").strip() != "ISIN":
+        raise ValueError("cambió el layout de Analisis BD, columna ISIN ya no está donde se esperaba")
+
+    filas, f, vacios = [], 2, 0
+    while vacios < 50 and f <= len(grid) - 1:
+        isin = v(grid, f, COL_ISIN)
+        if isin in (None, "", "#N/A", "#REF!"):
+            vacios += 1
+            f += 1
+            continue
+        vacios = 0
+        filas.append({
+            "Fondo": v(grid, f, COL_FONDO),
+            "AfpGrupo": grupo_afp(v(grid, f, COL_AFP)),
+            "Weight": num(v(grid, f, COL_WEIGHT)),
+            "Cobertura": v(grid, f, COL_COBERTURA),
+        })
+        f += 1
+
+    if not filas:
+        return []
+
+    # % cobertura = Weight cubierto / Weight total, por Fondo x AfpGrupo
+    # (reemplaza el SUMIFS que vivía en la hoja "BD1_S", rango R1:Y21)
+    df = pd.DataFrame(filas)
+    cobertura = []
+    for (fondo, afp_grupo), g in df.groupby(["Fondo", "AfpGrupo"]):
+        cov = g.loc[g["Cobertura"] == "Cov", "Weight"].sum()
+        nocov = g.loc[g["Cobertura"] == "NoCov", "Weight"].sum()
+        total = cov + nocov
+        cobertura.append({"Fecha": fecha, "Fondo": fondo, "AfpGrupo": afp_grupo,
+                           "Cov": cov, "NoCov": nocov, "Total": total,
+                           "Cobertura_pct": (cov / total) if total else None})
+    return cobertura
+
+
+# ---------------------------------------------------------------------------
+# fusionar con lo histórico y escribir ESG Core F.xlsx
+# ---------------------------------------------------------------------------
+
+# hoja -> llave para deduplicar (si se vuelve a correr el mismo mes, se queda
+# con la versión más reciente en vez de duplicar la fila)
+LLAVES = {
+    "MV_Coverage": ["Fecha", "Fondo", "Variante", "Serie", "Categoria"],
+    "ESG_Scorecard": ["Fecha", "Fondo", "Variante", "Metrica"],
+    "Rating_Distribution": ["Fecha", "Fondo", "Variante", "Dimension", "Rating"],
+    "Rating_Summary": ["Fecha", "Fondo", "Variante", "Categoria"],
+    "Rating_Momentum": ["Fecha", "Fondo", "Variante", "Categoria"],
+    "Risk_Metrics": ["Fecha", "Fondo", "Variante", "Grupo", "Metrica"],
+    "Tematica_Resumen": ["Fecha", "Categoria"],
+    "Tematica_Detalle": ["Fecha", "Clase", "Emisor", "Etiqueta"],
+    "Peores_Contribuyentes": ["Fecha", "Fondo", "Afp", "Strategy", "Nombre", "Factor"],
+    "Cobertura_Holdings": ["Fecha", "Fondo", "AfpGrupo"],
+}
+
+
+def hoja_actual(hoja):
+    if not os.path.exists(ARCHIVO_SALIDA):
+        return pd.DataFrame()
+    try:
+        return pd.read_excel(ARCHIVO_SALIDA, sheet_name=hoja, engine="openpyxl")
+    except ValueError:
+        return pd.DataFrame()
+
+
+def juntar(viejo, nuevo, llave):
+    if not nuevo:
+        return viejo
+    nuevo = pd.DataFrame(nuevo)
+    junto = pd.concat([viejo, nuevo], ignore_index=True) if not viejo.empty else nuevo
+    if "Fecha" in junto.columns:
+        junto["Fecha"] = pd.to_datetime(junto["Fecha"], errors="coerce")
+    llave = [c for c in llave if c in junto.columns]
+    junto = junto.drop_duplicates(subset=llave, keep="last")
+    return junto.sort_values(by=[c for c in ["Fecha"] + llave if c in junto.columns],
+                              na_position="last").reset_index(drop=True)
+
+
+nuevas = {hoja: [] for hoja in LLAVES}
+
+archivos_msci = []
+for carpeta_archivo in listar_archivos(RUTA_PSR, PAT_MSCI):
+    m = PAT_MSCI.search(carpeta_archivo["nombre"])
+    carpeta_archivo["fondo"] = m.group(2).upper()
+    carpeta_archivo["variante"] = "Sobs" if m.group(3) else "Base"
+    archivos_msci.append(carpeta_archivo)
+
+print(f"{len(archivos_msci)} reportes MSCI (BD Fx[Sobs])")
+for archivo in archivos_msci:
+    try:
+        datos = leer_msci(archivo)
+        for hoja, clave in [("MV_Coverage", "mv_coverage"), ("ESG_Scorecard", "scorecard"),
+                             ("Rating_Distribution", "rating_dist"), ("Rating_Summary", "rating_summary"),
+                             ("Rating_Momentum", "rating_momentum"), ("Risk_Metrics", "risk")]:
+            nuevas[hoja].extend(datos[clave])
+    except Exception as e:
+        print(f"  salté {archivo['nombre']}: {e}")
+
+archivos_tematica = listar_archivos(RUTA_TEMATICA, PAT_TEMATICA, orden="mmyyyy")
+print(f"{len(archivos_tematica)} archivos de Inversión Temática")
+for archivo in archivos_tematica:
+    try:
+        resumen, detalle = leer_graf_pie(archivo)
+        nuevas["Tematica_Resumen"].extend(resumen)
+        nuevas["Tematica_Detalle"].extend(detalle)
+    except Exception as e:
+        print(f"  salté {archivo['nombre']}: {e}")
+
+archivos_peores = listar_archivos(RUTA_BASE_COMITE, PAT_PEORES)
+print(f"{len(archivos_peores)} archivos de Peores Contribuyentes BD")
+for archivo in archivos_peores:
+    try:
+        nuevas["Peores_Contribuyentes"].extend(leer_peores_contribuyentes(archivo))
+    except Exception as e:
+        print(f"  salté {archivo['nombre']}: {e}")
+
+archivos_analisis = listar_archivos(RUTA_BASE_COMITE, PAT_ANALISIS_BD)
+print(f"{len(archivos_analisis)} archivos Analisis BD")
+for archivo in archivos_analisis:
+    try:
+        nuevas["Cobertura_Holdings"].extend(leer_cobertura_analisis_bd(archivo))
+    except Exception as e:
+        print(f"  salté {archivo['nombre']}: {e}")
+
+tablas = {hoja: juntar(hoja_actual(hoja), nuevas[hoja], llave) for hoja, llave in LLAVES.items()}
+
+# Controversias no tiene archivo mensual fuente (es un watchlist que se
+# mantiene a mano); si todavía no existe la hoja, se crea vacía con las
+# columnas listas para llenar directo en ESG Core F.xlsx.
+controversias = hoja_actual("Controversias")
+if controversias.empty:
+    controversias = pd.DataFrame(columns=["Fecha", "Empresa", "Factor", "Tipo", "Estado", "Resumen"])
+
+with pd.ExcelWriter(ARCHIVO_SALIDA, engine="openpyxl") as writer:
+    for hoja, df in tablas.items():
+        df.to_excel(writer, sheet_name=hoja, index=False)
+    controversias.to_excel(writer, sheet_name="Controversias", index=False)
+
+print(f"\nListo: {ARCHIVO_SALIDA}")
+for hoja, df in tablas.items():
+    print(f"  {hoja}: {len(df)} filas")
