@@ -1,0 +1,279 @@
+# -*- coding: utf-8 -*-
+"""
+Descarga automática de tres reportes MINEM (gob.pe):
+1) Producción Minera -> "Producción metálica{AÑO}.{ext real}"
+2) Boletín Estadístico Minero (mes más reciente, Excel de Anexos) -> "MMYYYY.{ext real}"
+3) Inversión Minera -> "Inversión Minera.xlsx"
+
+Requiere: pip install selenium
+Chromedriver debe coincidir con la versión de Chrome instalada.
+
+FIX respecto a la versión anterior:
+Los archivos se descargaban en la carpeta de Descargas por defecto de Windows,
+ignorando "download.default_directory" configurado en las prefs de Chrome
+(comportamiento conocido en versiones recientes de Chrome, sobre todo cuando
+el enlace abre en una pestaña nueva con target="_blank"). Se corrige forzando
+la carpeta de descarga a nivel de protocolo con el comando CDP
+Page.setDownloadBehavior, que es la forma confiable de controlarlo con Selenium.
+"""
+
+import os
+import re
+import time
+import shutil
+import unicodedata
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+
+# ------------------------------------------------------------------
+# CONFIGURACIÓN
+# ------------------------------------------------------------------
+URL_PRODUCCION_MINERA = "https://www.gob.pe/institucion/minem/informes-publicaciones/5472883-produccion-minera"
+URL_LISTADO_MINERIA = "https://www.gob.pe/institucion/minem/tema/mineria"  # listado para ubicar el BEM más reciente
+URL_COLECCION_ESTADISTICAS_MINERAS = "https://www.gob.pe/institucion/minem/colecciones/12125-estadisticas-mineras"
+
+RUTA_PRODUCCION_MINERA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\BD\Producción Minera"
+RUTA_BOLETINES_MENSUALES = r"\\sppeapp00023\Inversiones\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\BD\Boletines Mensuales"
+RUTA_INVERSION_MINERA = r"Z:\Mesa de Inversiones\Bottom-Up\1 Proceso de Inversión Renta Variable\Proyecto Inputs Macro\Complementos BD\Minería\BD\Inversión Minera"
+
+CARPETA_DESCARGAS_TEMP = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "descargas_minem")
+
+MESES_ES = {
+    1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+    7: "julio", 8: "agosto", 9: "setiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+}
+MESES_ES_ALT = {9: "septiembre"}  # algunas publicaciones usan "septiembre"
+
+TIMEOUT = 30
+
+# ------------------------------------------------------------------
+# UTILIDADES
+# ------------------------------------------------------------------
+
+def quitar_tildes(texto):
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def crear_driver(carpeta_descarga):
+    os.makedirs(carpeta_descarga, exist_ok=True)
+    opciones = Options()
+    prefs = {
+        "download.default_directory": carpeta_descarga,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+        "plugins.always_open_pdf_externally": True,
+    }
+    opciones.add_experimental_option("prefs", prefs)
+    opciones.add_argument("--start-maximized")
+    driver = webdriver.Chrome(options=opciones)
+
+    # --- FIX: forzar la carpeta de descarga a nivel de protocolo (CDP) ---
+    # Esto es lo que realmente evita que Chrome use la carpeta de Descargas
+    # por defecto, incluso cuando el enlace abre en una pestaña nueva.
+    driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+        "behavior": "allow",
+        "downloadPath": carpeta_descarga,
+    })
+    return driver
+
+
+def asegurar_comportamiento_descarga(driver, carpeta_descarga):
+    """Vuelve a fijar el comportamiento de descarga tras cambiar de pestaña/ventana,
+    ya que el comando CDP puede aplicar solo al 'target' activo en algunas versiones
+    de ChromeDriver."""
+    try:
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": carpeta_descarga,
+        })
+    except Exception:
+        pass
+
+
+def cambiar_a_pestana_nueva(driver, handles_previos, timeout=10):
+    """Si el enlace clickeado abrió una pestaña nueva (target='_blank'), cambia
+    el foco de Selenium a ella; si no se abrió ninguna, no hace nada."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        handles_actuales = driver.window_handles
+        nuevos = [h for h in handles_actuales if h not in handles_previos]
+        if nuevos:
+            driver.switch_to.window(nuevos[0])
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def esperar_descarga_completa(carpeta, archivos_previos, timeout=TIMEOUT):
+    """Espera a que aparezca un archivo nuevo (ya sin .crdownload) en la carpeta de descargas."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        actuales = set(os.listdir(carpeta))
+        nuevos = actuales - archivos_previos
+        nuevos_finales = [f for f in nuevos if not f.endswith(".crdownload") and not f.endswith(".tmp")]
+        if nuevos_finales and not any(f.endswith(".crdownload") for f in actuales):
+            return os.path.join(carpeta, nuevos_finales[0])
+        time.sleep(0.5)
+    raise TimeoutException(f"La descarga no finalizó en {timeout} segundos en {carpeta}")
+
+
+def mover_y_renombrar(ruta_origen, carpeta_destino, nombre_destino):
+    os.makedirs(carpeta_destino, exist_ok=True)
+    destino = os.path.join(carpeta_destino, nombre_destino)
+    if os.path.exists(destino):
+        os.remove(destino)
+    shutil.move(ruta_origen, destino)
+    print(f"Guardado: {destino}")
+    return destino
+
+
+def click_y_descargar(driver, carpeta_descarga, elemento_boton):
+    """Hace click en un botón de descarga, maneja el caso de pestaña nueva
+    (target='_blank') y devuelve la ruta del archivo descargado."""
+    handles_previos = driver.window_handles[:]
+    archivos_previos = set(os.listdir(carpeta_descarga))
+
+    driver.execute_script("arguments[0].click();", elemento_boton)
+
+    if cambiar_a_pestana_nueva(driver, handles_previos, timeout=5):
+        asegurar_comportamiento_descarga(driver, carpeta_descarga)
+
+    archivo_descargado = esperar_descarga_completa(carpeta_descarga, archivos_previos)
+
+    # Si la descarga abrió una pestaña nueva, cerrarla y volver a la original
+    if len(driver.window_handles) > len(handles_previos):
+        driver.close()
+        driver.switch_to.window(handles_previos[0])
+
+    return archivo_descargado
+
+
+def buscar_enlace_por_texto(driver, url_listado, texto_buscado, contains_href="/informes-publicaciones/"):
+    """Recorre un listado de publicaciones y devuelve (href, texto) del primer enlace
+    cuyo texto contenga 'texto_buscado' (sin tildes, insensible a mayúsculas)."""
+    driver.get(url_listado)
+    objetivo = quitar_tildes(texto_buscado).lower()
+
+    enlaces = WebDriverWait(driver, TIMEOUT).until(
+        EC.presence_of_all_elements_located((By.XPATH, f"//a[contains(@href, '{contains_href}')]"))
+    )
+
+    for enlace in enlaces:
+        texto = quitar_tildes(enlace.text or "").lower()
+        if objetivo in texto:
+            href = enlace.get_attribute("href")
+            if href:
+                return href, enlace.text.strip()
+
+    raise NoSuchElementException(f"No se encontró ningún enlace que contenga '{texto_buscado}' en {url_listado}")
+
+
+# ------------------------------------------------------------------
+# 1) PRODUCCIÓN MINERA -> "Producción metálica{AÑO}.{ext}"
+# ------------------------------------------------------------------
+
+def descargar_produccion_minera(driver, carpeta_descarga):
+    print("Descargando Producción Minera...")
+    driver.get(URL_PRODUCCION_MINERA)
+
+    boton = WebDriverWait(driver, TIMEOUT).until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn.btn--secondary.download"))
+    )
+
+    archivo_descargado = click_y_descargar(driver, carpeta_descarga, boton)
+
+    anio_actual = datetime.now().year
+    extension = os.path.splitext(archivo_descargado)[1]
+    nombre_final = f"Producción metálica{anio_actual}{extension}"
+
+    mover_y_renombrar(archivo_descargado, RUTA_PRODUCCION_MINERA, nombre_final)
+
+
+# ------------------------------------------------------------------
+# 2) BOLETÍN ESTADÍSTICO MINERO (mes más reciente) -> "MMYYYY.{ext}"
+# ------------------------------------------------------------------
+
+def descargar_boletin_mensual(driver, carpeta_descarga):
+    print("Buscando el Boletín Estadístico Minero más reciente...")
+    url_boletin, titulo = buscar_enlace_por_texto(driver, URL_LISTADO_MINERIA, "boletin estadistico minero")
+    print(f"Boletín encontrado: {titulo} -> {url_boletin}")
+
+    driver.get(url_boletin)
+
+    boton_excel = WebDriverWait(driver, TIMEOUT).until(
+        EC.element_to_be_clickable((
+            By.XPATH,
+            "//a[contains(@data-origin, 'excel-de-anexos') or "
+            "(contains(@class,'download') and ancestor::div[contains(., 'Excel de Anexos')])]"
+        ))
+    )
+
+    archivo_descargado = click_y_descargar(driver, carpeta_descarga, boton_excel)
+
+    match = re.search(r"(\w+)\s+(\d{4})", quitar_tildes(titulo))
+    if not match:
+        raise ValueError(f"No se pudo interpretar mes/año desde el título: {titulo}")
+    nombre_mes, anio = match.group(1).lower(), match.group(2)
+
+    meses_normalizados = {quitar_tildes(v): f"{k:02d}" for k, v in MESES_ES.items()}
+    meses_normalizados.update({quitar_tildes(v): f"{k:02d}" for k, v in MESES_ES_ALT.items()})
+
+    mes_numero = meses_normalizados.get(nombre_mes)
+    if mes_numero is None:
+        raise ValueError(f"Mes no reconocido: {nombre_mes}")
+
+    extension = os.path.splitext(archivo_descargado)[1]
+    nombre_final = f"{mes_numero}{anio}{extension}"
+
+    mover_y_renombrar(archivo_descargado, RUTA_BOLETINES_MENSUALES, nombre_final)
+
+
+# ------------------------------------------------------------------
+# 3) INVERSIÓN MINERA -> "Inversión Minera.xlsx"
+# ------------------------------------------------------------------
+
+def descargar_inversion_minera(driver, carpeta_descarga):
+    print("Buscando Inversión Minera...")
+    url_detalle, titulo = buscar_enlace_por_texto(
+        driver, URL_COLECCION_ESTADISTICAS_MINERAS, "inversion minera"
+    )
+    print(f"Publicación encontrada: {titulo} -> {url_detalle}")
+
+    driver.get(url_detalle)
+
+    boton = WebDriverWait(driver, TIMEOUT).until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, "a.btn.btn--secondary.download"))
+    )
+
+    archivo_descargado = click_y_descargar(driver, carpeta_descarga, boton)
+
+    nombre_final = "Inversión Minera.xlsx"
+    mover_y_renombrar(archivo_descargado, RUTA_INVERSION_MINERA, nombre_final)
+
+
+# ------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------
+
+def main():
+    driver = crear_driver(CARPETA_DESCARGAS_TEMP)
+    try:
+        descargar_produccion_minera(driver, CARPETA_DESCARGAS_TEMP)
+        descargar_boletin_mensual(driver, CARPETA_DESCARGAS_TEMP)
+        descargar_inversion_minera(driver, CARPETA_DESCARGAS_TEMP)
+    finally:
+        driver.quit()
+
+
+if __name__ == "__main__":
+    main()
