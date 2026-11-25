@@ -1,0 +1,257 @@
+# -*- coding: utf-8 -*-
+"""
+Arma un dashboard HTML (Plotly) a partir de "ESG Core F.xlsx" con los mismos
+gráficos que antes se armaban a mano mes a mes en el PPT "ESG BU - F" y en
+"Reporte Mensual ESG.xlsm": cobertura ESG, ESG Scorecard, distribución de
+rating, rating summary/momentum, riesgos (carbono/reputacional/gobierno),
+inversión temática, peores contribuyentes y controversias -- pero ahora con
+la serie histórica completa en vez de una foto de un solo mes.
+
+Se corre manualmente cada vez que se actualiza "ESG Core F.xlsx".
+"""
+
+import os
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+
+# ---------------------------------------------------------------------------
+# RUTAS -- ajustar según corresponda
+# ---------------------------------------------------------------------------
+
+ARCHIVO_ESG_CORE = r"Z:\Mesa de Inversiones\Bottom-Up\2 Proceso de Inversión Renta Fija\Corporates - Emisiones\Crédito - BU\3. ESG\9. ESG Manager - MSCI\2. Reportes\Comité Mensual\1. Portfolio Summary Reports\ESG Core F.xlsx"
+ARCHIVO_DASHBOARD = os.path.join(os.path.dirname(ARCHIVO_ESG_CORE), "ESG Core F - Dashboard.html")
+
+NAVY, CYAN, YELLOW = "#1E2E6E", "#00AECB", "#E3E829"
+PALETA = [NAVY, CYAN, YELLOW, "#8893C4", "#7FD9E6", "#B0855B", "#C0392B"]
+RATINGS_ORDEN = ["AAA", "AA", "A", "BBB", "BB", "B", "CCC", "Not Rated"]
+
+# ---------------------------------------------------------------------------
+# estilo -- un solo lugar para que todos los gráficos se vean igual
+# ---------------------------------------------------------------------------
+
+
+def estilizar(fig, titulo, nota=None, altura=380):
+    fig.update_layout(
+        title=dict(text=titulo, font=dict(size=16, color=NAVY, family="Arial")),
+        template="plotly_white", height=altura,
+        font=dict(family="Arial", size=12, color="#333"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(t=70, b=40, l=50, r=20),
+        colorway=PALETA,
+    )
+    if nota:
+        fig.add_annotation(text=nota, xref="paper", yref="paper", x=0, y=-0.22,
+                            showarrow=False, font=dict(size=10, color="#777"), align="left")
+    return fig
+
+
+def tabla_html(df, titulo, nota=None, max_filas=25):
+    bloque = f'<div class="card"><h2>{titulo}</h2>'
+    if nota:
+        bloque += f'<p class="nota">{nota}</p>'
+    if df.empty:
+        bloque += '<p class="nota">Sin datos todavía.</p></div>'
+        return bloque
+    bloque += df.head(max_filas).to_html(index=False, classes="tabla", border=0, na_rep="")
+    bloque += "</div>"
+    return bloque
+
+
+def leer_hoja(xl, hoja):
+    try:
+        return pd.read_excel(xl, sheet_name=hoja)
+    except ValueError:
+        return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# datos
+# ---------------------------------------------------------------------------
+
+xl = pd.ExcelFile(ARCHIVO_ESG_CORE)
+mv_coverage = leer_hoja(xl, "MV_Coverage")
+scorecard = leer_hoja(xl, "ESG_Scorecard")
+rating_dist = leer_hoja(xl, "Rating_Distribution")
+rating_summary = leer_hoja(xl, "Rating_Summary")
+rating_momentum = leer_hoja(xl, "Rating_Momentum")
+risk_metrics = leer_hoja(xl, "Risk_Metrics")
+tematica_resumen = leer_hoja(xl, "Tematica_Resumen")
+tematica_detalle = leer_hoja(xl, "Tematica_Detalle")
+peores = leer_hoja(xl, "Peores_Contribuyentes")
+cobertura = leer_hoja(xl, "Cobertura_Holdings")
+controversias = leer_hoja(xl, "Controversias")
+
+graficos = []  # bloques de html, en el orden en que se arman
+
+# ---------------------------------------------------------------------------
+# 1) Cobertura ESG de holdings (Integra vs Ex_Integra) -- reemplaza el R1:Y21
+#    de la hoja "BD1_S" de Reporte Mensual ESG.xlsm
+# ---------------------------------------------------------------------------
+
+if not cobertura.empty:
+    fig = px.line(cobertura.sort_values("Fecha"), x="Fecha", y="Cobertura_pct",
+                   color="AfpGrupo", facet_col="Fondo", markers=True,
+                   labels={"Cobertura_pct": "% cubierto", "Fecha": ""})
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_layout(yaxis_tickformat=".0%")
+    estilizar(fig, "Cobertura ESG de Holdings -- Integra vs Resto de AFPs",
+              "% del AUM de cada Fondo con cobertura MSCI, por grupo de AFP. Fuente: Analisis BD mensual.")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 2) ESG Scorecard -- Portfolio vs Benchmark en el tiempo
+# ---------------------------------------------------------------------------
+
+if not scorecard.empty:
+    sc = scorecard[scorecard["Variante"] == "Base"].melt(
+        id_vars=["Fecha", "Fondo", "Metrica"], value_vars=["Portfolio", "Benchmark"],
+        var_name="Serie", value_name="Puntaje")
+    fig = px.line(sc.sort_values("Fecha"), x="Fecha", y="Puntaje", color="Serie",
+                   line_dash="Serie", facet_col="Fondo", facet_row="Metrica", markers=True,
+                   labels={"Fecha": ""})
+    fig.update_yaxes(matches=None)
+    estilizar(fig, "ESG Scorecard -- Portfolio vs Benchmark", altura=760,
+              nota="Puntaje MSCI (0-10) por fondo. Fuente: MSCI Portfolio Report mensual.")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 3) MV Coverage -- % de valor de mercado cubierto por MSCI, por categoría
+# ---------------------------------------------------------------------------
+
+if not mv_coverage.empty:
+    mvc = mv_coverage[(mv_coverage["Variante"] == "Base") & (mv_coverage["Serie"] == "Portfolio")]
+    fig = px.line(mvc.sort_values("Fecha"), x="Fecha", y="Cobertura_pct", color="Categoria",
+                   facet_col="Fondo", markers=True, labels={"Cobertura_pct": "% cubierto", "Fecha": ""})
+    fig.update_yaxes(tickformat=".0%")
+    estilizar(fig, "Market Value Coverage -- % cubierto por MSCI",
+              "Qué parte del portafolio tiene dato MSCI para cada categoría ESG. Serie Portfolio.")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 4) Rating Distribution -- composición por banda de rating, último mes
+# ---------------------------------------------------------------------------
+
+if not rating_dist.empty:
+    ultima = rating_dist["Fecha"].max()
+    rd = rating_dist[(rating_dist["Fecha"] == ultima) & (rating_dist["Variante"] == "Base")
+                       & (rating_dist["Dimension"] == "Overall")]
+    fig = px.bar(rd, x="Rating", y="Total", facet_col="Fondo",
+                  category_orders={"Rating": RATINGS_ORDEN}, labels={"Total": "% del portafolio"})
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_traces(marker_color=NAVY)
+    estilizar(fig, "ESG Ratings Distribution",
+              f"Distribución por banda de rating MSCI, {ultima:%b-%Y}.")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 5) Rating Summary y Rating Momentum -- evolución de la composición
+# ---------------------------------------------------------------------------
+
+for df_rs, titulo, nota in [
+    (rating_summary, "Rating Summary -- Líder / Promedio / Rezagado / No Cubierto",
+     "Participación del Portfolio por categoría de rating ESG a lo largo del tiempo."),
+    (rating_momentum, "Rating Momentum -- Mejora / Estable / Empeora / Sin Rating",
+     "Participación del Portfolio por tendencia de rating ESG a lo largo del tiempo."),
+]:
+    if df_rs.empty:
+        continue
+    base = df_rs[df_rs["Variante"] == "Base"]
+    fig = px.area(base.sort_values("Fecha"), x="Fecha", y="Portfolio_Total", color="Categoria",
+                   facet_col="Fondo", groupnorm="fraction", labels={"Portfolio_Total": "", "Fecha": ""})
+    fig.update_yaxes(tickformat=".0%")
+    estilizar(fig, titulo, nota)
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 6) Riesgos -- Carbon/Agua (Environmental), Reputacional, Gobierno
+# ---------------------------------------------------------------------------
+
+if not risk_metrics.empty:
+    ultima = risk_metrics["Fecha"].max()
+    for grupo, titulo in [
+        ("Environmental Risk", "Riesgo Ambiental (Carbono y Agua)"),
+        ("Reputational Risk", "Riesgo Reputacional"),
+        ("Governance Risk", "Riesgo de Gobierno Corporativo"),
+    ]:
+        rm = risk_metrics[(risk_metrics["Fecha"] == ultima) & (risk_metrics["Variante"] == "Base")
+                            & (risk_metrics["Grupo"] == grupo)]
+        if rm.empty:
+            continue
+        rm = rm.melt(id_vars=["Fondo", "Metrica"], value_vars=["Portfolio", "Benchmark"],
+                      var_name="Serie", value_name="Valor")
+        fig = px.bar(rm, x="Metrica", y="Valor", color="Serie", barmode="group", facet_col="Fondo",
+                      labels={"Valor": "", "Metrica": ""})
+        fig.update_xaxes(tickangle=25)
+        estilizar(fig, titulo, f"Portfolio vs Benchmark, {ultima:%b-%Y}.", altura=420)
+        graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 7) Inversión Temática
+# ---------------------------------------------------------------------------
+
+if not tematica_resumen.empty:
+    fig = px.line(tematica_resumen.sort_values("Fecha"), x="Fecha", y="Inv_MMUSD", color="Categoria",
+                   markers=True, labels={"Inv_MMUSD": "USD MM", "Fecha": ""})
+    estilizar(fig, "Inversión Temática -- evolución",
+              "Bonos con etiqueta (Social/Verde) y Fondos Mutuos SFDR (art. 8 y 9).")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+if not tematica_detalle.empty:
+    ultima = tematica_detalle["Fecha"].max()
+    td = tematica_detalle[(tematica_detalle["Fecha"] == ultima) & (~tematica_detalle["Es_Total"])]
+    fig = px.bar(td, x="Emisor", y="AUM_MMUSD", color="Clase", labels={"AUM_MMUSD": "USD MM"})
+    estilizar(fig, "Inversión Temática -- detalle por emisor", f"{ultima:%b-%Y}.")
+    graficos.append(fig.to_html(full_html=False, include_plotlyjs=False))
+
+# ---------------------------------------------------------------------------
+# 8) Peores Contribuyentes y Controversias -- se muestran como tabla
+# ---------------------------------------------------------------------------
+
+if not peores.empty:
+    ultima = peores["Fecha"].max()
+    tabla = (peores[peores["Fecha"] == ultima]
+             .sort_values("Score")[["Fondo", "Afp", "Nombre", "Factor", "Rating", "Weight", "Score", "ESG"]]
+             .head(20))
+    tabla["Weight"] = (tabla["Weight"] * 100).round(2)
+    graficos.append(tabla_html(tabla, "Peores Contribuyentes al Rating ESG",
+                                 f"Menor Score primero, {ultima:%b-%Y}. Weight en %."))
+
+graficos.append(tabla_html(
+    controversias.sort_values("Fecha", ascending=False) if not controversias.empty else controversias,
+    "Controversias ASG", "Watchlist mantenida a mano en la hoja Controversias de ESG Core F.xlsx."))
+
+# ---------------------------------------------------------------------------
+# armar y guardar el html
+# ---------------------------------------------------------------------------
+
+html = f"""<!DOCTYPE html>
+<html lang="es"><head>
+<meta charset="utf-8">
+<title>ESG Core F - Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+  body {{ font-family: Arial, sans-serif; background:#f4f5f8; margin:0; padding:24px; color:#222; }}
+  h1 {{ color:{NAVY}; margin-bottom:4px; }}
+  .subt {{ color:#666; margin-top:0; margin-bottom:24px; }}
+  .card {{ background:#fff; border-radius:10px; padding:16px 20px; margin-bottom:20px;
+           box-shadow:0 1px 4px rgba(0,0,0,.08); }}
+  .card h2 {{ font-size:16px; color:{NAVY}; margin:0 0 4px 0; }}
+  .nota {{ color:#777; font-size:12px; margin:0 0 10px 0; }}
+  table.tabla {{ border-collapse:collapse; width:100%; font-size:12px; }}
+  table.tabla th {{ background:{NAVY}; color:#fff; padding:6px 8px; text-align:left; }}
+  table.tabla td {{ padding:5px 8px; border-bottom:1px solid #eee; }}
+  table.tabla tr:nth-child(even) {{ background:#fafafa; }}
+</style>
+</head><body>
+<h1>ESG Core F -- Dashboard</h1>
+<p class="subt">Generado a partir de ESG Core F.xlsx -- {pd.Timestamp.today():%d/%m/%Y}</p>
+{"".join(f'<div class="card">{g}</div>' if not g.startswith('<div class="card">') else g for g in graficos)}
+</body></html>
+"""
+
+with open(ARCHIVO_DASHBOARD, "w", encoding="utf-8") as f:
+    f.write(html)
+
+print(f"Listo: {ARCHIVO_DASHBOARD}")
